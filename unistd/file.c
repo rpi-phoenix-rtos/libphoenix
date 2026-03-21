@@ -49,27 +49,6 @@ WRAP_ERRNO_DEF(int, dup2, (int fildes, int fildes2), (fildes, fildes2))
 WRAP_ERRNO_DEF(int, fsync, (int fildes), (fildes))
 
 
-static int open_consoleTraceDone;
-
-
-static void open_consoleTrace(const char *stage, int err)
-{
-	char buff[64];
-	int len;
-
-	if (open_consoleTraceDone != 0) {
-		return;
-	}
-
-	len = snprintf(buff, sizeof(buff), "open: console %s %d\n", stage, err);
-	if (len > 0) {
-		(void)write(STDERR_FILENO, buff, (size_t)len);
-	}
-
-	open_consoleTraceDone = 1;
-}
-
-
 ssize_t read(int fildes, void *buf, size_t nbyte)
 {
 	return SET_ERRNO(sys_read(fildes, buf, nbyte, -1));
@@ -367,17 +346,11 @@ int open(const char *filename, int oflag, ...)
 
 	if (oflag & (O_WRONLY | O_RDWR)) {
 		if ((err = stat(filename, &st)) < 0) {
-			if ((errno != ENOENT) && (strcmp(filename, "/dev/console") == 0)) {
-				open_consoleTrace("stat", errno);
+			if (errno != ENOENT) {
 				return err;
 			}
-			if (errno != ENOENT)
-				return err;
 		}
 		else if (S_ISDIR(st.st_mode)) {
-			if (strcmp(filename, "/dev/console") == 0) {
-				open_consoleTrace("isdir", EISDIR);
-			}
 			return SET_ERRNO(-EISDIR);
 		}
 	}
@@ -385,19 +358,12 @@ int open(const char *filename, int oflag, ...)
 	/* allow_missing_leaf = 1 -> open() may be creating a file */
 	canonical = resolve_path(filename, NULL, 1, 1);
 	if (canonical == NULL) {
-		if (strcmp(filename, "/dev/console") == 0) {
-			open_consoleTrace("resolve", errno);
-		}
 		return -1; /* errno set by resolve_path */
 	}
 
 	do
 		err = sys_open(canonical, oflag, mode);
 	while (err == -EINTR);
-
-	if (strcmp(filename, "/dev/console") == 0) {
-		open_consoleTrace("sys_open", -err);
-	}
 
 	free(canonical);
 	return SET_ERRNO(err);

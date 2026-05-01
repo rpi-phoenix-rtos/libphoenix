@@ -26,6 +26,7 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/ioctl.h>
+#include <sys/debug.h>
 #include <termios.h>
 
 #include "posix/utils.h"
@@ -338,13 +339,18 @@ int open(const char *filename, int oflag, ...)
 	mode_t mode = 0;
 	int err;
 	char *canonical;
+	int traceConsole = (filename != NULL) && (strcmp(filename, "/dev/console") == 0);
 
 	/* FIXME: handle varargs properly */
 	va_start(ap, oflag);
 	mode = va_arg(ap, mode_t);
 	va_end(ap);
 
-	if (oflag & (O_WRONLY | O_RDWR)) {
+	if (traceConsole != 0) {
+		debug("open: console enter\n");
+	}
+
+	if ((oflag & (O_WRONLY | O_RDWR)) && (traceConsole == 0)) {
 		if ((err = stat(filename, &st)) < 0) {
 			if (errno != ENOENT) {
 				return err;
@@ -354,18 +360,40 @@ int open(const char *filename, int oflag, ...)
 			return SET_ERRNO(-EISDIR);
 		}
 	}
-
-	/* allow_missing_leaf = 1 -> open() may be creating a file */
-	canonical = resolve_path(filename, NULL, 1, 1);
-	if (canonical == NULL) {
-		return -1; /* errno set by resolve_path */
+	else if (((oflag & (O_WRONLY | O_RDWR)) != 0) && (traceConsole != 0)) {
+		debug("open: console stat skipped\n");
 	}
 
-	do
+	/* allow_missing_leaf = 1 -> open() may be creating a file */
+	if (traceConsole != 0) {
+		debug("open: console resolve enter\n");
+	}
+	canonical = resolve_path(filename, NULL, 1, 1);
+	if (canonical == NULL) {
+		if (traceConsole != 0) {
+			debug("open: console resolve failed\n");
+		}
+		return -1; /* errno set by resolve_path */
+	}
+	if (traceConsole != 0) {
+		debug("open: console resolve done\n");
+	}
+
+	do {
+		if (traceConsole != 0) {
+			debug("open: console sys_open enter\n");
+		}
 		err = sys_open(canonical, oflag, mode);
+		if (traceConsole != 0) {
+			debug("open: console sys_open done\n");
+		}
+	}
 	while (err == -EINTR);
 
 	free(canonical);
+	if (traceConsole != 0) {
+		debug("open: console done\n");
+	}
 	return SET_ERRNO(err);
 }
 

@@ -25,7 +25,14 @@
 #include <sys/msg.h>
 #include <sys/stat.h>
 #include <sys/file.h>
+#include <sys/debug.h>
 #include <posix/utils.h>
+
+
+/* TODO(TD-14): trace flag set by resolve_path() when input is
+ * "/dev/console", read by _resolve_abspath / _readlink_abs / safe_lookup
+ * to print per-step debug() lines. Remove once TD-14 is closed. */
+static int _td14_resolve_trace = 0;
 
 
 static struct {
@@ -40,8 +47,16 @@ static int _resolve_abspath(char *path, char *result, int resolve_last_symlink, 
 static int safe_lookup(const char *name, oid_t *file, oid_t *dev)
 {
 	int err;
+	if (_td14_resolve_trace != 0) {
+		debug("resolve: lookup pre name=");
+		debug(name);
+		debug("\n");
+	}
 	while ((err = lookup(name, file, dev)) == -EINTR)
 		;
+	if (_td14_resolve_trace != 0) {
+		debug("resolve: lookup ret\n");
+	}
 
 	return err;
 }
@@ -213,9 +228,19 @@ static int _resolve_abspath(char *path, char *result, int resolve_last_symlink, 
 		 */
 		const size_t readlink_max_len = p - path;
 
+		if (_td14_resolve_trace != 0) {
+			debug("resolve: node enter result=");
+			debug(result);
+			debug("\n");
+		}
+
 		/* (hackish) save some messsaging by not calling lstat, but directly readlink() and checking error code */
 		int errsave = errno;
 		ssize_t symlink_len = _readlink_abs(result, path, readlink_max_len);
+
+		if (_td14_resolve_trace != 0) {
+			debug("resolve: node done\n");
+		}
 
 		if (symlink_len < 0) {
 			if (errno == EINVAL) { /* not a symlink */
@@ -328,11 +353,26 @@ char *resolve_path(const char *path, char *resolved_path, int resolve_last_symli
 		resolved_path = alloc_resolved_path;
 	}
 
+	/* TODO(TD-14): trace per-component lookups for "/dev/console". */
+	if ((path != NULL) && (strcmp(path, "/dev/console") == 0)) {
+		_td14_resolve_trace = 1;
+		debug("resolve: enter /dev/console\n");
+	}
+
 	if (_resolve_abspath(path_copy, resolved_path, resolve_last_symlink, allow_missing_leaf) < 0) {
 		/* proper errno set by resolve_path */
+		if (_td14_resolve_trace != 0) {
+			debug("resolve: abspath_err\n");
+			_td14_resolve_trace = 0;
+		}
 		free(alloc_resolved_path);
 		free(path_copy);
 		return NULL;
+	}
+
+	if (_td14_resolve_trace != 0) {
+		debug("resolve: abspath_ok\n");
+		_td14_resolve_trace = 0;
 	}
 
 	free(path_copy);
@@ -476,6 +516,9 @@ static ssize_t _readlink_abs(const char *path, char *buf, size_t bufsiz)
 
 	int ret = safe_lookup(path, &oid, NULL);
 	if (ret < 0) {
+		if (_td14_resolve_trace != 0) {
+			debug("resolve: readlink lookup_err\n");
+		}
 		return SET_ERRNO(ret);
 	}
 
@@ -485,7 +528,17 @@ static ssize_t _readlink_abs(const char *path, char *buf, size_t bufsiz)
 		.i.attr.type = atMode
 	};
 
+	if (_td14_resolve_trace != 0) {
+		char buf[64];
+		snprintf(buf, sizeof(buf), "resolve: oid port=%u id=%llu\n",
+				(unsigned int)oid.port, (unsigned long long)oid.id);
+		debug(buf);
+		debug("resolve: readlink getattr_pre\n");
+	}
 	ret = msgSend(oid.port, &msg);
+	if (_td14_resolve_trace != 0) {
+		debug("resolve: readlink getattr_ret\n");
+	}
 	if (ret != EOK) {
 		return SET_ERRNO(ret);
 	}

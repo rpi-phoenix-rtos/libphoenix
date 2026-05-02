@@ -14,7 +14,6 @@
  */
 
 #include <stdlib.h>
-#include <sys/debug.h>
 
 
 extern void (*__preinit_array_start[])(void);
@@ -80,9 +79,7 @@ __attribute__((noreturn)) void _startc(void (*cleanup)(void), int argc, char **a
 	environ = env;
 	argv_progname = *argv;
 
-	debug("crt0: startc enter\n");
 	_libc_init();
-	debug("crt0: libc init done\n");
 
 	/* cleanup function is not NULL when the dynamic linker is used */
 	if (cleanup != NULL) {
@@ -90,9 +87,7 @@ __attribute__((noreturn)) void _startc(void (*cleanup)(void), int argc, char **a
 	}
 
 	atexit(_fini_array);
-	debug("crt0: init array enter\n");
 	_init_array();
-	debug("crt0: main enter\n");
 
 	exit(main(argc, argv));
 }

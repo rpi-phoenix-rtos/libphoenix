@@ -22,6 +22,7 @@
 #include <unistd.h>
 #include <libgen.h>
 #include <sys/msg.h>
+#include <sys/debug.h>
 #include <sys/file.h>
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -337,6 +338,7 @@ int open(const char *filename, int oflag, ...)
 	struct stat st;
 	mode_t mode = 0;
 	int err;
+	int traceConsole;
 	char *canonical;
 
 	/* FIXME: handle varargs properly */
@@ -344,8 +346,19 @@ int open(const char *filename, int oflag, ...)
 	mode = va_arg(ap, mode_t);
 	va_end(ap);
 
+	traceConsole = (filename != NULL) && (strcmp(filename, "/dev/console") == 0);
+	if (traceConsole != 0) {
+		debug("open: console enter\n");
+	}
+
 	if (oflag & (O_WRONLY | O_RDWR)) {
+		if (traceConsole != 0) {
+			debug("open: console stat enter\n");
+		}
 		if ((err = stat(filename, &st)) < 0) {
+			if (traceConsole != 0) {
+				debug("open: console stat err\n");
+			}
 			if (errno != ENOENT) {
 				return err;
 			}
@@ -353,18 +366,43 @@ int open(const char *filename, int oflag, ...)
 		else if (S_ISDIR(st.st_mode)) {
 			return SET_ERRNO(-EISDIR);
 		}
+		else if (traceConsole != 0) {
+			debug("open: console stat ok\n");
+		}
 	}
 
-	/* allow_missing_leaf = 1 -> open() may be creating a file */
-	canonical = resolve_path(filename, NULL, 1, 1);
+	/* TODO(TD-14-console-open-fastpath): /dev/console is a direct devfs
+	 * alias during Pi 4 bring-up. Avoid a second full symlink walk here;
+	 * stat() above already proved the existing node is not a directory. */
+	if (traceConsole != 0) {
+		debug("open: console resolve skip\n");
+		canonical = strdup(filename);
+	}
+	else {
+		/* allow_missing_leaf = 1 -> open() may be creating a file */
+		canonical = resolve_path(filename, NULL, 1, 1);
+	}
 	if (canonical == NULL) {
+		if (traceConsole != 0) {
+			debug("open: console resolve failed\n");
+		}
 		return -1; /* errno set by resolve_path */
+	}
+	if (traceConsole != 0) {
+		debug("open: console resolve ok\n");
 	}
 
 	do {
+		if (traceConsole != 0) {
+			debug("open: console sys_open enter\n");
+		}
 		err = sys_open(canonical, oflag, mode);
 	}
 	while (err == -EINTR);
+
+	if (traceConsole != 0) {
+		debug("open: console sys_open done\n");
+	}
 
 	free(canonical);
 	return SET_ERRNO(err);

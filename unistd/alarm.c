@@ -27,8 +27,11 @@ static struct {
 	char stack[1024] __attribute__((aligned(8)));
 	handle_t cond, lock;
 	time_t wakeup;
-	int tid;
-} alarm_common;
+	handle_t tid;
+	pthread_once_t once_control;
+} alarm_common = {
+	.once_control = PTHREAD_ONCE_INIT
+};
 
 
 __attribute__((noreturn))
@@ -58,22 +61,27 @@ static void alarm_thread(void *arg)
 }
 
 
-static void alarm_spawnThread(void)
+static void alarm_initThread(void)
 {
+	alarm_common.wakeup = 0;
 	beginthreadex(alarm_thread, priority(-1), alarm_common.stack, sizeof(alarm_common.stack), NULL, &alarm_common.tid);
+}
+
+
+static void alarm_init_once(void)
+{
+	mutexCreate(&alarm_common.lock);
+	condCreate(&alarm_common.cond);
+	alarm_initThread();
+	/* There is no need to handle the mutex state during fork(), as Phoenix's mutexes are freed in a child process and no races can happen here */
+	pthread_atfork(NULL, NULL, alarm_initThread);
 }
 
 
 unsigned int alarm(unsigned int seconds)
 {
 	time_t now, previous;
-
-	if (!alarm_common.tid) {
-		mutexCreate(&alarm_common.lock);
-		condCreate(&alarm_common.cond);
-		alarm_spawnThread();
-		pthread_atfork(NULL, NULL, alarm_spawnThread);
-	}
+	pthread_once(&alarm_common.once_control, alarm_init_once);
 
 	mutexLock(alarm_common.lock);
 	previous = alarm_common.wakeup;

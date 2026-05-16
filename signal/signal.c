@@ -15,7 +15,6 @@
 
 #include <signal.h>
 #include <sys/threads.h>
-#include <phoenix/signal.h>
 #include <unistd.h>
 #include <errno.h>
 #include <stdlib.h>
@@ -33,12 +32,12 @@ struct {
 } signal_common;
 
 
-const int _signals_phx2posix[] = { 0, SIGKILL, SIGSEGV, SIGILL, SIGFPE, SIGHUP, SIGINT, SIGQUIT, SIGTRAP,
+const int _signals_phx2posix[NSIG] = { 0, SIGKILL, SIGSEGV, SIGILL, SIGFPE, SIGHUP, SIGINT, SIGQUIT, SIGTRAP,
 	SIGABRT, SIGEMT, SIGBUS, SIGSYS, SIGPIPE, SIGALRM, SIGTERM, SIGURG, SIGSTOP, SIGTSTP, SIGCONT, SIGCHLD,
 	SIGTTIN, SIGTTOU, SIGIO, SIGXCPU, SIGXFSZ, SIGVTALRM, SIGPROF, SIGWINCH, SIGINFO, SIGUSR1, SIGUSR2 };
 
 
-static const int _signals_posix2phx[] = { 0, 5, 6, 7, 3, 8, 9, 10, 4, 1, 11, 2, 12, 13, 14, 15, 16, 17, 18, 19,
+static const int _signals_posix2phx[NSIG] = { 0, 5, 6, 7, 3, 8, 9, 10, 4, 1, 11, 2, 12, 13, 14, 15, 16, 17, 18, 19,
 	20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31 };
 
 
@@ -147,18 +146,27 @@ void _signal_handler(int phxsig)
 
 int raise(int sig)
 {
+	if (sig < 0 || sig >= NSIG) {
+		return SET_ERRNO(-EINVAL);
+	}
 	return SET_ERRNO(sys_tkill(getpid(), gettid(), _signals_posix2phx[sig]));
 }
 
 
 int kill(pid_t pid, int sig)
 {
+	if (sig < 0 || sig >= NSIG) {
+		return SET_ERRNO(-EINVAL);
+	}
 	return SET_ERRNO(sys_tkill(pid, 0, _signals_posix2phx[sig]));
 }
 
 
 int killpg(pid_t pgrp, int sig)
 {
+	if (sig < 0 || sig >= NSIG) {
+		return SET_ERRNO(-EINVAL);
+	}
 	if (pgrp == 0) {
 		pgrp = -getpgrp();
 	}
@@ -423,6 +431,9 @@ int sigdelset(sigset_t *set, int signum)
 
 int signalPostPosix(int pid, int tid, int signal)
 {
+	if (signal < 0 || signal >= NSIG) {
+		return -EINVAL;
+	}
 	return signalPost(pid, tid, _signals_posix2phx[signal]);
 }
 
@@ -443,5 +454,5 @@ void _signals_init(void)
 	mutexCreate(&signal_common.lock);
 
 	/* Register userspace handler */
-	signalHandle(_signal_trampoline, 0, 0xffffffffUL);
+	signalHandle(_signal_trampoline);
 }

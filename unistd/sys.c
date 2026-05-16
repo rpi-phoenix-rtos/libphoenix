@@ -226,10 +226,15 @@ static char **argv_gather(const char *arg, va_list args)
 		return NULL;
 
 	argv[argc++] = (char *)arg;
+	if (arg == NULL) {
+		return argv;
+	}
 
 	while ((argv[argc++] = va_arg(args, char *)) != NULL) {
 		if (argc == max) {
-			if ((res = realloc(argv, max *= 2)) == NULL) {
+			max *= 2;
+			res = realloc(argv, max * sizeof(char *));
+			if (res == NULL) {
 				free(argv);
 				return NULL;
 			}
@@ -287,6 +292,14 @@ int execle(const char *path, const char *arg, ...)
 
 	va_start(args, arg);
 	argv = argv_gather(arg, args);
+	va_end(args);
+
+	/* reinitialize args as it could have been invalidated by (partial) consumption by argv_gather */
+	va_start(args, arg);
+	const char *p = arg;
+	while (p != NULL) {
+		p = va_arg(args, const char *);
+	}
 	envp = va_arg(args, char **);
 	va_end(args);
 

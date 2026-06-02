@@ -337,6 +337,7 @@ int open(const char *filename, int oflag, ...)
 	struct stat st;
 	mode_t mode = 0;
 	int err;
+	int traceConsole;
 	char *canonical;
 
 	/* FIXME: handle varargs properly */
@@ -344,23 +345,36 @@ int open(const char *filename, int oflag, ...)
 	mode = va_arg(ap, mode_t);
 	va_end(ap);
 
+	traceConsole = (filename != NULL) && (strcmp(filename, "/dev/console") == 0);
+
 	if (oflag & (O_WRONLY | O_RDWR)) {
 		if ((err = stat(filename, &st)) < 0) {
-			if (errno != ENOENT)
+			if (errno != ENOENT) {
 				return err;
+			}
 		}
 		else if (S_ISDIR(st.st_mode)) {
 			return SET_ERRNO(-EISDIR);
 		}
 	}
 
-	/* allow_missing_leaf = 1 -> open() may be creating a file */
-	canonical = resolve_path(filename, NULL, 1, 1);
-	if (canonical == NULL)
+	/* TODO(TD-14-console-open-fastpath): /dev/console is a direct devfs
+	 * alias during Pi 4 bring-up. Avoid a second full symlink walk here;
+	 * stat() above already proved the existing node is not a directory. */
+	if (traceConsole != 0) {
+		canonical = strdup(filename);
+	}
+	else {
+		/* allow_missing_leaf = 1 -> open() may be creating a file */
+		canonical = resolve_path(filename, NULL, 1, 1);
+	}
+	if (canonical == NULL) {
 		return -1; /* errno set by resolve_path */
+	}
 
-	do
+	do {
 		err = sys_open(canonical, oflag, mode);
+	}
 	while (err == -EINTR);
 
 	free(canonical);

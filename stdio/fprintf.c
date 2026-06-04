@@ -34,7 +34,13 @@ struct feed_ctx_s {
 	size_t total;
 	int error;
 	enum { feed_hStream = 0, feed_hDescriptor } hType;
-	char buff[16];
+	/* Output is flushed every (sizeof(buff) - 1) chars. On a buffered stream
+	 * these chunks recombine in the stream buffer, but on an unbuffered stream
+	 * (e.g. stderr) or a raw fd (vdprintf), each chunk becomes its own write(),
+	 * which a per-write-record console renders on a separate line — a 16-byte
+	 * buffer shredded log lines into 15-char columns. Size it to hold a typical
+	 * line so a normal message is emitted in a single write. */
+	char buff[256];
 };
 /* clang-format on */
 

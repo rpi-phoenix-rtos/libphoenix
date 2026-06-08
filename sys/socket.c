@@ -58,18 +58,8 @@ static int socksrvcall(msg_t *msg)
 	oid_t oid;
 	int err;
 
-	if (lookup(PATH_SOCKSRV, NULL, &oid) < 0) {
-		/* The literal "/dev/netsocket" lookup fails before the root fs has
-		 * registered "/" (the NFS-root early-boot case: the NFS server needs
-		 * a socket to mount the export, yet it IS what will register "/").
-		 * The socket node already exists in devfs (lwip create_dev's it via
-		 * the "devfs" named port, stripping the /dev/ prefix), so reach it the
-		 * same way through that named port — exactly like create_dev and
-		 * flashsrv's flash_oidResolve. Pure fallback: once "/" exists the
-		 * literal lookup above succeeds and behaviour is unchanged. */
-		if ((err = lookup("devfs/netsocket", NULL, &oid)) < 0)
-			return SET_ERRNO(err);
-	}
+	if ((err = lookup(PATH_SOCKSRV, NULL, &oid)) < 0)
+		return SET_ERRNO(err);
 	if ((err = msgSend(oid.port, msg)) < 0)
 		return SET_ERRNO(err);
 	return 0;

@@ -147,6 +147,11 @@ extern double pow(double base, double exponent);
 extern double sqrt(double x);
 
 
+/* Returns sqrt(x*x + y*y) without spurious overflow/underflow. */
+extern double hypot(double x, double y);
+extern float hypotf(float x, float y);
+
+
 /* Rounding and remainder functions */
 
 

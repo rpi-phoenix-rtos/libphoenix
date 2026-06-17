@@ -169,3 +169,40 @@ float sqrtf(float x)
 	return (float)sqrt(x);
 #endif
 }
+
+
+/* sqrt(x*x + y*y) without spurious overflow/underflow (scale by the larger). */
+double hypot(double x, double y)
+{
+	double t;
+
+	x = fabs(x);
+	y = fabs(y);
+
+	if ((isinf(x) != 0) || (isinf(y) != 0)) {
+		return INFINITY;
+	}
+
+	if ((isnan(x) != 0) || (isnan(y) != 0)) {
+		return NAN;
+	}
+
+	if (x < y) {
+		t = x;
+		x = y;
+		y = t;
+	}
+
+	if (x == 0.0) {
+		return 0.0;
+	}
+
+	t = y / x;
+	return x * sqrt(1.0 + (t * t));
+}
+
+
+float hypotf(float x, float y)
+{
+	return (float)hypot((double)x, (double)y);
+}

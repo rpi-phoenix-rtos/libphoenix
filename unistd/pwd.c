@@ -14,6 +14,7 @@
  */
 
 #include <ctype.h>
+#include <errno.h>
 #include <pwd.h>
 #include <limits.h>
 #include <stdlib.h>
@@ -130,8 +131,86 @@ struct passwd *getpwuid(uid_t uid)
 }
 
 
+/* Pack a passwd entry's strings into the caller-provided buffer and point pwd's
+ * fields into it (POSIX-reentrant form). Returns 0 on success, ERANGE if buffer
+ * is too small. */
+static int pw_pack(const struct passwd *src, struct passwd *pwd, char *buffer,
+		   size_t bufsize, struct passwd **result)
+{
+	size_t need, off = 0;
+	const char *name = (src->pw_name != NULL) ? src->pw_name : "";
+	const char *passwd = (src->pw_passwd != NULL) ? src->pw_passwd : "";
+	const char *gecos = (src->pw_gecos != NULL) ? src->pw_gecos : "";
+	const char *dir = (src->pw_dir != NULL) ? src->pw_dir : "";
+	const char *shell = (src->pw_shell != NULL) ? src->pw_shell : "";
+
+	need = strlen(name) + strlen(passwd) + strlen(gecos) + strlen(dir) + strlen(shell) + 5;
+	if (need > bufsize) {
+		*result = NULL;
+		return ERANGE;
+	}
+
+#define PW_COPY(field, str) \
+	do { \
+		(field) = buffer + off; \
+		strcpy(buffer + off, (str)); \
+		off += strlen(str) + 1; \
+	} while (0)
+
+	PW_COPY(pwd->pw_name, name);
+	PW_COPY(pwd->pw_passwd, passwd);
+	PW_COPY(pwd->pw_gecos, gecos);
+	PW_COPY(pwd->pw_dir, dir);
+	PW_COPY(pwd->pw_shell, shell);
+#undef PW_COPY
+
+	pwd->pw_uid = src->pw_uid;
+	pwd->pw_gid = src->pw_gid;
+
+	*result = pwd;
+	return 0;
+}
+
+
 int getpwnam_r(const char *name, struct passwd *pwd, char *buffer,
 	       size_t bufsize, struct passwd **result)
 {
-	return -1;
+	struct passwd *src;
+
+	if (name == NULL || pwd == NULL || result == NULL) {
+		if (result != NULL) {
+			*result = NULL;
+		}
+		return EINVAL;
+	}
+
+	src = getpwby(name, NULL);
+	if (src == NULL) {
+		*result = NULL;
+		return 0; /* not found is not an error per POSIX */
+	}
+
+	return pw_pack(src, pwd, buffer, bufsize, result);
+}
+
+
+int getpwuid_r(uid_t uid, struct passwd *pwd, char *buffer,
+	       size_t bufsize, struct passwd **result)
+{
+	struct passwd *src;
+
+	if (pwd == NULL || result == NULL) {
+		if (result != NULL) {
+			*result = NULL;
+		}
+		return EINVAL;
+	}
+
+	src = getpwby(NULL, &uid);
+	if (src == NULL) {
+		*result = NULL;
+		return 0; /* not found is not an error per POSIX */
+	}
+
+	return pw_pack(src, pwd, buffer, bufsize, result);
 }

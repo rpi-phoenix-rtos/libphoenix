@@ -45,6 +45,9 @@ extern struct passwd *getpwuid(uid_t uid);
 extern int getpwnam_r(const char *name, struct passwd *pwd, char *buffer, size_t bufsize, struct passwd **result);
 
 
+extern int getpwuid_r(uid_t uid, struct passwd *pwd, char *buffer, size_t bufsize, struct passwd **result);
+
+
 #ifdef __cplusplus
 }
 #endif

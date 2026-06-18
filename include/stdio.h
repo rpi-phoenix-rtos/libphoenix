@@ -186,6 +186,13 @@ extern void setbuf(FILE *stream, char *buffer);
 extern int setvbuf(FILE *stream, char *buffer, int mode, size_t size);
 
 
+/* BSD convenience: switch a stream to line-buffered mode. */
+static inline void setlinebuf(FILE *stream)
+{
+	(void)setvbuf(stream, NULL, _IOLBF, 0);
+}
+
+
 /* Creates a temporary file in binary update mode (wb+). */
 extern FILE *tmpfile(void);
 

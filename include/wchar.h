@@ -48,6 +48,18 @@ extern int wcscmp(const wchar_t *ws1, const wchar_t *ws2);
 extern size_t wcslen(const wchar_t *ws);
 
 
+extern wchar_t *wcsncpy(wchar_t *dest, const wchar_t *src, size_t n);
+extern wchar_t *wcscpy(wchar_t *dest, const wchar_t *src);
+extern wchar_t *wcscat(wchar_t *dest, const wchar_t *src);
+extern wchar_t *wcschr(const wchar_t *ws, wchar_t wc);
+extern wchar_t *wcsrchr(const wchar_t *ws, wchar_t wc);
+extern int wcsncmp(const wchar_t *ws1, const wchar_t *ws2, size_t n);
+extern wchar_t *wmemcpy(wchar_t *dest, const wchar_t *src, size_t n);
+extern wchar_t *wmemmove(wchar_t *dest, const wchar_t *src, size_t n);
+extern wchar_t *wmemset(wchar_t *ws, wchar_t wc, size_t n);
+extern int wmemcmp(const wchar_t *ws1, const wchar_t *ws2, size_t n);
+
+
 /* TODO: missing function definition */
 extern size_t wcstombs(char *__restrict s, const wchar_t *__restrict pwcs, size_t n);
 

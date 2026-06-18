@@ -13,9 +13,9 @@
  * %LICENSE%
  */
 
-/* TODO: add implementations for remaining wchar functions */
 #include <wchar.h>
 #include <stdlib.h>
+#include <string.h>
 
 
 wchar_t *wcsncpy(wchar_t *dest, const wchar_t *src, size_t n)
@@ -53,6 +53,61 @@ int mbtowc(wchar_t *pwc, const char *s, size_t n)
 	}
 
 	return 1;
+}
+
+
+/* C/POSIX locale: every non-null byte is a complete 1-byte character. */
+int mblen(const char *s, size_t n)
+{
+	if (s == NULL) {
+		return 0; /* stateless encoding */
+	}
+	if (n == 0) {
+		return -1;
+	}
+
+	return (*s == '\0') ? 0 : 1;
+}
+
+
+/* C/POSIX locale: each byte maps 1:1 to a wchar_t. */
+size_t mbstowcs(wchar_t *pwcs, const char *s, size_t n)
+{
+	size_t i;
+
+	if (pwcs == NULL) {
+		return strlen(s);
+	}
+	for (i = 0; i < n; i++) {
+		pwcs[i] = (wchar_t)(unsigned char)s[i];
+		if (s[i] == '\0') {
+			return i;
+		}
+	}
+
+	return i;
+}
+
+
+/* C/POSIX locale: each wchar_t in [0, 255] maps 1:1 to a byte. */
+size_t wcstombs(char *s, const wchar_t *pwcs, size_t n)
+{
+	size_t i;
+
+	if (s == NULL) {
+		for (i = 0; pwcs[i] != L'\0'; i++) {
+		}
+		return i;
+	}
+	for (i = 0; i < n; i++) {
+		if (pwcs[i] == L'\0') {
+			s[i] = '\0';
+			return i;
+		}
+		s[i] = (char)pwcs[i];
+	}
+
+	return i;
 }
 
 

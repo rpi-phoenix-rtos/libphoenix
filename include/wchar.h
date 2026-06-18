@@ -60,7 +60,6 @@ extern wchar_t *wmemset(wchar_t *ws, wchar_t wc, size_t n);
 extern int wmemcmp(const wchar_t *ws1, const wchar_t *ws2, size_t n);
 
 
-/* TODO: missing function definition */
 extern size_t wcstombs(char *__restrict s, const wchar_t *__restrict pwcs, size_t n);
 
 

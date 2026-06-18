@@ -204,7 +204,16 @@ char *tmpnam(char *str)
 	return NULL;
 }
 
+/* C/POSIX locale: a wchar_t in [0, 255] maps 1:1 to a single byte. */
 int wctomb(char *str, wchar_t wchar)
 {
-	return 0;
+	if (str == NULL) {
+		return 0; /* stateless encoding, no shift sequences */
+	}
+	if ((unsigned long)wchar > 0xffUL) {
+		return -1; /* not representable in the C locale */
+	}
+	*str = (char)wchar;
+
+	return 1;
 }

@@ -50,6 +50,7 @@ extern "C" {
 #define _SC_CLK_TCK    3
 #define _SC_PAGESIZE   4
 #define _SC_PAGE_SIZE  _SC_PAGESIZE /* spec. 1170 compatibility */
+#define _SC_LINE_MAX   5
 
 #define _POSIX_NO_TRUNC             1
 #define _POSIX_ASYNC_IO             -1 /* Async IO not implemented. */

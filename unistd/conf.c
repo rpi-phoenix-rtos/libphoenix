@@ -35,6 +35,8 @@ long sysconf(int name)
 		case _SC_PAGESIZE:
 			/* _SC_PAGE_SIZE is synonym */
 			return _PAGE_SIZE;
+		case _SC_LINE_MAX:
+			return _POSIX2_LINE_MAX;
 		default:
 			errno = EINVAL;
 			return -1;

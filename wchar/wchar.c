@@ -136,6 +136,18 @@ wchar_t *wcscat(wchar_t *dest, const wchar_t *src)
 }
 
 
+size_t wcslen(const wchar_t *ws)
+{
+	const wchar_t *s = ws;
+
+	while (*s != L'\0') {
+		s++;
+	}
+
+	return (size_t)(s - ws);
+}
+
+
 wchar_t *wcschr(const wchar_t *ws, wchar_t wc)
 {
 	for (; *ws != L'\0'; ws++) {

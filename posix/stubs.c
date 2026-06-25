@@ -177,6 +177,22 @@ struct group *getgrnam(const char *name)
 }
 
 
+void setgrent(void)
+{
+}
+
+
+void endgrent(void)
+{
+}
+
+
+struct group *getgrent(void)
+{
+	return NULL;
+}
+
+
 int initgroups(const char *user, gid_t group)
 {
 	return 0;

@@ -45,6 +45,15 @@ struct group *getgrgid(gid_t gid);
 int setgroups(size_t size, const gid_t *list);
 
 
+void setgrent(void);
+
+
+void endgrent(void);
+
+
+struct group *getgrent(void);
+
+
 #ifdef __cplusplus
 }
 #endif

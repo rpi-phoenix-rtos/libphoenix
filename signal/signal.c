@@ -125,6 +125,7 @@ static int _signal_ismutable(int sig)
 void _signal_handler(int phxsig)
 {
 	int sig;
+	sighandler_t handler;
 
 	if ((phxsig < 0) || (phxsig >= NSIG)) {
 		/* Don't know what to do, ignore it */
@@ -137,8 +138,37 @@ void _signal_handler(int phxsig)
 	/* POSIX: sa_mask should be ORed with current process signal mask */
 	signalMask(signal_common.sigset[sig], signal_common.sigset[sig]);
 
+	/*
+	 * Resolve the disposition. A NULL or sentinel (SIG_DFL/SIG_IGN/SIG_ERR)
+	 * value must never be branch-called. NULL is the common case: portable
+	 * code does memset(&act, 0, sizeof act) and relies on the Linux
+	 * convention SIG_DFL == 0, but here SIG_DFL is (sighandler_t)-2, so a
+	 * zeroed sa_handler is stored verbatim by sigaction(). Treat any such
+	 * value as a request for the default disposition (which is non-NULL for
+	 * every signal 1..NSIG-1), so we never jump to address 0.
+	 */
+	handler = signal_common.sightab[sig];
+	if ((handler == NULL) || (handler == SIG_DFL)) {
+		if (handler == NULL) {
+			/* A zeroed sa_handler reached the table: this is a "should never
+			 * happen" path (a caller installed a NULL handler, typically via
+			 * memset(&act,0,...) under the Linux SIG_DFL==0 assumption). Name
+			 * the signal so the offending sigaction() caller can be found,
+			 * then apply the default disposition rather than branch to 0. */
+			fprintf(stderr, "libphoenix: NULL handler for signal %d, applying default disposition\n", sig);
+		}
+		handler = _signal_getdefault(sig);
+	}
+	else if (handler == SIG_IGN) {
+		handler = _signal_ignore;
+	}
+	else if (handler == SIG_ERR) {
+		/* Should never reach sightab; fall back to default rather than fault */
+		handler = _signal_getdefault(sig);
+	}
+
 	/* Invoke handler */
-	(signal_common.sightab[sig])(sig);
+	handler(sig);
 
 	/* oldmask kept on stack and restored by sigreturn */
 }

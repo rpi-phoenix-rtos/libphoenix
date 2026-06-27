@@ -117,6 +117,44 @@ enum {
 	FF1 = 1 << 28,
 };
 
+/* POSIX requires these c_oflag symbolic constants to be usable in #if
+ * preprocessor expressions. The values above are enum constants (not visible to
+ * the preprocessor), so ported software that guards them — e.g. xterm's
+ * `#ifndef OPOST / #define OPOST 0` — would silently drop OPOST|ONLCR and emit a
+ * raw \n (the xterm CR/LF "staircase"). Mirror each as a self-referential macro:
+ * the preprocessor now sees them defined, and the token still resolves to the
+ * enum constant (same value). Same rationale as the baud-rate macros below. */
+#define OPOST  OPOST
+#define OLCUC  OLCUC
+#define ONLCR  ONLCR
+#define OCRNL  OCRNL
+#define ONOCR  ONOCR
+#define ONLRET ONLRET
+#define OFILL  OFILL
+#define NLDLY  NLDLY
+#define NL0    NL0
+#define NL1    NL1
+#define CRDLY  CRDLY
+#define CR0    CR0
+#define CR1    CR1
+#define CR2    CR2
+#define CR3    CR3
+#define TABDLY TABDLY
+#define TAB0   TAB0
+#define TAB1   TAB1
+#define TAB2   TAB2
+#define TAB3   TAB3
+#define XTABS  XTABS
+#define BSDLY  BSDLY
+#define BS0    BS0
+#define BS1    BS1
+#define VTDLY  VTDLY
+#define VT0    VT0
+#define VT1    VT1
+#define FFDLY  FFDLY
+#define FF0    FF0
+#define FF1    FF1
+
 
 /**
  * baud rate macros with values corresponding to actual bps

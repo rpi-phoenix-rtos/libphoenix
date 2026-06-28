@@ -266,11 +266,26 @@ int rename(const char *old, const char *new)
 
 	/* FIXME: add renaming dirs support */
 
-	if ((err = link(old, new)) < 0)
+	err = link(old, new);
+	if ((err < 0) && (errno == EEXIST)) {
+		/* POSIX rename() replaces an existing destination, but the link()-based
+		 * emulation cannot create a name that already exists. Drop the
+		 * destination and retry. Not atomic (Phoenix has no rename op), but it
+		 * lets the common save-via-temp-file-then-rename idiom (e.g. Window
+		 * Maker writing its defaults) overwrite instead of failing EEXIST.
+		 * Gated on EEXIST so a link failure for any other reason never destroys
+		 * the destination. */
+		if (unlink(new) == 0) {
+			err = link(old, new);
+		}
+	}
+	if (err < 0) {
 		return err;
+	}
 
-	if ((err = unlink(old)) < 0)
+	if ((err = unlink(old)) < 0) {
 		return err;
+	}
 
 	return 0;
 }

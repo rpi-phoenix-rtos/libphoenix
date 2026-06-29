@@ -745,7 +745,16 @@ char *basename(char *path)
 	if (last < path)
 		return "/";
 
-	*(last + 1) = '\0';
+	/* Only write the terminator when trailing slashes were actually stripped
+	 * (last+1 still points at a '/'). For an already-terminated path — the common
+	 * case, e.g. "tags" with no trailing slash — last+1 is the existing '\0', so
+	 * the write is redundant AND would fault if `path` is a read-only string
+	 * literal. GNU basename (<string.h>) never modifies its argument, and callers
+	 * (e.g. Xt/xedit) legitimately pass literals; the unconditional write here
+	 * caused an EL0 permission-fault Data Abort writing to .rodata. The strlen()
+	 * above guarantees last+1 (<= path+len) is readable, so the test is safe. */
+	if (*(last + 1) != '\0')
+		*(last + 1) = '\0';
 
 	while ((last >= path) && (*last != '/'))
 		--last;

@@ -114,7 +114,8 @@ extern void *malloc(size_t size);
 extern void *realloc(void *ptr, size_t size);
 
 
-#define reallocf realloc /* TODO: free on fail */
+/* Like realloc(), but frees the original block if the resize fails (BSD). */
+extern void *reallocf(void *ptr, size_t size);
 
 
 /* Return total size of chunk allocated by a malloc. */

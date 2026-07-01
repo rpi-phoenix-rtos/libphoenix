@@ -137,11 +137,21 @@ int stat(const char *path, struct stat *buf)
 }
 
 
+/* Process-global file mode creation mask. Initialised to the POSIX-conventional
+ * 022. NOTE: not thread-safe; POSIX umask() is per-process and inherently racy.
+ * The stored mask is not yet consulted by mkdir()/creat()/open() here (open()'s
+ * O_CREAT path lives in a separate file); umask() itself only has to store and
+ * return the value. The obvious application point would be `mode & ~_umask` in
+ * mkdir() above. */
+static mode_t _umask = 022;
+
+
 mode_t umask(mode_t cmask)
 {
-	/* TODO: add proper umask() implementation */
-	/* Don't restrict process file mode mask for now */
-	return 0;
+	mode_t prev = _umask;
+
+	_umask = cmask & 0777;
+	return prev;
 }
 
 

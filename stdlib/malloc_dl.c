@@ -591,6 +591,20 @@ void *realloc(void *ptr, size_t size)
 }
 
 
+void *reallocf(void *ptr, size_t size)
+{
+	void *p = realloc(ptr, size);
+
+	/* BSD reallocf(): free the original block if the resize fails. Guard on
+	 * size != 0 because realloc(ptr, 0) already frees ptr and returns NULL,
+	 * so freeing again here would be a double-free. */
+	if (p == NULL && size != 0)
+		free(ptr);
+
+	return p;
+}
+
+
 void _malloc_init(void)
 {
 	int i;

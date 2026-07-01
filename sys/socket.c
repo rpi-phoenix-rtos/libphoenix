@@ -216,18 +216,97 @@ ssize_t recvmsg(int socket, struct msghdr *msg, int flags)
 }
 
 
+/* Static table of common IANA services. Port numbers are kept in host byte
+ * order here for readability; the returned servent's s_port is converted to
+ * network byte order per POSIX. This works without a filesystem; /etc/services
+ * parsing could be layered on top as a fallback later. */
+struct servtab {
+	char *name;
+	int port;
+	char *proto;
+};
+
+static const struct servtab servtab[] = {
+	{ "ftp-data", 20, "tcp" },
+	{ "ftp", 21, "tcp" },
+	{ "ssh", 22, "tcp" },
+	{ "ssh", 22, "udp" },
+	{ "telnet", 23, "tcp" },
+	{ "smtp", 25, "tcp" },
+	{ "time", 37, "tcp" },
+	{ "time", 37, "udp" },
+	{ "domain", 53, "tcp" },
+	{ "domain", 53, "udp" },
+	{ "bootps", 67, "udp" },
+	{ "bootpc", 68, "udp" },
+	{ "tftp", 69, "udp" },
+	{ "http", 80, "tcp" },
+	{ "pop3", 110, "tcp" },
+	{ "sunrpc", 111, "tcp" },
+	{ "sunrpc", 111, "udp" },
+	{ "ntp", 123, "udp" },
+	{ "imap", 143, "tcp" },
+	{ "snmp", 161, "udp" },
+	{ "https", 443, "tcp" },
+	{ "https", 443, "udp" },
+	{ "submission", 587, "tcp" },
+	{ "nfs", 2049, "tcp" },
+	{ "nfs", 2049, "udp" },
+	{ "dict", 2628, "tcp" },
+	{ NULL, 0, NULL }
+};
+
+
+static char *servent_aliases[] = { NULL };
+
+
+/* NOTE: not thread-safe (static storage), matching gethostbyname()/POSIX. */
+static struct servent servent_result;
+
+
+static struct servent *servent_fill(const struct servtab *e)
+{
+	servent_result.s_name = e->name;
+	servent_result.s_aliases = servent_aliases;
+	servent_result.s_port = htons(e->port);
+	servent_result.s_proto = e->proto;
+	return &servent_result;
+}
+
+
 struct servent *getservbyname(const char *name, const char *proto)
 {
-	debug(__func__);
-	debug(" : not implemented\n");
+	const struct servtab *e;
+
+	if (name == NULL)
+		return NULL;
+
+	for (e = servtab; e->name != NULL; ++e) {
+		if (strcmp(e->name, name) != 0)
+			continue;
+		if (proto != NULL && strcmp(e->proto, proto) != 0)
+			continue;
+		return servent_fill(e);
+	}
+
 	return NULL;
 }
 
 
 struct servent *getservbyport(int port, const char *proto)
 {
-	debug(__func__);
-	debug(" : not implemented\n");
+	const struct servtab *e;
+	/* POSIX: port is in network byte order. */
+	int hport = ntohs((uint16_t)port);
+
+	for (e = servtab; e->name != NULL; ++e) {
+		if (e->port != hport)
+			continue;
+		if (proto != NULL && strcmp(e->proto, proto) != 0)
+			continue;
+		return servent_fill(e);
+	}
+
 	return NULL;
 }
 

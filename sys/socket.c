@@ -311,19 +311,85 @@ struct servent *getservbyport(int port, const char *proto)
 }
 
 
+/* NOTE: not thread-safe (static storage), matching POSIX gethostby* semantics. */
+static struct {
+	struct hostent ent;
+	char name[NI_MAXHOST];
+	struct in_addr addr;
+	char *addr_list[2];
+	char *aliases[1];
+} hostent_result;
+
+
+static struct hostent *hostent_fill(const char *name, const struct in_addr *addr)
+{
+	hostent_result.addr = *addr;
+	hostent_result.addr_list[0] = (char *)&hostent_result.addr;
+	hostent_result.addr_list[1] = NULL;
+	hostent_result.aliases[0] = NULL;
+
+	strlcpy(hostent_result.name, name, sizeof(hostent_result.name));
+
+	hostent_result.ent.h_name = hostent_result.name;
+	hostent_result.ent.h_aliases = hostent_result.aliases;
+	hostent_result.ent.h_addrtype = AF_INET;
+	hostent_result.ent.h_length = sizeof(struct in_addr);
+	hostent_result.ent.h_addr_list = hostent_result.addr_list;
+
+	return &hostent_result.ent;
+}
+
+
 struct hostent *gethostbyname(const char *name)
 {
-	debug(__func__);
-	debug(" : not implemented\n");
-	return NULL;
+	struct addrinfo hints = { 0 };
+	struct addrinfo *res;
+	struct hostent *ret;
+
+	if (name == NULL) {
+		h_errno = HOST_NOT_FOUND;
+		return NULL;
+	}
+
+	hints.ai_family = AF_INET;
+
+	if (getaddrinfo(name, NULL, &hints, &res) != 0) {
+		h_errno = HOST_NOT_FOUND;
+		return NULL;
+	}
+
+	if (res == NULL || res->ai_addr == NULL) {
+		freeaddrinfo(res);
+		h_errno = HOST_NOT_FOUND;
+		return NULL;
+	}
+
+	ret = hostent_fill(name, &((struct sockaddr_in *)res->ai_addr)->sin_addr);
+	freeaddrinfo(res);
+
+	return ret;
 }
 
 
 struct hostent *gethostbyaddr(const void *addr, socklen_t len, int type)
 {
-	debug(__func__);
-	debug(" : not implemented\n");
-	return NULL;
+	struct sockaddr_in sin = { 0 };
+	char host[NI_MAXHOST];
+
+	if (addr == NULL || type != AF_INET || len != sizeof(struct in_addr)) {
+		h_errno = HOST_NOT_FOUND;
+		return NULL;
+	}
+
+	sin.sin_family = AF_INET;
+	memcpy(&sin.sin_addr, addr, sizeof(struct in_addr));
+
+	if (getnameinfo((struct sockaddr *)&sin, sizeof(sin), host, sizeof(host), NULL, 0, 0) != 0) {
+		h_errno = HOST_NOT_FOUND;
+		return NULL;
+	}
+
+	return hostent_fill(host, (const struct in_addr *)addr);
 }
 
 

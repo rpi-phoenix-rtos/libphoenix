@@ -63,7 +63,18 @@ extern int wmemcmp(const wchar_t *ws1, const wchar_t *ws2, size_t n);
 extern size_t wcstombs(char *__restrict s, const wchar_t *__restrict pwcs, size_t n);
 
 
-/* TODO: missing function definition */
+extern int mbsinit(const mbstate_t *ps);
+
+
+extern size_t mbrtowc(wchar_t *__restrict pwc, const char *__restrict s, size_t n, mbstate_t *__restrict ps);
+
+
+extern size_t wcrtomb(char *__restrict s, wchar_t wc, mbstate_t *__restrict ps);
+
+
+extern size_t mbsrtowcs(wchar_t *__restrict dst, const char **__restrict src, size_t len, mbstate_t *__restrict ps);
+
+
 extern size_t wcsrtombs(char *__restrict dst, const wchar_t **__restrict src, size_t len, mbstate_t *__restrict ps);
 
 

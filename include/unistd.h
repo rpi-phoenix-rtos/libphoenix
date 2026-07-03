@@ -170,6 +170,12 @@ extern int fsync(int fd);
 extern void sync(void);
 
 
+/* Also declared in <sys/random.h>; glibc/BSD exposes getentropy() via <unistd.h>
+ * too, and code that relies on that (e.g. libICE's arc4random_buf) fails with an
+ * implicit-declaration error without this. Same prototype as <sys/random.h>. */
+extern int getentropy(void *buf, size_t buflen);
+
+
 extern int chdir(const char *path);
 
 

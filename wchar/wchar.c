@@ -97,6 +97,10 @@ size_t wcstombs(char *s, const wchar_t *pwcs, size_t n)
 
 	if (s == NULL) {
 		for (i = 0; pwcs[i] != L'\0'; i++) {
+			if ((unsigned long)pwcs[i] > 0xffUL) {
+				errno = EILSEQ;
+				return (size_t)-1;
+			}
 		}
 		return i;
 	}
@@ -104,6 +108,10 @@ size_t wcstombs(char *s, const wchar_t *pwcs, size_t n)
 		if (pwcs[i] == L'\0') {
 			s[i] = '\0';
 			return i;
+		}
+		if ((unsigned long)pwcs[i] > 0xffUL) {
+			errno = EILSEQ;
+			return (size_t)-1;
 		}
 		s[i] = (char)pwcs[i];
 	}

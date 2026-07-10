@@ -117,13 +117,14 @@ enum {
 	FF1 = 1 << 28,
 };
 
-/* POSIX requires these c_oflag symbolic constants to be usable in #if
- * preprocessor expressions. The values above are enum constants (not visible to
- * the preprocessor), so ported software that guards them — e.g. xterm's
- * `#ifndef OPOST / #define OPOST 0` — would silently drop OPOST|ONLCR and emit a
- * raw \n (the xterm CR/LF "staircase"). Mirror each as a self-referential macro:
- * the preprocessor now sees them defined, and the token still resolves to the
- * enum constant (same value). Same rationale as the baud-rate macros below. */
+/* Ported software guards these c_oflag constants with #ifdef/#ifndef — e.g.
+ * xterm's `#ifndef OPOST / #define OPOST 0` — but the values above are enum
+ * constants, invisible to the preprocessor, so such a guard would redefine OPOST
+ * to 0 and drop OPOST|ONLCR (the xterm CR/LF "staircase" of raw \n). Mirror each
+ * as a self-referential macro so the symbol is *defined* for #ifdef/#ifndef and
+ * still expands to the enum constant in C code. (This does not make them usable
+ * in #if arithmetic — a self-referential macro resolves to 0 there.) Same
+ * rationale as the baud-rate macros below. */
 #define OPOST  OPOST
 #define OLCUC  OLCUC
 #define ONLCR  ONLCR

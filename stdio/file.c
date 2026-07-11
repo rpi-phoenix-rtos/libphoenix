@@ -58,62 +58,53 @@ static struct {
 
 static int string2mode(const char *mode)
 {
-	int next_char = 1;
+	int flags, extra = 0, plus = 0;
+	size_t i;
 
 	if (mode == NULL) {
 		return -1;
 	}
-	else if (mode[0] == 'r') {
-		if (mode[next_char] == 'b') {
-			next_char += 1;
-		}
 
-		if (mode[next_char] == '\0') {
-			return O_RDONLY;
-		}
-		else if (mode[next_char] == '+') {
-			return O_RDWR;
-		}
-		else if (mode[next_char] == 'c') {
-			/* glibc extension - ignored */
-			return O_RDONLY;
-		}
-		else {
-			return -1;
-		}
-	}
-	else if (mode[0] == 'w') {
-		if (mode[next_char] == 'b') {
-			next_char += 1;
-		}
-
-		if (mode[next_char] == '\0') {
-			return O_WRONLY | O_CREAT | O_TRUNC;
-		}
-		else if (mode[next_char] == '+') {
-			return O_RDWR | O_CREAT | O_TRUNC;
-		}
-		else {
-			return -1;
-		}
-	}
-	else if (mode[0] == 'a') {
-		if (mode[next_char] == 'b') {
-			next_char += 1;
-		}
-
-		if (mode[next_char] == '\0') {
-			return O_WRONLY | O_CREAT | O_APPEND;
-		}
-		else if (mode[next_char] == '+') {
-			return O_RDWR | O_CREAT | O_APPEND;
-		}
-		else {
-			return -1;
+	/* Scan the modifiers after the base character, in any order/position:
+	 * '+' upgrades to read+write; 'b'/'t' (binary/text) have no meaning on
+	 * POSIX; 'c'/'m' are glibc hints we ignore; 'x' maps to O_EXCL and 'e' to
+	 * O_CLOEXEC. Anything else is an invalid mode string. */
+	for (i = 1; mode[i] != '\0'; i++) {
+		switch (mode[i]) {
+			case '+':
+				plus = 1;
+				break;
+			case 'b':
+			case 't':
+			case 'c':
+			case 'm':
+				break;
+			case 'x':
+				extra |= O_EXCL;
+				break;
+			case 'e':
+				extra |= O_CLOEXEC;
+				break;
+			default:
+				return -1;
 		}
 	}
 
-	return -1;
+	switch (mode[0]) {
+		case 'r':
+			flags = plus ? O_RDWR : O_RDONLY;
+			break;
+		case 'w':
+			flags = (plus ? O_RDWR : O_WRONLY) | O_CREAT | O_TRUNC;
+			break;
+		case 'a':
+			flags = (plus ? O_RDWR : O_WRONLY) | O_CREAT | O_APPEND;
+			break;
+		default:
+			return -1;
+	}
+
+	return flags | extra;
 }
 
 

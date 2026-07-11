@@ -40,6 +40,10 @@ extern void *memchr(const void *str, int c, size_t n);
 extern void *memrchr(const void *s, int c, size_t n);
 
 
+/* Finds the first occurrence of the byte string needle (needlelen bytes) in haystack (haystacklen bytes). */
+extern void *memmem(const void *haystack, size_t haystacklen, const void *needle, size_t needlelen);
+
+
 /* Compares the first n bytes of str1 and str2. */
 extern int memcmp(const void *str1, const void *str2, size_t n);
 

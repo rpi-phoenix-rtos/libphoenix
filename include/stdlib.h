@@ -288,6 +288,10 @@ extern int mkstemp(char *templt);
 extern char *mkdtemp(char *templt);
 
 
+/* Parse comma-separated suboptions from a string (e.g. mount -o options) */
+extern int getsubopt(char **optionp, char *const *tokens, char **valuep);
+
+
 /* register a funtion to run at process termination */
 extern int atexit(void (*func)(void));
 

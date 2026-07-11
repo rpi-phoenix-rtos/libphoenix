@@ -17,12 +17,15 @@
 #include <stddef.h>
 
 
-/* Phoenix supports the C/POSIX locale only. CODESET is reported as UTF-8: the
- * byte I/O path is 8-bit clean and UTF-8 passes through transparently, which is
- * what the terminal/editor ports (ncurses, mc, nano) expect. The remaining
- * items are the standard C-locale strings and match strftime()/localeconv(). */
+/* Phoenix supports the C/POSIX locale only. CODESET reports ASCII
+ * (ANSI_X3.4-1968), not UTF-8: libphoenix's multibyte layer (mbrtowc/mbtowc/
+ * wcrtomb) maps each byte 1:1 to a wchar_t with no UTF-8 decoder, so ncurses/mc/
+ * vim — which read CODESET to decide whether to enter multibyte mode — must stay
+ * on the single-byte path or they misrender. Switch this to "UTF-8" only once the
+ * restartable wide-char set actually decodes UTF-8. The remaining items are the
+ * standard C-locale strings and match strftime()/localeconv(). */
 static const char *const c_locale[_NL_ITEM_COUNT] = {
-	[CODESET] = "UTF-8",
+	[CODESET] = "ANSI_X3.4-1968",
 	[D_T_FMT] = "%a %b %e %H:%M:%S %Y",
 	[D_FMT] = "%m/%d/%y",
 	[T_FMT] = "%H:%M:%S",

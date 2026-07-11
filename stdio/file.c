@@ -61,7 +61,7 @@ static int string2mode(const char *mode)
 	int flags, extra = 0, plus = 0;
 	size_t i;
 
-	if (mode == NULL) {
+	if (mode == NULL || mode[0] == '\0') {
 		return -1;
 	}
 

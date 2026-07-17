@@ -5,8 +5,8 @@
  *
  * Architecture dependent part (arch/armv7a)
  *
- * Copyright 2017, 2018 Phoenix Systems
- * Author: Pawel Pisarczyk, Aleksander Kaminski
+ * Copyright 2017, 2018, 2026 Phoenix Systems
+ * Author: Pawel Pisarczyk, Aleksander Kaminski, Michal Lach
  *
  * This file is part of Phoenix-RTOS.
  *
@@ -40,10 +40,6 @@
 #define __IEEE754_SQRTF
 #define __ieee754_sqrtf(x) ({ float a = (x); __asm__ volatile ("vsqrt.f32 %0, %1" : "=t"(a) : "t"(a)); a; })
 #endif
-
-
-#define _PAGE_SIZE 0x1000
-#define SIZE_PAGE  _Pragma("GCC warning \"'SIZE_PAGE' is deprecated. Use _PAGE_SIZE from arch.h or PAGE_SIZE from limits.h (POSIX only)\"") _PAGE_SIZE
 
 #define __LIBPHOENIX_ARCH_TLS_SUPPORTED
 

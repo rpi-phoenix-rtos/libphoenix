@@ -38,10 +38,13 @@ typedef unsigned long u_long;
 
 typedef struct pthread_attr_t {
 	void *stackaddr;
-	int policy;
+	int schedpolicy;
 	int priority;
-	int detached;
+	int detachstate;
+	int inheritsched;
 	size_t stacksize;
+	size_t guardsize;
+	/* scope is always PTHREAD_SCOPE_SYSTEM */
 } pthread_attr_t;
 
 typedef uintptr_t pthread_t;

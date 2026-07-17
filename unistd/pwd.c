@@ -5,123 +5,260 @@
  *
  * Password related functions
  *
- * Copyright 2018, 2021 Phoenix Systems
- * Author: Jan Sikorski, Mateusz Niewiadomski
+ * Copyright 2018, 2021, 2026 Phoenix Systems
+ * Author: Jan Sikorski, Mateusz Niewiadomski, Julian Uziembło
  *
  * This file is part of Phoenix-RTOS.
  *
  * %LICENSE%
  */
 
-#include <ctype.h>
+#include <stdbool.h>
 #include <errno.h>
+#include <ctype.h>
 #include <pwd.h>
 #include <limits.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
-#include <dirent.h>
 
 #define PASSWD_PATH "/etc/passwd"
 
-struct passwd pwnam;
-char pw_name[NAME_MAX];
-char intstr[16];
-char pw_gecos[128];
-char pw_dir[PATH_MAX];
-char pw_shell[PATH_MAX];
-char pw_passwd[128];
+
+static struct {
+	FILE *pwdfp;
+	struct passwd pwentry;
+	char pwentrybuf[NAME_MAX + 128 /* pw_passwd */ + 128 /* pw_gecos */ + PATH_MAX + PATH_MAX];
+} pwd_common;
 
 
-static int readpwentry(FILE *fp, char *pwentry, unsigned int maxlen, unsigned int islast)
+static bool pwenteof(FILE *fp)
 {
-	int c = 0;
-	unsigned int i = 0, isbad = 0;
+	int c;
+	if (feof(fp)) {
+		return true;
+	}
 
-	do {
-		c = fgetc(fp);
-		if (c == ':' || c == '\n' || c == EOF)
-			break;
+	while ((c = fgetc(fp)) == '\n')
+		;
 
-		if (i < maxlen - 1)
-			pwentry[i++] = c;
-		else
-			isbad = 1;
-	} while (!isbad);
-	pwentry[i] = '\0';
+	if (c == EOF) {
+		return true;
+	}
+	ungetc(c, fp);
 
-	if ((c == EOF || c == '\n') && !islast)
-		isbad = 1;
-
-	return isbad;
+	return false;
 }
 
 
-static inline int readuid(int readpwentry, uid_t *uid)
+/* read field is terminated with '\0' */
+static int readpwfield(FILE *fp, char *pwentry, size_t maxlen, bool islast)
 {
-	int i, err = readpwentry;
-	*uid = strtoul(intstr, NULL, 10);
+	int c = 0;
+	size_t i = 0;
 
-	if (readpwentry == 0) {
-		for (i = 0; intstr[i] != '\0'; ++i) {
-			if (!isdigit(intstr[i])) {
-				err = 1;
-				break;
-			}
+	if (maxlen == 0) {
+		return -ERANGE;
+	}
+
+	for (;;) {
+		c = fgetc(fp);
+		if (c == ':' || c == '\n' || c == EOF) {
+			break;
+		}
+
+		if (i < maxlen - 1) {
+			pwentry[i++] = c;
+		}
+		else {
+			return -ERANGE;
 		}
 	}
+
+	if ((c == EOF || c == '\n') && !islast) {
+		if (c != EOF) {
+			ungetc(c, fp);
+		}
+		return -EIO;
+	}
+
+	if (c != EOF && c != '\n' && islast) {
+		ungetc(c, fp);
+		return -EIO;
+	}
+
+	pwentry[i++] = '\0';
+
+	return i;
+}
+
+
+static int readid(char *buf, int *id)
+{
+	int i, err = 0;
+	unsigned long conv;
+	char *endp;
+
+	if (buf[0] == '\0') {
+		return -1;
+	}
+
+	for (i = 0; buf[i] != '\0'; ++i) {
+		if (!isdigit((unsigned char)buf[i])) {
+			return -1;
+		}
+	}
+
+	errno = 0;
+	conv = strtoul(buf, &endp, 10);
+	if (errno != 0 || endp == buf || conv > INT_MAX) {
+		return -1;
+	}
+
+	*id = conv;
 
 	return err;
 }
 
 
+/* reads full entry line into pwentry. returns 0 on success or __positive__ error code on error */
+static int readpwentryline(FILE *fp, struct passwd *pwd, char *buf, size_t bufsize)
+{
+	int c, n = 0, len, ret = 0, id;
+	char intstr[16];
+
+	do {
+		pwd->pw_name = buf;
+		len = readpwfield(fp, pwd->pw_name, bufsize, false);
+		if (len < 0) {
+			ret = -len;
+			break;
+		}
+		n += len;
+
+		pwd->pw_passwd = buf + n;
+		len = readpwfield(fp, pwd->pw_passwd, bufsize - n, false);
+		if (len < 0) {
+			ret = -len;
+			break;
+		}
+		n += len;
+
+		len = readpwfield(fp, intstr, sizeof(intstr), false);
+		if (len < 0) {
+			ret = -len;
+			break;
+		}
+		if (readid(intstr, &id) < 0) {
+			ret = EINVAL;
+			break;
+		}
+		pwd->pw_uid = (uid_t)id;
+
+		len = readpwfield(fp, intstr, sizeof(intstr), false);
+		if (len < 0) {
+			ret = -len;
+			break;
+		}
+		if (readid(intstr, &id) < 0) {
+			ret = EINVAL;
+			break;
+		}
+		pwd->pw_gid = (gid_t)id;
+
+		pwd->pw_gecos = buf + n;
+		len = readpwfield(fp, pwd->pw_gecos, bufsize - n, false);
+		if (len < 0) {
+			ret = -len;
+			break;
+		}
+		n += len;
+
+		pwd->pw_dir = buf + n;
+		len = readpwfield(fp, pwd->pw_dir, bufsize - n, false);
+		if (len < 0) {
+			ret = -len;
+			break;
+		}
+		n += len;
+
+		pwd->pw_shell = buf + n;
+		len = readpwfield(fp, pwd->pw_shell, bufsize - n, true);
+		if (len < 0) {
+			ret = -len;
+			break;
+		}
+	} while (0);
+
+	if (ret != 0) {
+		while ((c = fgetc(fp)) != EOF && c != '\n')
+			;
+	}
+
+	return ret;
+}
+
+
+static int getpwby_r(const char *name, uid_t *uid, struct passwd *pwd, char *buffer, size_t bufsize, struct passwd **result, bool skipOnErange)
+{
+	int ret = 0;
+	*result = NULL;
+
+	FILE *fp = fopen(PASSWD_PATH, "r");
+	if (fp == NULL) {
+		return errno;
+	}
+
+	while (!pwenteof(fp)) {
+		ret = readpwentryline(fp, pwd, buffer, bufsize);
+		if (ret != 0) {
+			if (ret == ERANGE && !skipOnErange) {
+				break;
+			}
+			else {
+				ret = 0;
+				continue;
+			}
+		}
+
+		if (name != NULL && strcmp(pwd->pw_name, name) == 0) {
+			*result = pwd;
+			break;
+		}
+
+		if (uid != NULL && pwd->pw_uid == *uid) {
+			*result = pwd;
+			break;
+		}
+	}
+
+	if (ferror(fp)) {
+		ret = EIO;
+	}
+
+	fclose(fp);
+	return ret;
+}
+
+
 static struct passwd *getpwby(const char *name, uid_t *uid)
 {
-	struct passwd *retpwnam = NULL;
-	FILE *fp = fopen(PASSWD_PATH, "r");
-
-	if (fp != NULL) {
-		pwnam.pw_name = pw_name;
-		pwnam.pw_dir = pw_dir;
-		pwnam.pw_gecos = pw_gecos;
-		pwnam.pw_shell = pw_shell;
-		pwnam.pw_passwd = pw_passwd;
-
-		do {
-			if (readpwentry(fp, pwnam.pw_name, NAME_MAX, 0))
-				break;
-			if (readpwentry(fp, pwnam.pw_passwd, sizeof(pw_passwd), 0))
-				break;
-			if (readuid(readpwentry(fp, intstr, sizeof(intstr), 0), &pwnam.pw_uid))
-				break;
-			if (readuid(readpwentry(fp, intstr, sizeof(intstr), 0), &pwnam.pw_gid))
-				break;
-			if (readpwentry(fp, pwnam.pw_gecos, sizeof(pw_gecos), 0))
-				break;
-			if (readpwentry(fp, pwnam.pw_dir, PATH_MAX, 0))
-				break;
-			if (readpwentry(fp, pwnam.pw_shell, PATH_MAX, 1))
-				break;
-
-			if (name != NULL && strcmp(pwnam.pw_name, name) == 0) {
-				retpwnam = &pwnam;
-				break;
-			}
-			else if (uid != NULL && pwnam.pw_uid == *uid) {
-				retpwnam = &pwnam;
-				break;
-			}
-		} while (!feof(fp));
-
-		fclose(fp);
+	struct passwd *result;
+	int ret = getpwby_r(name, uid, &pwd_common.pwentry, pwd_common.pwentrybuf, sizeof(pwd_common.pwentrybuf), &result, true);
+	if (ret != 0) {
+		errno = ret;
 	}
-	return retpwnam;
+	return result;
 }
 
 
 struct passwd *getpwnam(const char *name)
 {
-	return (name == NULL) ? NULL : getpwby(name, NULL);
+	if (name == NULL) {
+		errno = EINVAL;
+		return NULL;
+	}
+	return getpwby(name, NULL);
 }
 
 
@@ -131,86 +268,54 @@ struct passwd *getpwuid(uid_t uid)
 }
 
 
-/* Pack a passwd entry's strings into the caller-provided buffer and point pwd's
- * fields into it (POSIX-reentrant form). Returns 0 on success, ERANGE if buffer
- * is too small. */
-static int pw_pack(const struct passwd *src, struct passwd *pwd, char *buffer,
-		   size_t bufsize, struct passwd **result)
+int getpwnam_r(const char *name, struct passwd *pwd, char *buffer, size_t bufsize, struct passwd **result)
 {
-	size_t need, off = 0;
-	const char *name = (src->pw_name != NULL) ? src->pw_name : "";
-	const char *passwd = (src->pw_passwd != NULL) ? src->pw_passwd : "";
-	const char *gecos = (src->pw_gecos != NULL) ? src->pw_gecos : "";
-	const char *dir = (src->pw_dir != NULL) ? src->pw_dir : "";
-	const char *shell = (src->pw_shell != NULL) ? src->pw_shell : "";
-
-	need = strlen(name) + strlen(passwd) + strlen(gecos) + strlen(dir) + strlen(shell) + 5;
-	if (need > bufsize) {
+	if (name == NULL) {
 		*result = NULL;
-		return ERANGE;
+		return EINVAL;
 	}
-
-#define PW_COPY(field, str) \
-	do { \
-		(field) = buffer + off; \
-		strcpy(buffer + off, (str)); \
-		off += strlen(str) + 1; \
-	} while (0)
-
-	PW_COPY(pwd->pw_name, name);
-	PW_COPY(pwd->pw_passwd, passwd);
-	PW_COPY(pwd->pw_gecos, gecos);
-	PW_COPY(pwd->pw_dir, dir);
-	PW_COPY(pwd->pw_shell, shell);
-#undef PW_COPY
-
-	pwd->pw_uid = src->pw_uid;
-	pwd->pw_gid = src->pw_gid;
-
-	*result = pwd;
-	return 0;
+	return getpwby_r(name, NULL, pwd, buffer, bufsize, result, false);
 }
 
 
-int getpwnam_r(const char *name, struct passwd *pwd, char *buffer,
-	       size_t bufsize, struct passwd **result)
+int getpwuid_r(uid_t uid, struct passwd *pwd, char *buffer, size_t bufsize, struct passwd **result)
 {
-	struct passwd *src;
-
-	if (name == NULL || pwd == NULL || result == NULL) {
-		if (result != NULL) {
-			*result = NULL;
-		}
-		return EINVAL;
-	}
-
-	src = getpwby(name, NULL);
-	if (src == NULL) {
-		*result = NULL;
-		return 0; /* not found is not an error per POSIX */
-	}
-
-	return pw_pack(src, pwd, buffer, bufsize, result);
+	return getpwby_r(NULL, &uid, pwd, buffer, bufsize, result, false);
 }
 
 
-int getpwuid_r(uid_t uid, struct passwd *pwd, char *buffer,
-	       size_t bufsize, struct passwd **result)
+struct passwd *getpwent(void)
 {
-	struct passwd *src;
-
-	if (pwd == NULL || result == NULL) {
-		if (result != NULL) {
-			*result = NULL;
+	if (pwd_common.pwdfp == NULL) {
+		pwd_common.pwdfp = fopen(PASSWD_PATH, "r");
+		if (pwd_common.pwdfp == NULL) {
+			return NULL;
 		}
-		return EINVAL;
 	}
 
-	src = getpwby(NULL, &uid);
-	if (src == NULL) {
-		*result = NULL;
-		return 0; /* not found is not an error per POSIX */
-	}
+	/* skip malformed lines */
+	do {
+		if (pwenteof(pwd_common.pwdfp)) {
+			return NULL;
+		}
+	} while (readpwentryline(pwd_common.pwdfp, &pwd_common.pwentry, pwd_common.pwentrybuf, sizeof(pwd_common.pwentrybuf)) != 0);
 
-	return pw_pack(src, pwd, buffer, bufsize, result);
+	return &pwd_common.pwentry;
+}
+
+
+void endpwent(void)
+{
+	if (pwd_common.pwdfp != NULL) {
+		(void)fclose(pwd_common.pwdfp);
+		pwd_common.pwdfp = NULL;
+	}
+}
+
+
+void setpwent(void)
+{
+	if (pwd_common.pwdfp != NULL) {
+		rewind(pwd_common.pwdfp);
+	}
 }

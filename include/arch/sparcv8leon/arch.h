@@ -5,8 +5,8 @@
  *
  * Architecture dependent part (arch/sparcv8leon)
  *
- * Copyright 2022 Phoenix Systems
- * Author: Lukasz Leczkowski
+ * Copyright 2022, 2026 Phoenix Systems
+ * Author: Lukasz Leczkowski, Michal Lach
  *
  * This file is part of Phoenix-RTOS.
  *
@@ -52,13 +52,6 @@ static inline float __ieee754_sqrtf(float x)
 }
 
 #endif
-
-#ifdef NOMMU
-#define _PAGE_SIZE 0x200
-#else
-#define _PAGE_SIZE 0x1000
-#endif
-#define SIZE_PAGE _Pragma("GCC warning \"'SIZE_PAGE' is deprecated. Use _PAGE_SIZE from arch.h or PAGE_SIZE from limits.h (POSIX only)\"") _PAGE_SIZE
 
 #define __LIBPHOENIX_ARCH_TLS_SUPPORTED
 

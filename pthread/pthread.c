@@ -22,9 +22,7 @@
 #include <pthread.h>
 #include <unistd.h>
 
-/* clang-format off */
-#define CEIL(value, size) ((((value) + (size) - 1) / (size)) * (size))
-/* clang-format on */
+#define ALIGN(value, size) ((((value) + (size) - 1) / (size)) * (size))
 
 #define PTHREAD_ONCE_DONE          0
 #define PTHREAD_ONCE_IN_PROGRESS   2
@@ -35,6 +33,13 @@ typedef struct pthread_ctx {
 	void *(*start_routine)(void *);
 	void *arg;
 	void *retval;
+	/*
+	 * NOTE: if guardsize is specified and the stack is non-NULL, the stack
+	 * points to the guard start and stacksize accounts for the guard size.
+	 *
+	 * If stack is NULL, then it is externally managed (i.e. provided by the
+	 * caller through pthread_attr_setstackaddr).
+	 */
 	void *stack;
 	size_t stacksize;
 	struct pthread_ctx *next;
@@ -95,10 +100,12 @@ typedef struct _pthread_cleanup_t {
 
 static const pthread_attr_t pthread_attr_default = {
 	.stackaddr = NULL,
-	.policy = SCHED_RR,
+	.schedpolicy = SCHED_RR,
 	.priority = 4,
-	.detached = PTHREAD_CREATE_JOINABLE,
-	.stacksize = CEIL(PTHREAD_STACK_MIN, PAGE_SIZE)
+	.detachstate = PTHREAD_CREATE_JOINABLE,
+	.inheritsched = PTHREAD_INHERIT_SCHED,
+	.stacksize = ALIGN(PTHREAD_STACK_MIN, PAGE_SIZE),
+	.guardsize = 0
 };
 
 
@@ -197,7 +204,7 @@ static int pthread_create_main(void)
 	ctx->retval = NULL;
 	ctx->stack = NULL;
 	ctx->stacksize = 0;
-	ctx->is_detached = (pthread_attr_default.detached == PTHREAD_CREATE_DETACHED) ? 1 : 0;
+	ctx->is_detached = (pthread_attr_default.detachstate == PTHREAD_CREATE_DETACHED) ? 1 : 0;
 	ctx->cancelstate = PTHREAD_CANCEL_ENABLE;
 	ctx->refcount = 1;
 	ctx->key_data_list = NULL;
@@ -219,27 +226,55 @@ int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
 		attrs = attr;
 	}
 
-	void *stack = mmap(attrs->stackaddr, attrs->stacksize,
-		PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	void *stack;
+	size_t stacksize, guardsize;
 
-	if ((stack == MAP_FAILED) || (stack == NULL)) {
-		return EAGAIN;
+	if (attrs->stackaddr != NULL) {
+		stack = NULL;
+		stacksize = attrs->stacksize;
+		guardsize = 0;
+	}
+	else {
+		if (attrs->guardsize > SIZE_MAX - PAGE_SIZE) {
+			return EINVAL;
+		}
+		guardsize = ALIGN(attrs->guardsize, PAGE_SIZE);
+
+		if (attrs->stacksize > SIZE_MAX - guardsize || attrs->stacksize + guardsize > SIZE_MAX - PAGE_SIZE) {
+			return EINVAL;
+		}
+
+		stacksize = ALIGN(attrs->stacksize + guardsize, PAGE_SIZE);
+		stack = mmap(NULL, stacksize, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+
+		if ((stack == MAP_FAILED) || (stack == NULL)) {
+			return EAGAIN;
+		}
+
+		if (guardsize > 0) {
+			if (mprotect(stack, guardsize, PROT_NONE) != 0) {
+				munmap(stack, stacksize);
+				return EAGAIN;
+			}
+		}
 	}
 
 	pthread_ctx *ctx = (pthread_ctx *)malloc(sizeof(pthread_ctx));
 
 	if (ctx == NULL) {
-		munmap(stack, attrs->stacksize);
+		if (stack != NULL) {
+			munmap(stack, stacksize);
+		}
 		return EAGAIN;
 	}
 
 	ctx->refcount = 1;
 	ctx->retval = NULL;
-	ctx->is_detached = (pthread_attr_default.detached == PTHREAD_CREATE_DETACHED) ? 1 : 0;
+	ctx->is_detached = (attrs->detachstate == PTHREAD_CREATE_DETACHED) ? 1 : 0;
 	ctx->start_routine = start_routine;
 	ctx->arg = arg;
 	ctx->stack = stack;
-	ctx->stacksize = attrs->stacksize;
+	ctx->stacksize = stacksize;
 	ctx->key_data_list = NULL;
 	ctx->cancelstate = PTHREAD_CANCEL_ENABLE;
 	ctx->cleanup_list = NULL;
@@ -247,12 +282,15 @@ int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
 
 	mutexLock(pthread_common.pthread_list_lock);
 
-	int err = beginthreadex(pthread_start_point, attrs->priority, stack,
-		attrs->stacksize, (void *)ctx, &ctx->id);
+	/* TODO: inherit schedpolicy and contentionscope too once they get relevant */
+	int prio = attrs->inheritsched == PTHREAD_EXPLICIT_SCHED ? attrs->priority : priority(-1);
+	int err = beginthreadex(pthread_start_point, prio, stack == NULL ? attrs->stackaddr : stack + guardsize, stacksize - guardsize, (void *)ctx, &ctx->id);
 
 	if (err != 0) {
 		_pthread_ctx_put(ctx);
-		munmap(stack, attrs->stacksize);
+		if (stack != NULL) {
+			munmap(stack, stacksize);
+		}
 	}
 	else {
 		LIST_ADD(&pthread_common.pthread_list, ctx);
@@ -293,7 +331,7 @@ static void _pthread_release(pthread_ctx *ctx, int self)
 	if (prev_stack != NULL) {
 		munmap(prev_stack, prev_stacksize);
 	}
-	if (self == 0) {
+	if (self == 0 && stack != NULL) {
 		munmap(stack, stacksize);
 	}
 }
@@ -326,7 +364,7 @@ int pthread_join(pthread_t thread, void **value_ptr)
 	} while (err == -EINTR);
 
 	if (err < 0) {
-		return err;
+		return -err;
 	}
 	mutexLock(pthread_common.pthread_list_lock);
 
@@ -511,8 +549,34 @@ __attribute__((noreturn)) void pthread_exit(void *value_ptr)
 }
 
 
+#define DECLARE_PTHREAD_ATTR_GET_EX(attr_name, attr_type, res, body) \
+	int pthread_attr_get##attr_name(const pthread_attr_t *__restrict attr, attr_type *__restrict res) \
+	{ \
+		if (attr == NULL || (res) == NULL) { \
+			return EINVAL; \
+		} \
+		{ \
+			body \
+		} \
+		return 0; \
+	}
+#define DECLARE_PTHREAD_ATTR_GET(attr_name, attr_type, res) DECLARE_PTHREAD_ATTR_GET_EX(attr_name, attr_type, res, { *(res) = attr->attr_name; })
+
+DECLARE_PTHREAD_ATTR_GET(stackaddr, void *, stackaddr);
+DECLARE_PTHREAD_ATTR_GET(stacksize, size_t, stacksize);
+DECLARE_PTHREAD_ATTR_GET_EX(schedparam, struct sched_param, param, { param->sched_priority = attr->priority; });
+DECLARE_PTHREAD_ATTR_GET(schedpolicy, int, policy);
+DECLARE_PTHREAD_ATTR_GET(detachstate, int, detachstate);
+DECLARE_PTHREAD_ATTR_GET(guardsize, size_t, guardsize);
+DECLARE_PTHREAD_ATTR_GET(inheritsched, int, inheritsched);
+
+
 int pthread_attr_init(pthread_attr_t *attr)
 {
+	if (attr == NULL) {
+		return EINVAL;
+	}
+
 	*attr = pthread_attr_default;
 
 	return 0;
@@ -521,6 +585,10 @@ int pthread_attr_init(pthread_attr_t *attr)
 
 int pthread_attr_destroy(pthread_attr_t *attr)
 {
+	if (attr == NULL) {
+		return EINVAL;
+	}
+
 	return 0;
 }
 
@@ -536,34 +604,12 @@ int pthread_attr_setstackaddr(pthread_attr_t *attr, void *stackaddr)
 }
 
 
-int pthread_attr_getstackaddr(const pthread_attr_t *attr, void **stackaddr)
-{
-	if (attr == NULL)
-		return EINVAL;
-
-	*stackaddr = attr->stackaddr;
-
-	return 0;
-}
-
-
 int pthread_attr_setstacksize(pthread_attr_t *attr, size_t stacksize)
 {
 	if (attr == NULL || stacksize < PTHREAD_STACK_MIN)
 		return EINVAL;
 
-	attr->stacksize = CEIL(stacksize, PAGE_SIZE);
-
-	return 0;
-}
-
-
-int pthread_attr_getstacksize(const pthread_attr_t *attr, size_t *stacksize)
-{
-	if (attr == NULL)
-		return EINVAL;
-
-	*stacksize = attr->stacksize;
+	attr->stacksize = stacksize;
 
 	return 0;
 }
@@ -588,12 +634,22 @@ int pthread_attr_getstack(const pthread_attr_t *attr, void **stackaddr,
 int pthread_attr_setschedparam(pthread_attr_t *attr,
 	const struct sched_param *param)
 {
-	if (attr == NULL)
+	if (attr == NULL || param == NULL) {
 		return EINVAL;
+	}
 
-	if (param->sched_priority > sched_get_priority_max(SCHED_RR) ||
-			param->sched_priority < sched_get_priority_min(SCHED_RR))
+	if (attr->schedpolicy != SCHED_RR) {
 		return ENOTSUP;
+	}
+
+	sched_info_t info;
+	if (schedInfo(getpid(), attr->schedpolicy, &info) < 0) {
+		return EINVAL;
+	}
+
+	if (param->sched_priority > info.maxPriority || param->sched_priority < info.minPriority) {
+		return EINVAL;
+	}
 
 	attr->priority = param->sched_priority;
 
@@ -601,52 +657,43 @@ int pthread_attr_setschedparam(pthread_attr_t *attr,
 }
 
 
-int pthread_attr_getschedparam(const pthread_attr_t *attr,
-	struct sched_param *param)
-{
-	if (attr == NULL)
-		return EINVAL;
-
-	param->sched_priority = attr->priority;
-
-	return 0;
-}
-
-
 int pthread_attr_setschedpolicy(pthread_attr_t *attr, int policy)
 {
-	if (policy < SCHED_FIFO || policy > SCHED_OTHER)
+	if (attr == NULL || (policy != SCHED_FIFO && policy != SCHED_RR && policy != SCHED_OTHER)) {
 		return EINVAL;
-	else if (policy == SCHED_FIFO || policy == SCHED_OTHER)
+	}
+	else if (policy == SCHED_FIFO || policy == SCHED_OTHER) {
+		/* Currently, the kernel doesn't support policies other than RR */
 		return ENOTSUP;
+	}
 
-	attr->policy = policy;
+	attr->schedpolicy = policy;
 
 	return 0;
 }
 
 
-int pthread_attr_getschedpolicy(const pthread_attr_t *attr, int *policy)
+int pthread_attr_setscope(pthread_attr_t *attr, int scope)
 {
-	if (attr == NULL)
+	if (attr == NULL || (scope != PTHREAD_SCOPE_SYSTEM && scope != PTHREAD_SCOPE_PROCESS)) {
 		return EINVAL;
+	}
 
-	*policy = attr->policy;
+	if (scope == PTHREAD_SCOPE_PROCESS) {
+		return ENOTSUP;
+	}
 
 	return 0;
 }
 
 
-int pthread_attr_setscope(pthread_attr_t *attr, int contentionscope)
+int pthread_attr_getscope(const pthread_attr_t *attr, int *scope)
 {
-	return 0;
-}
-
-int pthread_attr_getscope(const pthread_attr_t *attr,
-	int *contentionscope)
-{
-	if (attr == NULL)
+	if (attr == NULL || scope == NULL) {
 		return EINVAL;
+	}
+
+	*scope = PTHREAD_SCOPE_SYSTEM;
 
 	return 0;
 }
@@ -654,36 +701,38 @@ int pthread_attr_getscope(const pthread_attr_t *attr,
 
 int pthread_attr_setdetachstate(pthread_attr_t *attr, int detachstate)
 {
-	if ((detachstate != PTHREAD_CREATE_DETACHED) ||
-			(detachstate != PTHREAD_CREATE_JOINABLE)) {
+	if (attr == NULL || (detachstate != PTHREAD_CREATE_DETACHED && detachstate != PTHREAD_CREATE_JOINABLE)) {
 		return EINVAL;
 	}
 
-	attr->detached = detachstate;
+	attr->detachstate = detachstate;
 
 	return 0;
 }
 
 
-int pthread_attr_getdetachstate(const pthread_attr_t *attr,
-	int *detachstate)
+int pthread_attr_setguardsize(pthread_attr_t *attr, size_t guardsize)
 {
 	if (attr == NULL) {
 		return EINVAL;
 	}
 
-	*detachstate = attr->detached;
+	attr->guardsize = guardsize;
 
 	return 0;
 }
 
 
-int pthread_attr_getinheritsched(const pthread_attr_t *__restrict attr,
-	int *__restrict inheritsched);
+int pthread_attr_setinheritsched(pthread_attr_t *attr, int inheritsched)
+{
+	if (attr == NULL || (inheritsched != PTHREAD_INHERIT_SCHED && inheritsched != PTHREAD_EXPLICIT_SCHED)) {
+		return EINVAL;
+	}
 
+	attr->inheritsched = inheritsched;
 
-int pthread_attr_setinheritsched(pthread_attr_t *attr,
-	int inheritsched);
+	return 0;
+}
 
 
 int pthread_setschedprio(pthread_t thread, int prio);
@@ -829,19 +878,17 @@ int sched_yield(void)
 
 int sched_get_priority_max(int policy)
 {
-	if (policy == SCHED_RR)
-		return 7;
-
-	return EINVAL;
+	sched_info_t info;
+	int err = SET_ERRNO(schedInfo(getpid(), policy, &info));
+	return err < 0 ? err : info.maxPriority;
 }
 
 
 int sched_get_priority_min(int policy)
 {
-	if (policy == SCHED_RR)
-		return 0;
-
-	return EINVAL;
+	sched_info_t info;
+	int err = SET_ERRNO(schedInfo(getpid(), policy, &info));
+	return err < 0 ? err : info.minPriority;
 }
 
 
@@ -1077,15 +1124,24 @@ int pthread_kill(pthread_t thread, int sig)
 
 int pthread_key_create(pthread_key_t *key, void (*destructor)(void *))
 {
-	int err = 0;
-	*key = malloc(sizeof(__pthread_key_t));
-	if (*key == NULL) {
-		err = ENOMEM;
+	int ret;
+	pthread_key_t localkey;
+
+	localkey = (pthread_key_t)malloc(sizeof(__pthread_key_t));
+	if (localkey == NULL) {
+		return ENOMEM;
 	}
-	else {
-		(*key)->destructor = destructor;
+
+	localkey->destructor = destructor;
+
+	ret = pthread_setspecific(localkey, NULL);
+	if (ret != 0) {
+		free(localkey);
+		return ret;
 	}
-	return err;
+
+	*key = localkey;
+	return 0;
 }
 
 

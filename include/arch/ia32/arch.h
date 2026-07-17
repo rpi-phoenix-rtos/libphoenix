@@ -5,8 +5,8 @@
  *
  * Architecture dependent part
  *
- * Copyright 2017 Phoenix Systems
- * Author: Pawel Pisarczyk
+ * Copyright 2017, 2026 Phoenix Systems
+ * Author: Pawel Pisarczyk, Michal Lach
  *
  * This file is part of Phoenix-RTOS.
  *
@@ -50,9 +50,6 @@ static inline double __ieee754_sqrt(double x)
 }
 
 #endif
-
-#define _PAGE_SIZE 0x1000
-#define SIZE_PAGE _Pragma("GCC warning \"'SIZE_PAGE' is deprecated. Use _PAGE_SIZE from arch.h or PAGE_SIZE from limits.h (POSIX only)\"") _PAGE_SIZE
 
 #define __LIBPHOENIX_ARCH_TLS_SUPPORTED
 

@@ -36,16 +36,22 @@ typedef double double_t;
 #define M_SQRT2             1.41421356237309504880
 #define M_SQRT1_2           0.70710678118654752440
 
-#define HUGE_VAL            (__infd)
-#define HUGE_VALF           (__inff)
-#define HUGE_VALL           ((long double) HUGE_VAL)
-#define INFINITY            HUGE_VALF
+/* Phoenix/RPi4: define these as compiler builtins (constant EXPRESSIONS), not as
+ * references to the const globals __infd/__inff. The const-variable form is not a
+ * constant expression, so it is rejected in static/global initializers (e.g.
+ * MicroPython py/objfloat.c `= {..., (mp_float_t)INFINITY}` -> "initializer element
+ * is not constant") and it forced an __infd/__inff symbol dependency that broke
+ * link order for some ports (libXfont2/glib2). __builtin_* matches glibc/newlib. */
+#define HUGE_VAL            (__builtin_inf())
+#define HUGE_VALF           (__builtin_inff())
+#define HUGE_VALL           (__builtin_infl())
+#define INFINITY            (__builtin_inff())
 
-/* Global constants that contain infinities. */
+/* Global constants that contain infinities (kept for any direct users). */
 extern const float __inff;
 extern const double __infd;
 
-#define NAN                 (nanf(""))
+#define NAN                 (__builtin_nanf(""))
 
 #define FP_NAN              0
 #define FP_INFINITE         1

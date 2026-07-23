@@ -3,7 +3,7 @@
  *
  * libphoenix
  *
- * pow, sqrt
+ * pow, sqrt, cbrt
  *
  * Copyright 2017 Phoenix Systems
  * Author: Aleksander Kaminski
@@ -211,4 +211,33 @@ double hypot(double x, double y)
 float hypotf(float x, float y)
 {
 	return (float)hypot((double)x, (double)y);
+}
+
+
+/* Real cube root. cbrt is odd (cbrt(-x) == -cbrt(x)), so compute on |x| and
+ * restore the sign; ±0 and ±Inf pass through unchanged. The pow() identity
+ * a^(1/3) = e^(ln(a)/3) gives a close seed, refined by a single Newton step
+ * (y - (y^3 - a)/(3 y^2)) to reach near machine precision. */
+double cbrt(double x)
+{
+	if (isnan(x) != 0) {
+		return NAN;
+	}
+
+	if ((x == 0.0) || (isinf(x) != 0)) {
+		return x;
+	}
+
+	double a = fabs(x);
+	double y = pow(a, 1.0 / 3.0);
+
+	y = y - ((y * y * y) - a) / (3.0 * y * y);
+
+	return (x < 0.0) ? -y : y;
+}
+
+
+float cbrtf(float x)
+{
+	return (float)cbrt((double)x);
 }

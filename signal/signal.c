@@ -25,6 +25,14 @@
 extern int sys_tkill(int pid, int tid, int signal);
 
 
+/* dbg: the aarch64 signal trampoline (arch/aarch64/signal.S) stashes the interrupted
+ * cpu_context_t* here on every signal delivery, so a userspace debug/backtrace helper can read
+ * the interrupted pc + x29 frame pointer (Phoenix delivers no ucontext to handlers). NULL until
+ * the first signal. Harmless on other arches (their trampolines simply don't write it). */
+void *_dbg_signal_ctx = NULL;
+unsigned long _dbg_signal_pc = 0;   /* interrupted pc (leaf/fault site) */
+
+
 struct {
 	sighandler_t sightab[NSIG];
 	sigset_t sigset[NSIG];

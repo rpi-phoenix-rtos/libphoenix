@@ -420,6 +420,73 @@ float truncf(float x)
 }
 
 
+double rint(double x)
+{
+#ifdef __IEEE754_RINT
+	return __ieee754_rint(x);
+#else
+	double ipart, fpart, afpart;
+
+	if (isnan(x) != 0) {
+		return NAN;
+	}
+
+	fpart = modf(x, &ipart);
+	afpart = fabs(fpart);
+
+	if (afpart < 0.5) {
+		return ipart;
+	}
+
+	if (afpart > 0.5) {
+		return ipart + ((x < 0.0) ? -1.0 : 1.0);
+	}
+
+	/* Exactly halfway: round to even, matching the default FE_TONEAREST
+	 * rounding mode. This is why rint() differs from round(), which rounds
+	 * halves away from zero. */
+	if (fmod(ipart, 2.0) != 0.0) {
+		return ipart + ((x < 0.0) ? -1.0 : 1.0);
+	}
+
+	return ipart;
+#endif
+}
+
+
+float rintf(float x)
+{
+#ifdef __IEEE754_RINTF
+	return __ieee754_rintf(x);
+#else
+	return (float)rint((double)x);
+#endif
+}
+
+
+double nearbyint(double x)
+{
+#ifdef __IEEE754_NEARBYINT
+	return __ieee754_nearbyint(x);
+#else
+	/* Identical to rint() in this implementation: nearbyint() is only
+	 * specified to differ by not raising FE_INEXACT, and this libm raises
+	 * no floating-point exceptions. */
+	return rint(x);
+#endif
+}
+
+
+float nearbyintf(float x)
+{
+#ifdef __IEEE754_NEARBYINTF
+	return __ieee754_nearbyintf(x);
+#else
+	return (float)nearbyint((double)x);
+#endif
+}
+
+
 double fabs(double x)
 {
 #ifdef __IEEE754_FABS

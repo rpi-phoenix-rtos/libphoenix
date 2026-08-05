@@ -487,6 +487,127 @@ float nearbyintf(float x)
 }
 
 
+long int lrint(double x)
+{
+	return (long int)rint(x);
+}
+
+
+long long int llrint(double x)
+{
+	return (long long int)rint(x);
+}
+
+
+long int lrintf(float x)
+{
+	return (long int)rintf(x);
+}
+
+
+long long int llrintf(float x)
+{
+	return (long long int)rintf(x);
+}
+
+
+long int lround(double x)
+{
+	return (long int)round(x);
+}
+
+
+long long int llround(double x)
+{
+	return (long long int)round(x);
+}
+
+
+long int lroundf(float x)
+{
+	return (long int)roundf(x);
+}
+
+
+long long int llroundf(float x)
+{
+	return (long long int)roundf(x);
+}
+
+
+double fdim(double x, double y)
+{
+	if ((isnan(x) != 0) || (isnan(y) != 0)) {
+		return NAN;
+	}
+
+	return (x > y) ? (x - y) : 0.0;
+}
+
+
+float fdimf(float x, float y)
+{
+	return (float)fdim((double)x, (double)y);
+}
+
+
+double fmax(double x, double y)
+{
+	if (isnan(x) != 0) {
+		return y;
+	}
+
+	if (isnan(y) != 0) {
+		return x;
+	}
+
+	return (x > y) ? x : y;
+}
+
+
+float fmaxf(float x, float y)
+{
+	return (float)fmax((double)x, (double)y);
+}
+
+
+double fmin(double x, double y)
+{
+	if (isnan(x) != 0) {
+		return y;
+	}
+
+	if (isnan(y) != 0) {
+		return x;
+	}
+
+	return (x < y) ? x : y;
+}
+
+
+float fminf(float x, float y)
+{
+	return (float)fmin((double)x, (double)y);
+}
+
+
+double copysign(double x, double y)
+{
+	conv_t *cx = (conv_t *)&x;
+	conv_t *cy = (conv_t *)&y;
+
+	cx->i.sign = cy->i.sign;
+
+	return x;
+}
+
+
+float copysignf(float x, float y)
+{
+	return (float)copysign((double)x, (double)y);
+}
+
+
 double fabs(double x)
 {
 #ifdef __IEEE754_FABS

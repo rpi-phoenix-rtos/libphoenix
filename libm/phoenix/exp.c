@@ -16,7 +16,6 @@
 #include <errno.h>
 #include <math.h>
 #include <stdint.h>
-#include <limits.h>
 #include "common.h"
 
 
@@ -110,19 +109,23 @@ float scalbnf(float x, int n)
 }
 
 
-/* scalbln takes a long exponent; ldexp saturates (inf/0) for |exp| > 2046, so clamping the
- * long into int range preserves the result for any n. */
+/* scalbln takes a long exponent. Any |n| beyond the double exponent range already yields
+ * +-inf / +-0, so clamp to a modest magnitude (SCALBLN_CLAMP, well past that range but small
+ * enough that ldexp's internal `exponent + n` cannot overflow a signed int) — this both avoids
+ * the overflow and preserves the result for all n. (Clamping to INT_MAX/INT_MIN, as an earlier
+ * version did, overflowed inside ldexp and wrongly returned ~0 for |n| > INT_MAX.) */
+#define SCALBLN_CLAMP 100000L
 double scalbln(double x, long n)
 {
-	int e = (n > (long)INT_MAX) ? INT_MAX : ((n < (long)INT_MIN) ? INT_MIN : (int)n);
-	return ldexp(x, e);
+	long e = (n > SCALBLN_CLAMP) ? SCALBLN_CLAMP : ((n < -SCALBLN_CLAMP) ? -SCALBLN_CLAMP : n);
+	return ldexp(x, (int)e);
 }
 
 
 float scalblnf(float x, long n)
 {
-	int e = (n > (long)INT_MAX) ? INT_MAX : ((n < (long)INT_MIN) ? INT_MIN : (int)n);
-	return ldexpf(x, e);
+	long e = (n > SCALBLN_CLAMP) ? SCALBLN_CLAMP : ((n < -SCALBLN_CLAMP) ? -SCALBLN_CLAMP : n);
+	return ldexpf(x, (int)e);
 }
 
 

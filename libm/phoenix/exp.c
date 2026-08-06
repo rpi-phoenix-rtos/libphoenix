@@ -166,6 +166,12 @@ float log10f(float x)
 }
 
 
+float log2f(float x)
+{
+	return (float)log2((double)x);
+}
+
+
 double modf(double x, double *intpart)
 {
 	conv_t *conv = (conv_t *)&x;
@@ -259,6 +265,19 @@ double exp(double x)
 float expf(float x)
 {
 	return (float)exp((double)x);
+}
+
+
+/* Uses 2^x = e^(x * ln(2)) identity */
+double exp2(double x)
+{
+	return exp(x * M_LN2);
+}
+
+
+float exp2f(float x)
+{
+	return (float)exp2((double)x);
 }
 
 

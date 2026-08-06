@@ -16,6 +16,7 @@
 #include <errno.h>
 #include <math.h>
 #include <stdint.h>
+#include <limits.h>
 #include "common.h"
 
 
@@ -93,6 +94,35 @@ double ldexp(double x, int exp)
 float ldexpf(float x, int exp)
 {
 	return (float)ldexp((double)x, exp);
+}
+
+
+/* scalbn(x,n) = x * FLT_RADIX^n; FLT_RADIX == 2 on this target, so scalbn == ldexp. */
+double scalbn(double x, int n)
+{
+	return ldexp(x, n);
+}
+
+
+float scalbnf(float x, int n)
+{
+	return ldexpf(x, n);
+}
+
+
+/* scalbln takes a long exponent; ldexp saturates (inf/0) for |exp| > 2046, so clamping the
+ * long into int range preserves the result for any n. */
+double scalbln(double x, long n)
+{
+	int e = (n > (long)INT_MAX) ? INT_MAX : ((n < (long)INT_MIN) ? INT_MIN : (int)n);
+	return ldexp(x, e);
+}
+
+
+float scalblnf(float x, long n)
+{
+	int e = (n > (long)INT_MAX) ? INT_MAX : ((n < (long)INT_MIN) ? INT_MIN : (int)n);
+	return ldexpf(x, e);
 }
 
 

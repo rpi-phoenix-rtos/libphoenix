@@ -47,6 +47,7 @@ else
 endif
 
 include ctype/Makefile
+include dl/Makefile
 include err/Makefile
 include errno/Makefile
 include locale/Makefile

@@ -41,7 +41,10 @@ extern const int _signals_phx2posix[];
 extern pid_t waitpid(pid_t pid, int *status, int options);
 
 
-static inline pid_t wait(int *status)
+/* __inline__ (not bare `inline`) so this header also compiles under -ansi/-std=c89
+ * where `inline` is not a keyword (bare `inline` gives "unknown type name 'inline'";
+ * hit when cross-building fribidi, which forces -ansi). */
+static __inline__ pid_t wait(int *status)
 {
 	return waitpid(-1, status, 0);
 }

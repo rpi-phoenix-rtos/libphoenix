@@ -5,8 +5,8 @@
  *
  * pthread
  *
- * Copyright 2017, 2019, 2023 Phoenix Systems
- * Author: Pawel Pisarczyk, Marcin Baran, Hubert Badocha
+ * Copyright 2017, 2019, 2023, 2026 Phoenix Systems
+ * Author: Pawel Pisarczyk, Marcin Baran, Hubert Badocha, Adam Greloch
  *
  * This file is part of Phoenix-RTOS.
  *
@@ -21,12 +21,19 @@
 #include <sys/minmax.h>
 #include <pthread.h>
 #include <unistd.h>
+#include <stdatomic.h>
+
+#include "../common/util.h"
 
 #define ALIGN(value, size) ((((value) + (size) - 1) / (size)) * (size))
 
 #define PTHREAD_ONCE_DONE          0
 #define PTHREAD_ONCE_IN_PROGRESS   2
 #define PTHREAD_COND_CLOCK_DEFAULT CLOCK_MONOTONIC
+
+#define RESOURCE_UNINITIALIZED 0
+#define RESOURCE_INITIALIZING  1
+#define RESOURCE_INITIALIZED   2
 
 typedef struct pthread_ctx {
 	handle_t id;
@@ -46,6 +53,7 @@ typedef struct pthread_ctx {
 	struct pthread_ctx *prev;
 	int is_detached;
 	int cancelstate;
+	int cancelled;
 	struct __errno_t e;
 	int refcount;
 	struct pthread_key_data_t *key_data_list;
@@ -67,7 +75,6 @@ static struct {
 	handle_t pthread_key_lock;
 	handle_t pthread_list_lock;
 	handle_t pthread_atfork_lock;
-	handle_t mutex_cond_init_lock;
 	pthread_mutex_t pthread_once_lock;
 	pthread_cond_t pthread_once_cond;
 	pthread_ctx *pthread_list;
@@ -103,9 +110,19 @@ static const pthread_attr_t pthread_attr_default = {
 	.schedpolicy = SCHED_RR,
 	.priority = 4,
 	.detachstate = PTHREAD_CREATE_JOINABLE,
-	.inheritsched = PTHREAD_INHERIT_SCHED,
+	.inheritsched = PTHREAD_EXPLICIT_SCHED,
 	.stacksize = ALIGN(PTHREAD_STACK_MIN, PAGE_SIZE),
 	.guardsize = 0
+};
+
+
+static const pthread_condattr_t pthread_condattr_default = {
+	.clock_id = PTHREAD_COND_CLOCK_DEFAULT,
+};
+
+
+static const pthread_rwlockattr_t pthread_rwlockattr_default = {
+	.pshared = PTHREAD_PROCESS_PRIVATE,
 };
 
 
@@ -206,6 +223,7 @@ static int pthread_create_main(void)
 	ctx->stacksize = 0;
 	ctx->is_detached = (pthread_attr_default.detachstate == PTHREAD_CREATE_DETACHED) ? 1 : 0;
 	ctx->cancelstate = PTHREAD_CANCEL_ENABLE;
+	ctx->cancelled = 0;
 	ctx->refcount = 1;
 	ctx->key_data_list = NULL;
 	ctx->cleanup_list = NULL;
@@ -277,6 +295,7 @@ int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
 	ctx->stacksize = stacksize;
 	ctx->key_data_list = NULL;
 	ctx->cancelstate = PTHREAD_CANCEL_ENABLE;
+	ctx->cancelled = 0;
 	ctx->cleanup_list = NULL;
 	*thread = (pthread_t)ctx;
 
@@ -459,6 +478,7 @@ static void pthread_key_cleanup(pthread_ctx *ctx)
 		key_data = key_data->next;
 		free(curr);
 	}
+	ctx->key_data_list = NULL;
 
 	mutexUnlock(pthread_common.pthread_key_lock);
 }
@@ -477,6 +497,7 @@ int pthread_cancel(pthread_t thread)
 		self = pthread_self();
 		mutexLock(pthread_common.pthread_list_lock);
 		_pthread_ctx_get(ctx);
+		ctx->cancelled = 1;
 		if (thread == self) {
 			if (ctx->cancelstate == PTHREAD_CANCEL_ENABLE) {
 				_pthread_ctx_put(ctx);
@@ -501,6 +522,24 @@ int pthread_cancel(pthread_t thread)
 		}
 	}
 	return -err;
+}
+
+
+void pthread_testcancel(void)
+{
+	pthread_ctx *ctx = (pthread_ctx *)pthread_self();
+	if (ctx == NULL) {
+		return;
+	}
+
+	mutexLock(pthread_common.pthread_list_lock);
+	_pthread_ctx_get(ctx);
+	if (ctx->cancelstate == PTHREAD_CANCEL_ENABLE && ctx->cancelled != 0) {
+		_pthread_ctx_put(ctx);
+		pthread_exit((void *)PTHREAD_CANCELED);
+		/* no return */
+	}
+	_pthread_ctx_put(ctx);
 }
 
 
@@ -746,44 +785,83 @@ int pthread_setschedparam(pthread_t thread, int policy,
 	const struct sched_param *param);
 
 
-static int pthread_mutex_lazy_init(pthread_mutex_t *mutex)
+static int pthread_initialize_acquire_release(
+		atomic_int *initialized_flag, void *__restrict__ resource, const void *__restrict__ attr, int(initCb(void *__restrict__ resource, const void *__restrict__ attr)))
 {
-	int err = 0;
-	if (mutex->initialized == 0) {
-		mutexLock(pthread_common.mutex_cond_init_lock);
-		if (mutex->initialized == 0) {
-			err = mutexCreate(&mutex->mutexh);
-			if (err == 0) {
-				mutex->initialized = 1;
+	for (;;) {
+		int state = atomic_load_explicit(initialized_flag, memory_order_acquire);
+		if (state == RESOURCE_INITIALIZED) {
+			return EOK;
+		}
+
+		if (state == RESOURCE_UNINITIALIZED) {
+			int expected = RESOURCE_UNINITIALIZED;
+			if (atomic_compare_exchange_strong_explicit(initialized_flag, &expected, RESOURCE_INITIALIZING, memory_order_acquire, memory_order_acquire)) {
+				int err = initCb(resource, attr);
+				atomic_store_explicit(initialized_flag, err == EOK ? RESOURCE_INITIALIZED : RESOURCE_UNINITIALIZED, memory_order_release);
+				return err;
 			}
 		}
-		mutexUnlock(pthread_common.mutex_cond_init_lock);
-	}
 
-	return err;
+		(void)sched_yield();
+	}
 }
 
 
-int pthread_mutex_init(pthread_mutex_t *__restrict mutex, const pthread_mutexattr_t *__restrict attr)
+static int pthread_destroy_acquire_release(
+		atomic_int *initialized_flag, void *__restrict__ resource, int(initCb(void *__restrict__ resource)))
 {
+	for (;;) {
+		int state = atomic_load_explicit(initialized_flag, memory_order_acquire);
+		if (state == RESOURCE_UNINITIALIZED) {
+			return EOK;
+		}
+
+		if (state == RESOURCE_INITIALIZED) {
+			int expected = RESOURCE_INITIALIZED;
+			if (atomic_compare_exchange_strong_explicit(initialized_flag, &expected, RESOURCE_UNINITIALIZED, memory_order_acquire, memory_order_acquire)) {
+				return initCb(resource);
+			}
+		}
+
+		(void)sched_yield();
+	}
+}
+
+
+static int pthread_mutex_init_cb(void *__restrict__ resource, const void *__restrict__ attr)
+{
+	pthread_mutex_t *mutex = resource;
 	int err;
 	if (attr == NULL) {
 		err = mutexCreate(&mutex->mutexh);
 	}
 	else {
-		err = mutexCreateWithAttr(&mutex->mutexh, attr);
-	}
-
-	if (err == 0) {
-		mutex->initialized = 1;
+		err = mutexCreateWithAttr(&mutex->mutexh, (const struct lockAttr *)attr);
 	}
 	return -err;
 }
 
 
+static int pthread_mutex_lazy_init(pthread_mutex_t *__restrict mutex, const pthread_mutexattr_t *__restrict attr)
+{
+	return pthread_initialize_acquire_release(&mutex->initialized, mutex, attr, pthread_mutex_init_cb);
+}
+
+
+int pthread_mutex_init(pthread_mutex_t *__restrict mutex, const pthread_mutexattr_t *__restrict attr)
+{
+	if (mutex == NULL) {
+		return EINVAL;
+	}
+	atomic_store_explicit(&mutex->initialized, RESOURCE_UNINITIALIZED, memory_order_relaxed);
+	return pthread_mutex_lazy_init(mutex, attr);
+}
+
+
 int pthread_mutex_lock(pthread_mutex_t *mutex)
 {
-	int err = pthread_mutex_lazy_init(mutex);
+	int err = pthread_mutex_lazy_init(mutex, NULL);
 
 	if (err == 0) {
 		err = mutexLock(mutex->mutexh);
@@ -795,7 +873,7 @@ int pthread_mutex_lock(pthread_mutex_t *mutex)
 
 int pthread_mutex_trylock(pthread_mutex_t *mutex)
 {
-	int err = pthread_mutex_lazy_init(mutex);
+	int err = pthread_mutex_lazy_init(mutex, NULL);
 
 	if (err == 0) {
 		err = mutexTry(mutex->mutexh);
@@ -807,7 +885,7 @@ int pthread_mutex_trylock(pthread_mutex_t *mutex)
 
 int pthread_mutex_unlock(pthread_mutex_t *mutex)
 {
-	int err = pthread_mutex_lazy_init(mutex);
+	int err = pthread_mutex_lazy_init(mutex, NULL);
 
 	if (err == 0) {
 		err = mutexUnlock(mutex->mutexh);
@@ -817,20 +895,19 @@ int pthread_mutex_unlock(pthread_mutex_t *mutex)
 }
 
 
+static int pthread_mutex_destroy_cb(void *resource)
+{
+	pthread_mutex_t *mutex = resource;
+	return -resourceDestroy(mutex->mutexh);
+}
+
+
 int pthread_mutex_destroy(pthread_mutex_t *mutex)
 {
-	int err = 0;
-
-	mutexLock(pthread_common.mutex_cond_init_lock);
-	if (mutex->initialized == 1) {
-		mutexUnlock(pthread_common.mutex_cond_init_lock);
-		err = resourceDestroy(mutex->mutexh);
+	if (mutex == NULL) {
+		return EINVAL;
 	}
-	else {
-		mutexUnlock(pthread_common.mutex_cond_init_lock);
-	}
-
-	return -err;
+	return pthread_destroy_acquire_release(&mutex->initialized, mutex, pthread_mutex_destroy_cb);
 }
 
 
@@ -977,66 +1054,55 @@ static int pthread_condattr_to_condAttr(const pthread_condattr_t *pattr, struct 
 }
 
 
-static int pthread_cond_lazy_init(pthread_cond_t *cond)
+static int pthread_cond_init_cb(void *__restrict resource, const void *__restrict attr)
 {
+	pthread_cond_t *cond = resource;
 	struct condAttr cattr;
-	int err = 0;
-
-	if (cond->initialized == 0) {
-		mutexLock(pthread_common.mutex_cond_init_lock);
-		if (cond->initialized == 0) {
-			(void)pthread_condattr_to_condAttr(&(pthread_condattr_t) { .clock_id = PTHREAD_COND_CLOCK_DEFAULT }, &cattr);
-
-			err = condCreateWithAttr(&cond->condh, &cattr);
-			if (err == 0) {
-				cond->initialized = 1;
-			}
-		}
-		mutexUnlock(pthread_common.mutex_cond_init_lock);
+	if (pthread_condattr_to_condAttr((const pthread_condattr_t *)attr, &cattr) != 0) {
+		return EINVAL;
 	}
-	return err;
+	return -condCreateWithAttr(&cond->condh, &cattr);
+}
+
+
+static int pthread_cond_lazy_init(pthread_cond_t *cond, const pthread_condattr_t *__restrict attr)
+{
+	if (attr == NULL) {
+		attr = &pthread_condattr_default;
+	}
+	return pthread_initialize_acquire_release(&cond->initialized, cond, attr, pthread_cond_init_cb);
 }
 
 
 int pthread_cond_init(pthread_cond_t *__restrict cond, const pthread_condattr_t *__restrict attr)
 {
-	struct condAttr cattr;
+	if (cond == NULL) {
+		return EINVAL;
+	}
+	atomic_store_explicit(&cond->initialized, RESOURCE_UNINITIALIZED, memory_order_relaxed);
+	return pthread_cond_lazy_init(cond, attr);
+}
 
-	if (attr != NULL) {
-		if (pthread_condattr_to_condAttr(attr, &cattr) != 0) {
-			return EINVAL;
-		}
-	}
-	else {
-		(void)pthread_condattr_to_condAttr(&(pthread_condattr_t) { .clock_id = PTHREAD_COND_CLOCK_DEFAULT }, &cattr);
-	}
 
-	int err = condCreateWithAttr(&cond->condh, &cattr);
-	if (err == 0) {
-		cond->initialized = 1;
-	}
-	return -err;
+static int pthread_cond_destroy_cb(void *resource)
+{
+	pthread_cond_t *cond = resource;
+	return -resourceDestroy(cond->condh);
 }
 
 
 int pthread_cond_destroy(pthread_cond_t *cond)
 {
-	int err = 0;
-	mutexLock(pthread_common.mutex_cond_init_lock);
-	if (cond->initialized == 1) {
-		mutexUnlock(pthread_common.mutex_cond_init_lock);
-		err = resourceDestroy(cond->condh);
+	if (cond == NULL) {
+		return EINVAL;
 	}
-	else {
-		mutexUnlock(pthread_common.mutex_cond_init_lock);
-	}
-	return -err;
+	return pthread_destroy_acquire_release(&cond->initialized, cond, pthread_cond_destroy_cb);
 }
 
 
 int pthread_cond_signal(pthread_cond_t *cond)
 {
-	int err = pthread_cond_lazy_init(cond);
+	int err = pthread_cond_lazy_init(cond, NULL);
 
 	if (err == 0) {
 		err = condSignal(cond->condh);
@@ -1047,7 +1113,7 @@ int pthread_cond_signal(pthread_cond_t *cond)
 
 int pthread_cond_broadcast(pthread_cond_t *cond)
 {
-	int err = pthread_cond_lazy_init(cond);
+	int err = pthread_cond_lazy_init(cond, NULL);
 
 	if (err == 0) {
 		err = condBroadcast(cond->condh);
@@ -1058,10 +1124,10 @@ int pthread_cond_broadcast(pthread_cond_t *cond)
 
 int pthread_cond_wait(pthread_cond_t *__restrict cond, pthread_mutex_t *__restrict mutex)
 {
-	int err = pthread_cond_lazy_init(cond);
+	int err = pthread_cond_lazy_init(cond, NULL);
 
 	if (err == 0) {
-		err = pthread_mutex_lazy_init(mutex);
+		err = pthread_mutex_lazy_init(mutex, NULL);
 	}
 
 	if (err == 0) {
@@ -1071,29 +1137,23 @@ int pthread_cond_wait(pthread_cond_t *__restrict cond, pthread_mutex_t *__restri
 }
 
 
-static time_t timespec_to_us(const struct timespec *__restrict time)
-{
-	return (time->tv_sec * 1000000 + time->tv_nsec / 1000);
-}
-
-
 int pthread_cond_timedwait(pthread_cond_t *__restrict cond,
-	pthread_mutex_t *__restrict mutex,
-	const struct timespec *__restrict abstime)
+		pthread_mutex_t *__restrict mutex,
+		const struct timespec *__restrict abstime)
 {
 	int err = 0;
 
-	const time_t abstime_us = timespec_to_us(abstime);
+	const time_t abstime_us = __timespecToUs(abstime);
 
 	/* check timeout as condWait with timeout 0 will wait indefinitely */
 	if (abstime_us == 0) {
 		return ETIMEDOUT;
 	}
 
-	err = pthread_cond_lazy_init(cond);
+	err = pthread_cond_lazy_init(cond, NULL);
 
 	if (err == 0) {
-		err = pthread_mutex_lazy_init(mutex);
+		err = pthread_mutex_lazy_init(mutex, NULL);
 	}
 
 	if (err == 0) {
@@ -1398,54 +1458,309 @@ void pthread_cleanup_pop(int execute)
 }
 
 
-/* FIXME: rwlocks are yet to be implemented, that breaks shared_mutex in cpp. */
+static int pthread_rwlock_init_cb(void *__restrict__ resource, const void *__restrict__ attr)
+{
+	pthread_rwlock_t *__restrict__ rwlock = resource;
+	(void)attr;
+
+	int err = mutexCreate(&rwlock->lock);
+	if (err < 0) {
+		return -err;
+	}
+
+	struct condAttr cattr = { .clock = PH_CLOCK_REALTIME };
+
+	err = condCreateWithAttr(&rwlock->readCond, &cattr);
+	if (err < 0) {
+		resourceDestroy(rwlock->lock);
+		return -err;
+	}
+
+	err = condCreateWithAttr(&rwlock->writeCond, &cattr);
+	if (err < 0) {
+		resourceDestroy(rwlock->readCond);
+		resourceDestroy(rwlock->lock);
+		return -err;
+	}
+
+	rwlock->readActive = 0;
+	rwlock->writeActive = 0;
+	rwlock->writeWaiting = 0;
+
+	return EOK;
+}
+
+
+static int pthread_rwlock_lazy_init(pthread_rwlock_t *__restrict__ rwlock, const pthread_rwlockattr_t *__restrict__ attr)
+{
+	return pthread_initialize_acquire_release(&rwlock->initialized, rwlock, attr, pthread_rwlock_init_cb);
+}
+
+
+static int pthread_rwlock_rdlock_ex(pthread_rwlock_t *rwlock, int block, int timeout)
+{
+	int err = pthread_rwlock_lazy_init(rwlock, NULL);
+	if (err != EOK) {
+		return err;
+	}
+
+	/* TODO: can rwlocks be robust? */
+	mutexLock(rwlock->lock);
+
+	/* avoid starving the waiting writers by letting them through */
+	while (rwlock->writeActive > 0 || rwlock->writeWaiting > 0) {
+		if (block == 0) {
+			err = EBUSY;
+			break;
+		}
+
+		err = condWait(rwlock->readCond, rwlock->lock, timeout);
+
+		if (err == -ETIME) {
+			err = ETIMEDOUT;
+			break;
+		}
+		else if (err < 0) {
+			err = -err;
+			break;
+		}
+	}
+
+	if (err == EOK) {
+		rwlock->readActive++;
+	}
+
+	mutexUnlock(rwlock->lock);
+
+	return err;
+}
+
+
+static int pthread_rwlock_wrlock_ex(pthread_rwlock_t *rwlock, int block, int timeout)
+{
+	int err = pthread_rwlock_lazy_init(rwlock, NULL);
+	if (err != EOK) {
+		return err;
+	}
+
+	mutexLock(rwlock->lock);
+
+	if (block != 0) {
+		rwlock->writeWaiting++;
+	}
+
+	while (rwlock->readActive > 0 || rwlock->writeActive > 0) {
+		if (block == 0) {
+			err = EBUSY;
+			break;
+		}
+
+		err = condWait(rwlock->writeCond, rwlock->lock, timeout);
+
+		if (err == -ETIME) {
+			err = ETIMEDOUT;
+			break;
+		}
+		else if (err < 0) {
+			err = -err;
+			break;
+		}
+	}
+
+	if (block != 0) {
+		rwlock->writeWaiting--;
+	}
+
+	if (err == EOK) {
+		rwlock->writeActive++;
+	}
+	else if (block != 0 && rwlock->writeWaiting == 0 && rwlock->writeActive == 0) {
+		condBroadcast(rwlock->readCond);
+	}
+
+	mutexUnlock(rwlock->lock);
+
+	return err;
+}
+
+
 int pthread_rwlock_rdlock(pthread_rwlock_t *rwlock)
 {
-	(void)rwlock;
-	return ENOSYS;
+	return pthread_rwlock_rdlock_ex(rwlock, 1, 0);
 }
 
 
 int pthread_rwlock_tryrdlock(pthread_rwlock_t *rwlock)
 {
-	(void)rwlock;
-	return ENOSYS;
+	return pthread_rwlock_rdlock_ex(rwlock, 0, 0);
 }
 
 
 int pthread_rwlock_trywrlock(pthread_rwlock_t *rwlock)
 {
-	(void)rwlock;
-	return ENOSYS;
+	return pthread_rwlock_wrlock_ex(rwlock, 0, 0);
 }
 
 
 int pthread_rwlock_wrlock(pthread_rwlock_t *rwlock)
 {
-	(void)rwlock;
-	return ENOSYS;
+	return pthread_rwlock_wrlock_ex(rwlock, 1, 0);
 }
 
 
 int pthread_rwlock_unlock(pthread_rwlock_t *rwlock)
 {
-	(void)rwlock;
-	return ENOSYS;
+	int err = pthread_rwlock_lazy_init(rwlock, NULL);
+	if (err != EOK) {
+		return err;
+	}
+
+	mutexLock(rwlock->lock);
+
+	if (rwlock->writeActive > 0) {
+		/* caller is a writer, as there can be at most one */
+		rwlock->writeActive--;
+
+		/* avoid starving the writers by waking waiting writers first */
+		if (rwlock->writeWaiting > 0) {
+			condSignal(rwlock->writeCond);
+		}
+		else {
+			condBroadcast(rwlock->readCond);
+		}
+	}
+	else if (rwlock->readActive > 0) {
+		rwlock->readActive--;
+
+		if (rwlock->readActive == 0 && rwlock->writeWaiting > 0) {
+			condSignal(rwlock->writeCond);
+		}
+	}
+	else {
+		/* caller does not hold this lock */
+		err = EPERM;
+	}
+
+	mutexUnlock(rwlock->lock);
+
+	return err;
+}
+
+
+int pthread_rwlock_timedrdlock(pthread_rwlock_t *restrict rwlock, const struct timespec *restrict abs_timeout)
+{
+	if (pthread_rwlock_tryrdlock(rwlock) == EOK) {
+		return EOK;
+	}
+
+	if (__timespecValid(abs_timeout) == 0) {
+		return EINVAL;
+	}
+
+	const time_t abs_timeout_us = __timespecToUs(abs_timeout);
+
+	if (abs_timeout_us == 0) {
+		return ETIMEDOUT;
+	}
+
+	return pthread_rwlock_rdlock_ex(rwlock, 1, abs_timeout_us);
+}
+
+
+int pthread_rwlock_timedwrlock(pthread_rwlock_t *restrict rwlock, const struct timespec *restrict abs_timeout)
+{
+	if (pthread_rwlock_trywrlock(rwlock) == EOK) {
+		return EOK;
+	}
+
+	if (__timespecValid(abs_timeout) == 0) {
+		return EINVAL;
+	}
+
+	const time_t abs_timeout_us = __timespecToUs(abs_timeout);
+
+	if (abs_timeout_us == 0) {
+		return ETIMEDOUT;
+	}
+
+	return pthread_rwlock_wrlock_ex(rwlock, 1, abs_timeout_us);
+}
+
+
+int pthread_rwlockattr_destroy(pthread_rwlockattr_t *attr)
+{
+	return attr == NULL ? EINVAL : EOK;
+}
+
+
+int pthread_rwlockattr_init(pthread_rwlockattr_t *attr)
+{
+	if (attr == NULL) {
+		return EINVAL;
+	}
+
+	*attr = pthread_rwlockattr_default;
+
+	return EOK;
+}
+
+
+int pthread_rwlockattr_getpshared(const pthread_rwlockattr_t *restrict attr, int *restrict pshared)
+{
+	if (attr == NULL || pshared == NULL) {
+		return EINVAL;
+	}
+
+	*pshared = attr->pshared;
+
+	return EOK;
+}
+
+
+int pthread_rwlockattr_setpshared(pthread_rwlockattr_t *attr, int pshared)
+{
+	int err = EOK;
+
+	if (attr == NULL || (pshared != PTHREAD_PROCESS_PRIVATE && pshared != PTHREAD_PROCESS_SHARED)) {
+		return EINVAL;
+	}
+
+	if (pshared == PTHREAD_PROCESS_SHARED) {
+		return ENOTSUP;
+	}
+
+	attr->pshared = pshared;
+
+	return err;
+}
+
+
+static int pthread_rwlock_destroy_cb(void *resource)
+{
+	pthread_rwlock_t *rwlock = resource;
+	resourceDestroy(rwlock->writeCond);
+	resourceDestroy(rwlock->readCond);
+	resourceDestroy(rwlock->lock);
+	return EOK;
 }
 
 
 int pthread_rwlock_destroy(pthread_rwlock_t *rwlock)
 {
-	(void)rwlock;
-	return ENOSYS;
+	if (rwlock == NULL) {
+		return EINVAL;
+	}
+	return pthread_destroy_acquire_release(&rwlock->initialized, rwlock, pthread_rwlock_destroy_cb);
 }
 
 
 int pthread_rwlock_init(pthread_rwlock_t *__restrict__ rwlock, const pthread_rwlockattr_t *__restrict__ attr)
 {
-	(void)rwlock;
-	(void)attr;
-	return ENOSYS;
+	if (rwlock == NULL) {
+		return EINVAL;
+	}
+	atomic_store_explicit(&rwlock->initialized, RESOURCE_UNINITIALIZED, memory_order_relaxed);
+	return pthread_rwlock_lazy_init(rwlock, attr);
 }
 
 
@@ -1454,7 +1769,6 @@ void _pthread_init(void)
 	mutexCreate(&pthread_common.pthread_key_lock);
 	mutexCreate(&pthread_common.pthread_list_lock);
 	mutexCreate(&pthread_common.pthread_atfork_lock);
-	mutexCreate(&pthread_common.mutex_cond_init_lock);
 	pthread_mutex_init(&pthread_common.pthread_once_lock, NULL);
 	pthread_cond_init(&pthread_common.pthread_once_cond, NULL);
 	pthread_common.pthread_list = NULL;

@@ -84,6 +84,21 @@ extern size_t mbrlen(const char *__restrict s, size_t n, mbstate_t *__restrict p
 extern int wcwidth(wchar_t wc);
 
 
+extern int wcswidth(const wchar_t *pwcs, size_t n);
+
+
+extern int wcscoll(const wchar_t *ws1, const wchar_t *ws2);
+
+
+extern int wctob(wint_t c);
+
+
+extern wchar_t *wmemchr(const wchar_t *s, wchar_t c, size_t n);
+
+
+extern wchar_t *wcsdup(const wchar_t *s);
+
+
 #ifdef __cplusplus
 }
 #endif

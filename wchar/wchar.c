@@ -419,3 +419,53 @@ int wcwidth(wchar_t wc)
 	}
 	return 1;
 }
+
+
+int wcswidth(const wchar_t *pwcs, size_t n)
+{
+	int w = 0, cw;
+	while (n-- > 0 && *pwcs != L'\0') {
+		cw = wcwidth(*pwcs++);
+		if (cw < 0) {
+			return -1;
+		}
+		w += cw;
+	}
+	return w;
+}
+
+
+int wcscoll(const wchar_t *ws1, const wchar_t *ws2)
+{
+	return wcscmp(ws1, ws2); /* C/POSIX locale: collation order == code-point order */
+}
+
+
+int wctob(wint_t c)
+{
+	/* stateless single-byte encoding: bytes 0..255 map to themselves */
+	return (c != WEOF && (unsigned int)c < 0x100u) ? (int)c : -1 /* EOF */;
+}
+
+
+wchar_t *wmemchr(const wchar_t *s, wchar_t c, size_t n)
+{
+	while (n-- > 0) {
+		if (*s == c) {
+			return (wchar_t *)s;
+		}
+		s++;
+	}
+	return NULL;
+}
+
+
+wchar_t *wcsdup(const wchar_t *s)
+{
+	size_t n = wcslen(s) + 1;
+	wchar_t *p = malloc(n * sizeof(wchar_t));
+	if (p != NULL) {
+		wmemcpy(p, s, n);
+	}
+	return p;
+}

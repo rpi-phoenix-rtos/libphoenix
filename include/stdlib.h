@@ -122,6 +122,14 @@ extern void *reallocf(void *ptr, size_t size);
 extern size_t malloc_usable_size(void *ptr);
 
 
+/* Returns the (short) name of the current program, as recorded at startup. */
+extern const char *getprogname(void);
+
+
+/* Sets the name subsequently returned by getprogname(). */
+extern void setprogname(const char *progname);
+
+
 /* Causes an abnormal program termination. */
 extern void abort(void) __attribute__((__noreturn__));
 

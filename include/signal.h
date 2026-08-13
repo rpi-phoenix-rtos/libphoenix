@@ -160,6 +160,10 @@ extern int sigpending(sigset_t *);
 extern int sigprocmask(int, const sigset_t *, sigset_t *);
 
 
+/* POSIX declares pthread_sigmask in <signal.h> (also available via <pthread.h>). */
+extern int pthread_sigmask(int how, const sigset_t *set, sigset_t *oldset);
+
+
 extern int sigrelse(int);
 
 

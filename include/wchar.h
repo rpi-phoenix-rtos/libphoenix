@@ -78,6 +78,12 @@ extern size_t mbsrtowcs(wchar_t *__restrict dst, const char **__restrict src, si
 extern size_t wcsrtombs(char *__restrict dst, const wchar_t **__restrict src, size_t len, mbstate_t *__restrict ps);
 
 
+extern size_t mbrlen(const char *__restrict s, size_t n, mbstate_t *__restrict ps);
+
+
+extern int wcwidth(wchar_t wc);
+
+
 #ifdef __cplusplus
 }
 #endif

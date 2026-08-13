@@ -392,3 +392,30 @@ int wcscmp(const wchar_t *ws1, const wchar_t *ws2)
 
 	return ret;
 }
+
+
+size_t mbrlen(const char *__restrict s, size_t n, mbstate_t *__restrict ps)
+{
+	(void)ps; /* stateless C/POSIX single-byte encoding */
+	if (s == NULL) {
+		return 0;
+	}
+	if (n == 0) {
+		return (size_t)-2; /* incomplete */
+	}
+	return (*s == '\0') ? 0 : 1;
+}
+
+
+int wcwidth(wchar_t wc)
+{
+	if (wc == 0) {
+		return 0;
+	}
+	/* C/POSIX locale: C0/C1 control ranges have no column width; everything
+	 * else is treated as a single column. */
+	if ((wc >= 0 && wc < 0x20) || (wc >= 0x7f && wc < 0xa0)) {
+		return -1;
+	}
+	return 1;
+}

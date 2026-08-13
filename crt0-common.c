@@ -67,7 +67,7 @@ static void _fini_array(void)
 
 
 extern void _libc_init(void);
-extern int main(int argc, char **argv);
+extern int main(int argc, char **argv, char **env);
 
 
 char **environ;
@@ -89,5 +89,8 @@ __attribute__((noreturn)) void _startc(void (*cleanup)(void), int argc, char **a
 	atexit(_fini_array);
 	_init_array();
 
-	exit(main(argc, argv));
+	/* POSIX permits main(int, char **, char **); pass envp so programs that
+	 * declare the third parameter (e.g. GNU bash's shell_environment) receive
+	 * it. Passing an extra argument to a two-parameter main is ABI-safe. */
+	exit(main(argc, argv, environ));
 }

@@ -41,7 +41,7 @@ int endmntent(FILE *stream)
 
 struct mntent *getmntent_r(FILE *stream, struct mntent *result, char *buffer, int bufsize)
 {
-	char *field, *freq, *passno;
+	char *freq, *passno;
 
 	if (stream == NULL || result == NULL || buffer == NULL) {
 		return NULL;

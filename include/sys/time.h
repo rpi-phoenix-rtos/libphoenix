@@ -64,8 +64,10 @@ extern int timerisset(struct timeval *tvp);
 #endif
 
 
+/* Per POSIX/BSD, timercmp's arguments are `struct timeval *` — use -> not .
+ * (the previous `.` form silently broke every standard caller, e.g. readline). */
 #define timercmp(a, b, CMP) \
-	((a.tv_sec == b.tv_sec && a.tv_usec CMP b.tv_usec) || a.tv_sec CMP b.tv_sec)
+	(((a)->tv_sec == (b)->tv_sec && (a)->tv_usec CMP (b)->tv_usec) || (a)->tv_sec CMP (b)->tv_sec)
 
 
 #endif /* _SYS_TIME_H_ */

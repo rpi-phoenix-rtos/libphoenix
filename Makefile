@@ -54,6 +54,7 @@ include errno/Makefile
 include locale/Makefile
 include libm/Makefile
 include misc/Makefile
+include mntent/Makefile
 include net/Makefile
 include netinet/Makefile
 include posix/Makefile

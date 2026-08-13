@@ -17,6 +17,7 @@
 #define _LIBPHOENIX_STDIO_EXT_H_
 
 
+#include <sys/cdefs.h>
 #include <stdio.h>
 
 

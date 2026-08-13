@@ -52,6 +52,12 @@ extern "C" {
 #define _SC_PAGE_SIZE  _SC_PAGESIZE /* spec. 1170 compatibility */
 #define _SC_LINE_MAX   5
 
+/* POSIX conformance version (IEEE Std 1003.1-2008). A POSIX system must define
+ * this in <unistd.h>; without it, portable software (e.g. bash) falls back to
+ * legacy non-POSIX code paths such as `union wait`. */
+#define _POSIX_VERSION             200809L
+#define _POSIX2_VERSION            200809L
+
 #define _POSIX_NO_TRUNC             1
 #define _POSIX_ASYNC_IO             -1 /* Async IO not implemented. */
 #define _POSIX_FALLOC               -1 /* posix_fallocate not implemented. */

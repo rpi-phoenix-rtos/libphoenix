@@ -437,8 +437,13 @@ void *malloc(size_t size)
 {
 	void *ptr = NULL;
 
+	/* C allows malloc(0) to return either NULL or a unique freeable pointer.
+	 * glibc/BSD/dlmalloc return a valid pointer; a lot of portable software
+	 * (e.g. jq's jv_mem_calloc) does `p = malloc(0); if (!p) out_of_memory();`
+	 * and mis-reports OOM if we hand back NULL. Allocate a minimum chunk so
+	 * size 0 yields a distinct, freeable, non-NULL pointer. */
 	if (size == 0) {
-		return NULL;
+		size = 1;
 	}
 
 	if ((size + CHUNK_OVERHEAD) < size) {

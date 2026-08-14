@@ -110,3 +110,50 @@ double atanh(double x)
 	r = 0.5 * log1p(2.0 * a / (1.0 - a)); /* a == 1 -> +inf */
 	return (x < 0.0) ? -r : r;
 }
+
+
+/* --- nextafter / nexttoward (C99). math module (math.nextafter/math.ulp) needs
+ * nextafter; libphoenix lacked it. Step x by one ULP toward y via the IEEE-754
+ * bit representation (musl approach). Verified vs glibc. --- */
+
+#include <stdint.h>
+
+double nextafter(double x, double y)
+{
+	union { double f; uint64_t i; } ux = { x }, uy = { y };
+	uint64_t ax, ay;
+
+	if (isnan(x) || isnan(y)) {
+		return x + y;
+	}
+	if (ux.i == uy.i) {
+		return y;
+	}
+	ax = ux.i & 0x7fffffffffffffffULL;
+	ay = uy.i & 0x7fffffffffffffffULL;
+	if (ax == 0) {
+		if (ay == 0) {
+			return y;
+		}
+		ux.i = (uy.i & 0x8000000000000000ULL) | 1; /* smallest subnormal, sign of y */
+	}
+	else if (ax > ay || (((ux.i ^ uy.i) & 0x8000000000000000ULL) != 0)) {
+		ux.i--; /* |x|>|y| or opposite signs -> decrease magnitude */
+	}
+	else {
+		ux.i++;
+	}
+	return ux.f;
+}
+
+
+double nexttoward(double x, long double y)
+{
+	if (isnan(x) || isnan(y)) {
+		return x + (double)y;
+	}
+	if ((long double)x == y) {
+		return (double)y;
+	}
+	return nextafter(x, (y > (long double)x) ? (double)INFINITY : -(double)INFINITY);
+}

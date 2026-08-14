@@ -37,6 +37,11 @@ long sysconf(int name)
 			return _PAGE_SIZE;
 		case _SC_LINE_MAX:
 			return _POSIX2_LINE_MAX;
+		case _SC_CLK_TCK:
+			/* clock_t ticks/second for times(); the conventional fixed value
+			 * (glibc returns 100 regardless of kernel HZ). Software such as
+			 * CPython's _Py_GetTicksPerSecond fails startup if this is < 1. */
+			return 100;
 		default:
 			errno = EINVAL;
 			return -1;

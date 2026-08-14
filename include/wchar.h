@@ -99,6 +99,42 @@ extern wchar_t *wmemchr(const wchar_t *s, wchar_t c, size_t n);
 extern wchar_t *wcsdup(const wchar_t *s);
 
 
+extern wchar_t *wcspbrk(const wchar_t *s, const wchar_t *set);
+
+
+extern size_t wcsspn(const wchar_t *s, const wchar_t *set);
+
+
+extern size_t wcscspn(const wchar_t *s, const wchar_t *set);
+
+
+extern wchar_t *wcsstr(const wchar_t *haystack, const wchar_t *needle);
+
+
+extern wchar_t *wcstok(wchar_t *__restrict s, const wchar_t *__restrict delim, wchar_t **__restrict save);
+
+
+extern long wcstol(const wchar_t *__restrict nptr, wchar_t **__restrict endptr, int base);
+
+
+extern unsigned long wcstoul(const wchar_t *__restrict nptr, wchar_t **__restrict endptr, int base);
+
+
+extern long long wcstoll(const wchar_t *__restrict nptr, wchar_t **__restrict endptr, int base);
+
+
+extern unsigned long long wcstoull(const wchar_t *__restrict nptr, wchar_t **__restrict endptr, int base);
+
+
+extern double wcstod(const wchar_t *__restrict nptr, wchar_t **__restrict endptr);
+
+
+extern float wcstof(const wchar_t *__restrict nptr, wchar_t **__restrict endptr);
+
+
+extern long double wcstold(const wchar_t *__restrict nptr, wchar_t **__restrict endptr);
+
+
 #ifdef __cplusplus
 }
 #endif

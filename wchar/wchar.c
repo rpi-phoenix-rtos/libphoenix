@@ -469,3 +469,126 @@ wchar_t *wcsdup(const wchar_t *s)
 	}
 	return p;
 }
+
+
+/* --- C99 wide-char search/tokenize (were declared-missing) --- */
+
+wchar_t *wcspbrk(const wchar_t *s, const wchar_t *set)
+{
+	for (; *s != L'\0'; ++s) {
+		if (wcschr(set, *s) != NULL) {
+			return (wchar_t *)s;
+		}
+	}
+	return NULL;
+}
+
+
+size_t wcsspn(const wchar_t *s, const wchar_t *set)
+{
+	const wchar_t *p = s;
+	while (*p != L'\0' && wcschr(set, *p) != NULL) {
+		++p;
+	}
+	return (size_t)(p - s);
+}
+
+
+size_t wcscspn(const wchar_t *s, const wchar_t *set)
+{
+	const wchar_t *p = s;
+	while (*p != L'\0' && wcschr(set, *p) == NULL) {
+		++p;
+	}
+	return (size_t)(p - s);
+}
+
+
+wchar_t *wcsstr(const wchar_t *haystack, const wchar_t *needle)
+{
+	size_t n;
+
+	if (*needle == L'\0') {
+		return (wchar_t *)haystack;
+	}
+	n = wcslen(needle);
+	for (; *haystack != L'\0'; ++haystack) {
+		if (*haystack == *needle && wcsncmp(haystack, needle, n) == 0) {
+			return (wchar_t *)haystack;
+		}
+	}
+	return NULL;
+}
+
+
+wchar_t *wcstok(wchar_t *__restrict s, const wchar_t *__restrict delim, wchar_t **__restrict save)
+{
+	wchar_t *tok;
+
+	if (s == NULL) {
+		s = *save;
+	}
+	if (s == NULL) {
+		return NULL;
+	}
+	while (*s != L'\0' && wcschr(delim, *s) != NULL) {
+		++s;
+	}
+	if (*s == L'\0') {
+		*save = NULL;
+		return NULL;
+	}
+	tok = s;
+	while (*s != L'\0' && wcschr(delim, *s) == NULL) {
+		++s;
+	}
+	if (*s != L'\0') {
+		*s = L'\0';
+		*save = s + 1;
+	}
+	else {
+		*save = NULL;
+	}
+	return tok;
+}
+
+
+/* --- C99 wide-string -> number. The numeric grammar is ASCII, so copy the
+ * ASCII-range prefix to a narrow buffer, defer to strto*, and map endptr back
+ * 1:1. (A wchar >= 128 can't be part of a number, so stop there -- strto* would
+ * stop at the same offset.) --- */
+
+static size_t wcstonum_narrow(const wchar_t *ws, char *buf, size_t cap)
+{
+	size_t i = 0;
+	while (ws[i] != L'\0' && i < (cap - 1u) && (unsigned long)ws[i] < 128uL) {
+		buf[i] = (char)ws[i];
+		++i;
+	}
+	buf[i] = '\0';
+	return i;
+}
+
+#define WCSTONUM_BUFSZ 512u
+
+#define WCSTONUM_DEF(NAME, RET, CALL, ARGS) \
+	RET NAME ARGS \
+	{ \
+		char buf[WCSTONUM_BUFSZ]; \
+		char *cend; \
+		RET r; \
+		wcstonum_narrow(nptr, buf, sizeof(buf)); \
+		r = CALL; \
+		if (endptr != NULL) { \
+			*endptr = (wchar_t *)nptr + (size_t)(cend - buf); \
+		} \
+		return r; \
+	}
+
+WCSTONUM_DEF(wcstol,   long,               strtol(buf, &cend, base),   (const wchar_t *__restrict nptr, wchar_t **__restrict endptr, int base))
+WCSTONUM_DEF(wcstoul,  unsigned long,      strtoul(buf, &cend, base),  (const wchar_t *__restrict nptr, wchar_t **__restrict endptr, int base))
+WCSTONUM_DEF(wcstoll,  long long,          strtoll(buf, &cend, base),  (const wchar_t *__restrict nptr, wchar_t **__restrict endptr, int base))
+WCSTONUM_DEF(wcstoull, unsigned long long, strtoull(buf, &cend, base), (const wchar_t *__restrict nptr, wchar_t **__restrict endptr, int base))
+WCSTONUM_DEF(wcstod,   double,             strtod(buf, &cend),         (const wchar_t *__restrict nptr, wchar_t **__restrict endptr))
+WCSTONUM_DEF(wcstof,   float,              strtof(buf, &cend),         (const wchar_t *__restrict nptr, wchar_t **__restrict endptr))
+WCSTONUM_DEF(wcstold,  long double,        strtold(buf, &cend),        (const wchar_t *__restrict nptr, wchar_t **__restrict endptr))

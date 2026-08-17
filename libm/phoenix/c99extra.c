@@ -32,12 +32,17 @@ double log1p(double x)
 	if (isnan(x)) {
 		return x;
 	}
+	if (isinf(x)) {
+		return (x > 0.0) ? INFINITY : NAN; /* +inf -> +inf; -inf -> NaN (domain) */
+	}
 	u = 1.0 + x;
 	if (u == 1.0) {
 		return x; /* x tiny: 1+x rounds to 1, log1p(x) ~= x */
 	}
 	if (u <= 0.0) {
-		return log(u); /* x == -1 -> -inf; x < -1 -> NaN */
+		/* x == -1 -> -inf (phoenix log(0) yields NaN, so return -inf directly);
+		 * x < -1 -> NaN (domain error) */
+		return (u == 0.0) ? -INFINITY : NAN;
 	}
 	return log(u) * (x / (u - 1.0));
 }
@@ -74,7 +79,7 @@ double asinh(double x)
 	}
 	a = fabs(x);
 	r = log1p(a + a * a / (1.0 + sqrt(1.0 + a * a)));
-	return (x < 0.0) ? -r : r;
+	return copysign(r, x); /* preserve sign, incl. asinh(-0.0) == -0.0 */
 }
 
 
@@ -108,7 +113,7 @@ double atanh(double x)
 		return NAN; /* domain error */
 	}
 	r = 0.5 * log1p(2.0 * a / (1.0 - a)); /* a == 1 -> +inf */
-	return (x < 0.0) ? -r : r;
+	return copysign(r, x); /* preserve sign, incl. atanh(-0.0) == -0.0 */
 }
 
 

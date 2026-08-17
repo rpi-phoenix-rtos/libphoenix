@@ -108,6 +108,16 @@ extern double               erfc(double);
 extern double               lgamma(double);
 extern double               tgamma(double);
 
+/* Phoenix libphoenix additions (libm/phoenix/gammaextra.c) */
+extern double               lgamma_r(double, int *);
+extern float                lgammaf_r(float, int *);
+extern double               exp10(double);
+extern float                exp10f(float);
+extern double               drem(double, double);
+extern float                dremf(float, float);
+extern double               scalb(double, double);
+extern double               significand(double);
+
 /* Double nearest integer functions */
 extern double               ceil(double);
 extern double               floor(double);

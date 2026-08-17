@@ -126,6 +126,14 @@ int chroot(const char *path)
 
 int getrlimit(int resource, struct rlimit *rlp)
 {
+	/* Phoenix does not enforce per-process resource limits: report every
+	 * resource as unlimited. (Previously this left *rlp uninitialized while
+	 * returning success, so callers read a garbage soft limit.) */
+	(void)resource;
+	if (rlp != NULL) {
+		rlp->rlim_cur = RLIM_INFINITY;
+		rlp->rlim_max = RLIM_INFINITY;
+	}
 	return 0;
 }
 

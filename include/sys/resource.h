@@ -29,6 +29,19 @@ extern "C" {
 #define RLIMIT_STACK 4096
 #define RLIMIT_NOFILE 65536
 
+/* Additional POSIX/common resource identifiers. Phoenix does not enforce these
+ * per-process limits, so getrlimit() reports them all as RLIM_INFINITY; the
+ * values below just need to be distinct constants that portable software checks
+ * for with #ifdef (e.g. GNU coreutils sort keys its rlimit fallback on
+ * RLIMIT_DATA). */
+#define RLIMIT_DATA    1
+#define RLIMIT_AS      2
+#define RLIMIT_FSIZE   3
+#define RLIMIT_CPU     5
+#define RLIMIT_RSS     6
+#define RLIMIT_NPROC   7
+#define RLIMIT_MEMLOCK 8
+
 
 typedef int rlim_t;
 

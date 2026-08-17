@@ -44,6 +44,25 @@ extern int munmap(void *vaddr, size_t size);
 extern int mprotect(void *vaddr, size_t len, int prot);
 
 
+/* Memory locking. Phoenix has no swap-to-disk, so anonymous pages are never
+ * paged out to a backing store: locking is a no-op that trivially succeeds.
+ * Provided for portable software that locks sensitive buffers (e.g. OpenSSL's
+ * secure heap). */
+#define MCL_CURRENT 1
+#define MCL_FUTURE  2
+
+extern int mlock(const void *addr, size_t len);
+
+
+extern int munlock(const void *addr, size_t len);
+
+
+extern int mlockall(int flags);
+
+
+extern int munlockall(void);
+
+
 extern addr_t va2pa(void *va);
 
 

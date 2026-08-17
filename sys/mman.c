@@ -38,3 +38,34 @@ void *mmap(void *vaddr, size_t size, int prot, int flags, int fildes, off_t offs
 
 	return vaddr;
 }
+
+
+/* Phoenix has no swap-to-disk, so anonymous memory is never paged out to a
+ * backing store; locking it against paging is a no-op that trivially succeeds. */
+int mlock(const void *addr, size_t len)
+{
+	(void)addr;
+	(void)len;
+	return 0;
+}
+
+
+int munlock(const void *addr, size_t len)
+{
+	(void)addr;
+	(void)len;
+	return 0;
+}
+
+
+int mlockall(int flags)
+{
+	(void)flags;
+	return 0;
+}
+
+
+int munlockall(void)
+{
+	return 0;
+}

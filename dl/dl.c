@@ -125,6 +125,12 @@ static dl_obj_t *dl_loaded;
 static char dl_errbuf[160];
 static int dl_haveErr;
 
+/* Pseudo-handle returned by dlopen(NULL): a handle to the main program itself.
+ * dlsym() on it resolves against the host executable's symbol table (the same
+ * table used to satisfy a loaded object's undefined symbols). This is the POSIX
+ * "global symbol object" behaviour that e.g. Python's ctypes (PyDLL(None)) needs. */
+static dl_obj_t dl_mainProg;
+
 /* the host executable's symbol table, mapped + cached on first use */
 static struct {
 	int tried;
@@ -240,8 +246,12 @@ void *dlopen(const char *filename, int flags)
 	(void)flags; /* relocation is always eager */
 
 	if (filename == NULL) {
-		dl_seterr("dlopen: NULL filename", NULL);
-		return NULL;
+		/* handle to the main program: dlsym resolves against the host symtab */
+		if (!dl_host.tried) {
+			dl_hostInit();
+		}
+		dl_haveErr = 0;
+		return &dl_mainProg;
 	}
 	fd = open(filename, O_RDONLY);
 	if (fd < 0) {
@@ -441,6 +451,13 @@ void *dlsym(void *handle, const char *symbol)
 		dl_seterr("dlsym: bad argument", NULL);
 		return NULL;
 	}
+	if (o == &dl_mainProg) {
+		void *v = dl_hostLookup(symbol);
+		if (v == NULL) {
+			dl_seterr("dlsym: symbol not found", symbol);
+		}
+		return v;
+	}
 	for (i = 0; i < o->symcount; i++) {
 		if (o->symtab[i].st_shndx != SHN_UNDEF &&
 			strcmp(o->strtab + o->symtab[i].st_name, symbol) == 0) {
@@ -458,6 +475,9 @@ int dlclose(void *handle)
 
 	if (o == NULL) {
 		return -1;
+	}
+	if (o == &dl_mainProg) {
+		return 0; /* the main-program handle is never unmapped */
 	}
 	for (pp = &dl_loaded; *pp != NULL; pp = &(*pp)->next) {
 		if (*pp == o) {

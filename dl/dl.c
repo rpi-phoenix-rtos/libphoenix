@@ -166,6 +166,27 @@ static void dl_hostInit(void)
 		return;
 	}
 	fd = open(argv_progname, O_RDONLY);
+	if (fd < 0 && strchr(argv_progname, '/') == NULL) {
+		/* argv[0] is a bare name (e.g. "python3" launched via PATH): resolve it the
+		 * way the shell did, so dlopen(NULL)/dlsym can read our own symbol table
+		 * regardless of how we were invoked. */
+		const char *path = getenv("PATH");
+		if (path != NULL) {
+			const char *p = path;
+			char cand[512];
+			while ((*p != '\0') && (fd < 0)) {
+				const char *colon = strchr(p, ':');
+				size_t dlen = (colon != NULL) ? (size_t)(colon - p) : strlen(p);
+				if ((dlen > 0) && ((dlen + 1 + strlen(argv_progname) + 1) <= sizeof(cand))) {
+					memcpy(cand, p, dlen);
+					cand[dlen] = '/';
+					strcpy(cand + dlen + 1, argv_progname);
+					fd = open(cand, O_RDONLY);
+				}
+				p = (colon != NULL) ? (colon + 1) : (p + dlen);
+			}
+		}
+	}
 	if (fd < 0) {
 		return;
 	}

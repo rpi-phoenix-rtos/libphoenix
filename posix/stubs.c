@@ -157,6 +157,15 @@ dev_t makedev(unsigned int maj, unsigned int min)
 
 int getrusage(int who, struct rusage *usage)
 {
+	(void)who;
+	if (usage == NULL) {
+		errno = EFAULT;
+		return -1;
+	}
+	/* No per-process resource accounting yet; return a zeroed (defined) struct
+	 * rather than leaving the caller's rusage undefined (was `return 0` with the
+	 * out-param untouched, so callers read stack garbage). */
+	memset(usage, 0, sizeof(*usage));
 	return 0;
 }
 

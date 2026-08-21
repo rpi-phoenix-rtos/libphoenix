@@ -23,8 +23,19 @@
 #include <phoenix/types.h>
 
 #ifdef __cplusplus
-#include <atomic>
-#define _ATOMIC(type) std::atomic<type>
+/* Do NOT pull in <atomic> here: this header is reached (via <pthread.h>) by
+ * libstdc++'s own -std=gnu++98 source TUs, and <atomic> hard-errors under c++98
+ * (bits/c++0x_warning.h). Since _ATOMIC is a plain int in C++ (below), <atomic>
+ * is not needed anyway. */
+/* In C++ these POSIX types (pthread_mutex_t/cond_t/rwlock_t below) must stay
+ * COPYABLE: gcc-16's libstdc++ <ext/concurrence.h> copy-initializes the underlying
+ * __gthread_* type from PTHREAD_MUTEX_INITIALIZER, and std::atomic has a DELETED
+ * copy ctor — which made libstdc++ fail to compile under gcc-16 ("use of deleted
+ * function std::atomic<int>::atomic(const std::atomic<int>&)"). Use a plain,
+ * layout-compatible int (same size/alignment as the C `_Atomic int`); the actual
+ * atomic accesses on these fields live entirely in libphoenix's C sources
+ * (pthread.c), never in C++, so no C++ TU ever needs atomic semantics here. */
+#define _ATOMIC(type) type
 #else
 #include <stdatomic.h>
 #define _ATOMIC(type) _Atomic(type)

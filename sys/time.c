@@ -211,5 +211,7 @@ int lutimes(const char *filename, const struct timeval tv[2])
 
 int timerisset(struct timeval *tvp)
 {
-	return 0;
+	/* POSIX/BSD: nonzero iff the timer has any nonzero component.
+	 * (Was an unimplemented stub returning 0 unconditionally.) */
+	return (tvp->tv_sec != 0) || (tvp->tv_usec != 0);
 }

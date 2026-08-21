@@ -401,9 +401,33 @@ int pthread_join(pthread_t thread, void **value_ptr)
 int pthread_detach(pthread_t thread)
 {
 	pthread_ctx *ctx = (pthread_ctx *)thread;
-	mutexLock(pthread_common.pthread_list_lock);
+	pthread_ctx *p;
+	int found = 0;
 
 	if (ctx == NULL) {
+		return ESRCH;
+	}
+
+	mutexLock(pthread_common.pthread_list_lock);
+
+	/* Validate the handle still refers to a live thread before dereferencing
+	 * it. A detached thread frees its own ctx on exit (pthread_do_exit ->
+	 * _pthread_release, under this same lock), so re-detaching an
+	 * already-detached-and-terminated thread would dereference freed memory
+	 * (use-after-free). Walk the live list under the lock that also guards that
+	 * free and reject a stale handle with ESRCH instead of faulting. */
+	p = pthread_common.pthread_list;
+	if (p != NULL) {
+		do {
+			if (p == ctx) {
+				found = 1;
+				break;
+			}
+			p = p->next;
+		} while (p != pthread_common.pthread_list);
+	}
+
+	if (found == 0) {
 		mutexUnlock(pthread_common.pthread_list_lock);
 		return ESRCH;
 	}

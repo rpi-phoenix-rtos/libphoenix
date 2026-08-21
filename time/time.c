@@ -518,9 +518,143 @@ clock_t clock(void)
 	return (clock_t)-1;
 }
 
+/* Parse up to maxdigits decimal digits (skipping leading blanks) from *sp into
+ * *out; advance *sp. Returns digits consumed (0 = none = fail). */
+static int strptime_num(const char **sp, int maxdigits, int *out)
+{
+	const char *s = *sp;
+	int n = 0, v = 0;
+
+	while (*s == ' ' || *s == '\t') {
+		s++;
+	}
+	while (n < maxdigits && *s >= '0' && *s <= '9') {
+		v = v * 10 + (*s - '0');
+		s++;
+		n++;
+	}
+	if (n == 0) {
+		return 0;
+	}
+	*out = v;
+	*sp = s;
+	return n;
+}
+
+
+/* Case-insensitively match one of `count` names (full name or 3-char abbrev)
+ * at *sp; on match advance *sp and return the index, else return -1. */
+static int strptime_name(const char **sp, const char names[][10], int count)
+{
+	const char *s = *sp;
+	int i, j, a, b;
+
+	for (i = 0; i < count; i++) {
+		for (j = 0; names[i][j] != '\0'; j++) {
+			a = s[j]; b = names[i][j];
+			if (a >= 'A' && a <= 'Z') { a += 32; }
+			if (b >= 'A' && b <= 'Z') { b += 32; }
+			if (a != b) { break; }
+		}
+		if (names[i][j] == '\0') { /* full-name match */
+			*sp = s + j;
+			return i;
+		}
+		for (j = 0; j < 3; j++) { /* 3-char abbreviation */
+			a = s[j]; b = names[i][j];
+			if (a >= 'A' && a <= 'Z') { a += 32; }
+			if (b >= 'A' && b <= 'Z') { b += 32; }
+			if (a != b) { break; }
+		}
+		if (j == 3) {
+			*sp = s + 3;
+			return i;
+		}
+	}
+	return -1;
+}
+
+
 char *strptime(const char *__restrict buf, const char *__restrict format, struct tm *__restrict tm)
 {
-	return NULL;
+	const char *b = buf, *f = format;
+	int v, idx;
+
+	while (*f != '\0') {
+		if (*f == '%') {
+			f++;
+			switch (*f) {
+				case 'Y': /* year with century */
+					if (strptime_num(&b, 4, &v) == 0) { return NULL; }
+					tm->tm_year = v - 1900;
+					break;
+				case 'y': /* year within century (POSIX: 69-99 => 19xx, 0-68 => 20xx) */
+					if (strptime_num(&b, 2, &v) == 0) { return NULL; }
+					tm->tm_year = (v < 69) ? (v + 100) : v;
+					break;
+				case 'm':
+					if (strptime_num(&b, 2, &v) == 0 || v < 1 || v > 12) { return NULL; }
+					tm->tm_mon = v - 1;
+					break;
+				case 'd':
+				case 'e':
+					if (strptime_num(&b, 2, &v) == 0 || v < 1 || v > 31) { return NULL; }
+					tm->tm_mday = v;
+					break;
+				case 'H':
+					if (strptime_num(&b, 2, &v) == 0 || v < 0 || v > 23) { return NULL; }
+					tm->tm_hour = v;
+					break;
+				case 'M':
+					if (strptime_num(&b, 2, &v) == 0 || v < 0 || v > 59) { return NULL; }
+					tm->tm_min = v;
+					break;
+				case 'S':
+					if (strptime_num(&b, 2, &v) == 0 || v < 0 || v > 60) { return NULL; }
+					tm->tm_sec = v;
+					break;
+				case 'j':
+					if (strptime_num(&b, 3, &v) == 0 || v < 1 || v > 366) { return NULL; }
+					tm->tm_yday = v - 1;
+					break;
+				case 'a':
+				case 'A':
+					idx = strptime_name(&b, wdayasc, 7);
+					if (idx < 0) { return NULL; }
+					tm->tm_wday = idx;
+					break;
+				case 'b':
+				case 'B':
+				case 'h':
+					idx = strptime_name(&b, monasc, 12);
+					if (idx < 0) { return NULL; }
+					tm->tm_mon = idx;
+					break;
+				case 'n':
+				case 't':
+					while (*b == ' ' || *b == '\t' || *b == '\n') { b++; }
+					break;
+				case '%':
+					if (*b != '%') { return NULL; }
+					b++;
+					break;
+				default: /* unsupported directive */
+					return NULL;
+			}
+			f++;
+		}
+		else if (*f == ' ' || *f == '\t' || *f == '\n') {
+			while (*b == ' ' || *b == '\t' || *b == '\n') { b++; }
+			f++;
+		}
+		else {
+			if (*b != *f) { return NULL; }
+			b++;
+			f++;
+		}
+	}
+
+	return (char *)b;
 }
 
 

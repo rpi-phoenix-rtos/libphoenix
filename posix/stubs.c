@@ -15,6 +15,8 @@
 
 #include <locale.h>
 #include <string.h>
+#include <errno.h>
+#include <sys/sysmacros.h>
 #include <unistd.h>
 #include <grp.h>
 #include <sys/socket.h>
@@ -146,7 +148,10 @@ int setrlimit(int resource, const struct rlimit *rlp)
 
 dev_t makedev(unsigned int maj, unsigned int min)
 {
-	return 0;
+	/* glibc-compatible dev_t packing (mknod ignores dev on Phoenix, so the only
+	 * constraint is that makedev/major/minor agree — they were all `return 0`). */
+	return ((dev_t)(maj & 0xfffu) << 8) | (dev_t)(min & 0xffu)
+		| ((dev_t)(min & 0xfff00u) << 12);
 }
 
 
@@ -161,15 +166,15 @@ void sync(void)
 }
 
 
-unsigned int major(int dev)
+unsigned int major(dev_t dev)
 {
-	return 0;
+	return (unsigned int)((dev >> 8) & 0xfffu);
 }
 
 
-unsigned int minor(int dev)
+unsigned int minor(dev_t dev)
 {
-	return 0;
+	return (unsigned int)((dev & 0xffu) | ((dev >> 12) & 0xfff00u));
 }
 
 
@@ -187,7 +192,18 @@ long ulimit(int __cmd, ...)
 
 int wctomb(char *str, wchar_t wchar)
 {
-	return 0;
+	/* C/POSIX locale: 1:1 byte mapping (mirrors wcrtomb). str==NULL queries
+	 * whether encodings are state-dependent; they are not, so return 0.
+	 * (Was a stub returning 0 unconditionally — encoded nothing.) */
+	if (str == NULL) {
+		return 0;
+	}
+	if ((unsigned long)wchar > 0xffUL) {
+		errno = EILSEQ;
+		return -1;
+	}
+	*str = (char)wchar;
+	return 1;
 }
 
 

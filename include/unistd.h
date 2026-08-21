@@ -51,6 +51,8 @@ extern "C" {
 #define _SC_PAGESIZE   4
 #define _SC_PAGE_SIZE  _SC_PAGESIZE /* spec. 1170 compatibility */
 #define _SC_LINE_MAX   5
+#define _SC_NPROCESSORS_CONF 6
+#define _SC_NPROCESSORS_ONLN 7
 
 /* POSIX conformance version (IEEE Std 1003.1-2008). A POSIX system must define
  * this in <unistd.h>; without it, portable software (e.g. bash) falls back to

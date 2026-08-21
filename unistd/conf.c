@@ -19,6 +19,15 @@
 #include <sys/statvfs.h>
 #include <limits.h>
 
+/* _SC_NPROCESSORS_* needs the CPU count. On aarch64-generic (RPi4) the kernel
+ * exposes it via platformctl(pctl_cpucount); other targets fall back to EINVAL
+ * (matches the previous unimplemented behaviour). Kept as a guarded inline (like
+ * arch/aarch64/reboot.c's __CPU_GENERIC guard) rather than a cross-arch hook. */
+#if defined(__aarch64__) && defined(__CPU_GENERIC)
+#include <sys/platform.h>
+#include <phoenix/arch/aarch64/generic/generic.h>
+#endif
+
 
 long sysconf(int name)
 {
@@ -42,6 +51,20 @@ long sysconf(int name)
 			 * (glibc returns 100 regardless of kernel HZ). Software such as
 			 * CPython's _Py_GetTicksPerSecond fails startup if this is < 1. */
 			return 100;
+		case _SC_NPROCESSORS_CONF:
+		case _SC_NPROCESSORS_ONLN:
+#if defined(__aarch64__) && defined(__CPU_GENERIC)
+			{
+				platformctl_t pctl = { 0 };
+				pctl.action = pctl_get;
+				pctl.type = pctl_cpucount;
+				if (platformctl(&pctl) == 0) {
+					return (long)pctl.task.cpucount.count;
+				}
+			}
+#endif
+			errno = EINVAL;
+			return -1;
 		default:
 			errno = EINVAL;
 			return -1;

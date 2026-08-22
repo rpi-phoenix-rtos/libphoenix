@@ -12,7 +12,6 @@
  * %LICENSE%
  */
 
-#include <stdbool.h>
 #include <sys/time.h>
 #include <errno.h>
 #include <sys/threads.h>
@@ -71,17 +70,22 @@ int semaphoreDown(semaphore_t *s, time_t timeout)
 int semaphoreUp(semaphore_t *s)
 {
 	mutexLock(s->mutex);
-	bool wasZero = (s->v == 0);
 	++s->v;
 	mutexUnlock(s->mutex);
 
-	/* Phoenix specific - condSignal causes reschedule,
-	 * so signal under mutex causes performance penalty.
-	 * Conditionals are sticky, so there's no race risk.
+	/* Signal outside the mutex - condSignal reschedules, so doing it under the
+	 * lock forces the woken waiter to immediately re-block on the mutex we still
+	 * hold. Signalling after unlock is race-free here: a waiter only parks while
+	 * holding this mutex (condWait releases it atomically), so no up can slip its
+	 * increment in before the waiter has parked.
+	 *
+	 * This MUST fire on every up, not only on the 0->1 transition: a counting
+	 * semaphore can have several units become available while multiple threads
+	 * are parked. Signalling only when v was zero wakes exactly one waiter and
+	 * loses the wakeup for every other parked waiter even though v > 0, which
+	 * deadlocks multi-consumer pools (e.g. vkQuake's task workers).
 	 */
-	if (wasZero) {
-		condSignal(s->cond);
-	}
+	condSignal(s->cond);
 
 	return 0;
 }

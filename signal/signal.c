@@ -338,6 +338,25 @@ int sigaction(int sig, const struct sigaction *act, struct sigaction *oact)
 }
 
 
+int siginterrupt(int sig, int flag)
+{
+	struct sigaction act;
+
+	if (sigaction(sig, NULL, &act) == -1) {
+		return -1;
+	}
+
+	if (flag != 0) {
+		act.sa_flags &= ~SA_RESTART;
+	}
+	else {
+		act.sa_flags |= SA_RESTART;
+	}
+
+	return sigaction(sig, &act, NULL);
+}
+
+
 int sigprocmask(int how, const sigset_t *set, sigset_t *oldset)
 {
 	int i;

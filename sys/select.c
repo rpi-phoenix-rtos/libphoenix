@@ -62,11 +62,19 @@ int select(int nfds, fd_set *rd, fd_set *wr, fd_set *ex, struct timeval *to)
 		if (SFD_ISSET(i, rd) || SFD_ISSET(i, wr) || SFD_ISSET(i, ex))
 			++n;
 
-	rv = poll_timeout(to);
-	timeout = rv < 0 ? 0 : (time_t)rv;
+	/* poll_timeout() returns -1 for a NULL (infinite) timeout; pass that through
+	 * so poll() blocks indefinitely. The old `rv < 0 ? 0` clamp turned every
+	 * select(..., NULL) into a 0 ms poll that returned immediately with no fds
+	 * ready — which, among other things, made GNU readline's blocking select()
+	 * (rl_getc) see a 0 return, treat it as a timeout and abort, so interactive
+	 * bash exited at its first prompt. */
+	timeout = poll_timeout(to);
 
 	if (n == 0) {
-		rv = usleep(timeout);
+		/* No descriptors selected: just wait out the timeout. poll(NULL, 0, ms)
+		 * honors -1 == block indefinitely and takes milliseconds (the old
+		 * usleep() both lost the infinite case and mis-scaled ms as us). */
+		rv = poll(NULL, 0, (timeout < 0) ? -1 : (int)timeout);
 		return rv < 0 ? -1 : 0;
 	}
 
@@ -91,7 +99,7 @@ int select(int nfds, fd_set *rd, fd_set *wr, fd_set *ex, struct timeval *to)
 		++n;
 	}
 
-	rv = poll(pfd, n, timeout);
+	rv = poll(pfd, n, (timeout < 0) ? -1 : (int)timeout);
 
 	for (i = 0; i < n; ++i) {
 		if ((pfd[i].revents & POLLNVAL) != 0) {

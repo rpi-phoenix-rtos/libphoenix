@@ -23,22 +23,7 @@
 #include <phoenix/types.h>
 
 #ifdef __cplusplus
-/* Do NOT pull in <atomic> here: this header is reached (via <pthread.h>) by
- * libstdc++'s own -std=gnu++98 source TUs, and <atomic> hard-errors under c++98
- * (bits/c++0x_warning.h). Since _ATOMIC is a plain int in C++ (below), <atomic>
- * is not needed anyway. */
-/* In C++ these POSIX types (pthread_mutex_t/cond_t/rwlock_t below) must stay
- * COPYABLE: gcc-16's libstdc++ <ext/concurrence.h> copy-initializes the underlying
- * __gthread_* type from PTHREAD_MUTEX_INITIALIZER, and std::atomic has a DELETED
- * copy ctor — which made libstdc++ fail to compile under gcc-16 ("use of deleted
- * function std::atomic<int>::atomic(const std::atomic<int>&)"). Use a plain,
- * layout-compatible int (same size/alignment as the C `_Atomic int`); the actual
- * atomic accesses on these fields live entirely in libphoenix's C sources
- * (pthread.c), never in C++, so no C++ TU ever needs atomic semantics here. */
-#define _ATOMIC(type) type
-#else
-#include <stdatomic.h>
-#define _ATOMIC(type) _Atomic(type)
+extern "C" {
 #endif
 
 typedef int clock_t;
@@ -69,8 +54,12 @@ typedef uintptr_t pthread_t;
 
 typedef struct {
 	handle_t mutexh;
-	_ATOMIC(int) initialized;
+	int initialized;
 } pthread_mutex_t;
+
+typedef struct {
+	int locked;
+} pthread_spinlock_t;
 
 typedef struct {
 	handle_t lock;
@@ -79,9 +68,8 @@ typedef struct {
 	size_t readActive;
 	size_t writeActive;
 	size_t writeWaiting;
-	_ATOMIC(int) initialized;
+	int initialized;
 } pthread_rwlock_t;
-
 
 typedef struct {
 	int pshared;
@@ -93,7 +81,7 @@ typedef struct lockAttr pthread_mutexattr_t;
 
 typedef struct {
 	handle_t condh;
-	_ATOMIC(int) initialized;
+	int initialized;
 } pthread_cond_t;
 
 
@@ -112,5 +100,9 @@ typedef uint16_t  u_int16_t;
 typedef uint32_t  u_int32_t;
 typedef uint64_t  u_int64_t;
 typedef int register_t;
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

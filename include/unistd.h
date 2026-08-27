@@ -50,9 +50,14 @@ extern "C" {
 #define _SC_CLK_TCK    3
 #define _SC_PAGESIZE   4
 #define _SC_PAGE_SIZE  _SC_PAGESIZE /* spec. 1170 compatibility */
-#define _SC_LINE_MAX   5
-#define _SC_NPROCESSORS_CONF 6
-#define _SC_NPROCESSORS_ONLN 7
+#define _SC_SPIN_LOCKS 5
+
+/* RPi4 port: private sysconf keys at 100+ so they don't re-collide with future
+ * upstream low-number additions (all binaries are statically linked, so the
+ * numeric value is free to choose). Keep unistd/conf.c's sysconf() in sync. */
+#define _SC_LINE_MAX         100
+#define _SC_NPROCESSORS_CONF 101
+#define _SC_NPROCESSORS_ONLN 102
 
 /* POSIX conformance version (IEEE Std 1003.1-2008). A POSIX system must define
  * this in <unistd.h>; without it, portable software (e.g. bash) falls back to
@@ -92,6 +97,7 @@ extern "C" {
 #define _PC_TIMESTAMP_RESOLUTION 21
 #define _PC_NAME_MAX             22
 
+#define _POSIX_SPIN_LOCKS 202405L
 
 extern long sysconf(int name);
 

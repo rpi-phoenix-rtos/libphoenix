@@ -44,6 +44,8 @@ long sysconf(int name)
 		case _SC_PAGESIZE:
 			/* _SC_PAGE_SIZE is synonym */
 			return _PAGE_SIZE;
+		case _SC_SPIN_LOCKS:
+			return _POSIX_SPIN_LOCKS;
 		case _SC_LINE_MAX:
 			return _POSIX2_LINE_MAX;
 		case _SC_CLK_TCK:

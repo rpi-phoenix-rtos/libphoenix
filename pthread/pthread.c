@@ -13,19 +13,22 @@
  * %LICENSE%
  */
 
+#include <assert.h>
 #include <stdlib.h>
 #include <errno.h>
 #include <limits.h>
 #include <sys/list.h>
 #include <sys/mman.h>
 #include <sys/minmax.h>
+#include <sys/sched.h>
 #include <pthread.h>
 #include <unistd.h>
-#include <stdatomic.h>
 
 #include "../common/util.h"
 
 #define ALIGN(value, size) ((((value) + (size) - 1) / (size)) * (size))
+
+#define PRIO_DEFAULT 4
 
 #define PTHREAD_ONCE_DONE          0
 #define PTHREAD_ONCE_IN_PROGRESS   2
@@ -83,6 +86,14 @@ static struct {
 		void *stack;
 		size_t stacksize;
 	} to_cleanup;
+
+	/*
+	 * TODO: replace with an array indexed by SCHED_FIFO, SCHED_RR, etc. once more
+	 * sched policies get implemented
+	 */
+	int pthread_min_prio_rr;
+	int pthread_max_prio_rr;
+	int pthread_rr_interval;
 } pthread_common;
 
 
@@ -108,7 +119,7 @@ typedef struct _pthread_cleanup_t {
 static const pthread_attr_t pthread_attr_default = {
 	.stackaddr = NULL,
 	.schedpolicy = SCHED_RR,
-	.priority = 4,
+	.priority = PRIO_DEFAULT,
 	.detachstate = PTHREAD_CREATE_JOINABLE,
 	.inheritsched = PTHREAD_EXPLICIT_SCHED,
 	.stacksize = ALIGN(PTHREAD_STACK_MIN, PAGE_SIZE),
@@ -236,7 +247,7 @@ static int pthread_create_main(void)
 
 
 int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
-	void *(*start_routine)(void *), void *arg)
+		void *(*start_routine)(void *), void *arg)
 {
 	const pthread_attr_t *attrs = &pthread_attr_default;
 
@@ -612,8 +623,8 @@ __attribute__((noreturn)) void pthread_exit(void *value_ptr)
 }
 
 
-#define DECLARE_PTHREAD_ATTR_GET_EX(attr_name, attr_type, res, body) \
-	int pthread_attr_get##attr_name(const pthread_attr_t *__restrict attr, attr_type *__restrict res) \
+#define DECLARE_PTHREAD_ATTR_GET_EX(attr_class, attr_name, attr_type, res, body) \
+	int pthread_##attr_class##_get##attr_name(const pthread_##attr_class##_t *__restrict attr, attr_type *__restrict res) \
 	{ \
 		if (attr == NULL || (res) == NULL) { \
 			return EINVAL; \
@@ -623,11 +634,11 @@ __attribute__((noreturn)) void pthread_exit(void *value_ptr)
 		} \
 		return 0; \
 	}
-#define DECLARE_PTHREAD_ATTR_GET(attr_name, attr_type, res) DECLARE_PTHREAD_ATTR_GET_EX(attr_name, attr_type, res, { *(res) = attr->attr_name; })
+#define DECLARE_PTHREAD_ATTR_GET(attr_name, attr_type, res) DECLARE_PTHREAD_ATTR_GET_EX(attr, attr_name, attr_type, res, { *(res) = attr->attr_name; })
 
 DECLARE_PTHREAD_ATTR_GET(stackaddr, void *, stackaddr);
 DECLARE_PTHREAD_ATTR_GET(stacksize, size_t, stacksize);
-DECLARE_PTHREAD_ATTR_GET_EX(schedparam, struct sched_param, param, { param->sched_priority = attr->priority; });
+DECLARE_PTHREAD_ATTR_GET_EX(attr, schedparam, struct sched_param, param, { param->sched_priority = attr->priority; });
 DECLARE_PTHREAD_ATTR_GET(schedpolicy, int, policy);
 DECLARE_PTHREAD_ATTR_GET(detachstate, int, detachstate);
 DECLARE_PTHREAD_ATTR_GET(guardsize, size_t, guardsize);
@@ -679,23 +690,22 @@ int pthread_attr_setstacksize(pthread_attr_t *attr, size_t stacksize)
 
 
 int pthread_attr_setstack(pthread_attr_t *attr, void *stackaddr,
-	size_t stacksize)
+		size_t stacksize)
 {
 	return pthread_attr_setstackaddr(attr, stackaddr) |
-		pthread_attr_setstacksize(attr, stacksize);
+			pthread_attr_setstacksize(attr, stacksize);
 }
 
 
 int pthread_attr_getstack(const pthread_attr_t *attr, void **stackaddr,
-	size_t *stacksize)
+		size_t *stacksize)
 {
 	return pthread_attr_getstackaddr(attr, stackaddr) |
-		pthread_attr_getstacksize(attr, stacksize);
+			pthread_attr_getstacksize(attr, stacksize);
 }
 
 
-int pthread_attr_setschedparam(pthread_attr_t *attr,
-	const struct sched_param *param)
+int pthread_attr_setschedparam(pthread_attr_t *attr, const struct sched_param *param)
 {
 	if (attr == NULL || param == NULL) {
 		return EINVAL;
@@ -705,12 +715,7 @@ int pthread_attr_setschedparam(pthread_attr_t *attr,
 		return ENOTSUP;
 	}
 
-	sched_info_t info;
-	if (schedInfo(getpid(), attr->schedpolicy, &info) < 0) {
-		return EINVAL;
-	}
-
-	if (param->sched_priority > info.maxPriority || param->sched_priority < info.minPriority) {
+	if (param->sched_priority > pthread_common.pthread_max_prio_rr || param->sched_priority < pthread_common.pthread_min_prio_rr) {
 		return EINVAL;
 	}
 
@@ -720,14 +725,30 @@ int pthread_attr_setschedparam(pthread_attr_t *attr,
 }
 
 
+static int check_sched_policy(int policy)
+{
+	if (policy != SCHED_FIFO && policy != SCHED_RR && policy != SCHED_OTHER) {
+		return -EINVAL;
+	}
+
+	if (policy != SCHED_RR) {
+		/* Currently, the kernel doesn't support policies other than RR */
+		return -ENOTSUP;
+	}
+
+	return EOK;
+}
+
+
 int pthread_attr_setschedpolicy(pthread_attr_t *attr, int policy)
 {
-	if (attr == NULL || (policy != SCHED_FIFO && policy != SCHED_RR && policy != SCHED_OTHER)) {
+	if (attr == NULL) {
 		return EINVAL;
 	}
-	else if (policy == SCHED_FIFO || policy == SCHED_OTHER) {
-		/* Currently, the kernel doesn't support policies other than RR */
-		return ENOTSUP;
+
+	int err = check_sched_policy(policy);
+	if (err < 0) {
+		return -err;
 	}
 
 	attr->schedpolicy = policy;
@@ -797,32 +818,80 @@ int pthread_attr_setinheritsched(pthread_attr_t *attr, int inheritsched)
 	return 0;
 }
 
+int pthread_setschedprio(pthread_t thread, int prio)
+{
+	pthread_ctx *ctx = (pthread_ctx *)thread;
+	int err = EOK;
 
-int pthread_setschedprio(pthread_t thread, int prio);
+	if (ctx == NULL) {
+		err = EINVAL;
+	}
+	else {
+		if (prio > pthread_common.pthread_max_prio_rr || prio < pthread_common.pthread_min_prio_rr) {
+			return EINVAL;
+		}
+		sched_params_t p = { 0 };
+		p.priorityBase = prio;
+		err = -schedSet(0, ctx->id, SCHED_RR, &p);
+	}
+
+	return err;
+}
 
 
-int pthread_getschedparam(pthread_t thread, int *policy,
-	struct sched_param *__restrict param);
+int pthread_getschedparam(pthread_t thread, int *policy, struct sched_param *__restrict param)
+{
+	pthread_ctx *ctx = (pthread_ctx *)thread;
+	int err = EOK;
+
+	if (ctx == NULL || policy == NULL || param == NULL) {
+		err = EINVAL;
+	}
+	else {
+		sched_params_t p;
+		err = -schedGet(0, ctx->id, &p);
+		if (err == EOK) {
+			*policy = SCHED_RR; /* Nothing else supported for now */
+			param->sched_priority = p.priorityBase;
+		}
+	}
+
+	return err;
+}
 
 
-int pthread_setschedparam(pthread_t thread, int policy,
-	const struct sched_param *param);
+int pthread_setschedparam(pthread_t thread, int policy, const struct sched_param *param)
+{
+	pthread_ctx *ctx = (pthread_ctx *)thread;
+
+	if (ctx == NULL || param == NULL || (policy != SCHED_FIFO && policy != SCHED_RR && policy != SCHED_OTHER)) {
+		return EINVAL;
+	}
+
+	if (policy != SCHED_RR) {
+		return ENOTSUP;
+	}
+
+	sched_params_t p = { 0 };
+	p.priorityBase = param->sched_priority;
+	return -schedSet(0, ctx->id, SCHED_RR, &p);
+}
 
 
 static int pthread_initialize_acquire_release(
-		atomic_int *initialized_flag, void *__restrict__ resource, const void *__restrict__ attr, int(initCb(void *__restrict__ resource, const void *__restrict__ attr)))
+		int *initialized_flag, void *__restrict__ resource, const void *__restrict__ attr, int(initCb(void *__restrict__ resource, const void *__restrict__ attr)))
 {
 	for (;;) {
-		int state = atomic_load_explicit(initialized_flag, memory_order_acquire);
+		int state = __atomic_load_n(initialized_flag, __ATOMIC_ACQUIRE);
 		if (state == RESOURCE_INITIALIZED) {
 			return EOK;
 		}
 
 		if (state == RESOURCE_UNINITIALIZED) {
 			int expected = RESOURCE_UNINITIALIZED;
-			if (atomic_compare_exchange_strong_explicit(initialized_flag, &expected, RESOURCE_INITIALIZING, memory_order_acquire, memory_order_acquire)) {
+			if (__atomic_compare_exchange_n(initialized_flag, &expected, RESOURCE_INITIALIZING, false, __ATOMIC_ACQUIRE, __ATOMIC_ACQUIRE)) {
 				int err = initCb(resource, attr);
-				atomic_store_explicit(initialized_flag, err == EOK ? RESOURCE_INITIALIZED : RESOURCE_UNINITIALIZED, memory_order_release);
+				__atomic_store_n(initialized_flag, err == EOK ? RESOURCE_INITIALIZED : RESOURCE_UNINITIALIZED, __ATOMIC_RELEASE);
 				return err;
 			}
 		}
@@ -833,17 +902,17 @@ static int pthread_initialize_acquire_release(
 
 
 static int pthread_destroy_acquire_release(
-		atomic_int *initialized_flag, void *__restrict__ resource, int(initCb(void *__restrict__ resource)))
+		int *initialized_flag, void *__restrict__ resource, int(initCb(void *__restrict__ resource)))
 {
 	for (;;) {
-		int state = atomic_load_explicit(initialized_flag, memory_order_acquire);
+		int state = __atomic_load_n(initialized_flag, __ATOMIC_ACQUIRE);
 		if (state == RESOURCE_UNINITIALIZED) {
 			return EOK;
 		}
 
 		if (state == RESOURCE_INITIALIZED) {
 			int expected = RESOURCE_INITIALIZED;
-			if (atomic_compare_exchange_strong_explicit(initialized_flag, &expected, RESOURCE_UNINITIALIZED, memory_order_acquire, memory_order_acquire)) {
+			if (__atomic_compare_exchange_n(initialized_flag, &expected, RESOURCE_UNINITIALIZED, false, __ATOMIC_ACQUIRE, __ATOMIC_ACQUIRE)) {
 				return initCb(resource);
 			}
 		}
@@ -857,11 +926,44 @@ static int pthread_mutex_init_cb(void *__restrict__ resource, const void *__rest
 {
 	pthread_mutex_t *mutex = resource;
 	int err;
+
+	if (mutex == NULL) {
+		return EINVAL;
+	}
+
 	if (attr == NULL) {
+		/*
+		 * POSIX-DEVIATION: POSIX says that mutexes should have PTHREAD_PRIO_NONE by
+		 * default. Phoenix has PTHREAD_PRIO_INHERIT instead.
+		 */
 		err = mutexCreate(&mutex->mutexh);
 	}
 	else {
 		err = mutexCreateWithAttr(&mutex->mutexh, (const struct lockAttr *)attr);
+	}
+
+	return -err;
+}
+
+
+int pthread_mutex_getprioceiling(const pthread_mutex_t *__restrict mutex, int *__restrict prioceiling)
+{
+	if (prioceiling == NULL) {
+		return EINVAL;
+	}
+
+	if (mutex == NULL || __atomic_load_n(&mutex->initialized, __ATOMIC_ACQUIRE) != RESOURCE_INITIALIZED) {
+		/*
+		 * Makes no sense to lazy initialize - mutexes are not PTHREAD_PRIO_PROTECT
+		 * by default, so this call would lead to EINVAL anyways.
+		 */
+		return EINVAL;
+	}
+
+	int err = mutexPrioCeiling(mutex->mutexh, -1);
+	if (err >= 0) {
+		*prioceiling = err;
+		err = EOK;
 	}
 	return -err;
 }
@@ -873,12 +975,32 @@ static int pthread_mutex_lazy_init(pthread_mutex_t *__restrict mutex, const pthr
 }
 
 
+int pthread_mutex_setprioceiling(pthread_mutex_t *__restrict mutex, int prioceiling, int *__restrict old_ceiling)
+{
+	if (old_ceiling == NULL || prioceiling < 0) {
+		return EINVAL;
+	}
+
+	int err = pthread_mutex_lazy_init(mutex, NULL);
+	if (err != EOK) {
+		return err;
+	}
+
+	err = mutexPrioCeiling(mutex->mutexh, prioceiling);
+	if (err >= 0) {
+		*old_ceiling = err;
+		err = EOK;
+	}
+	return -err;
+}
+
+
 int pthread_mutex_init(pthread_mutex_t *__restrict mutex, const pthread_mutexattr_t *__restrict attr)
 {
 	if (mutex == NULL) {
 		return EINVAL;
 	}
-	atomic_store_explicit(&mutex->initialized, RESOURCE_UNINITIALIZED, memory_order_relaxed);
+	__atomic_store_n(&mutex->initialized, RESOURCE_UNINITIALIZED, __ATOMIC_RELAXED);
 	return pthread_mutex_lazy_init(mutex, attr);
 }
 
@@ -887,11 +1009,11 @@ int pthread_mutex_lock(pthread_mutex_t *mutex)
 {
 	int err = pthread_mutex_lazy_init(mutex, NULL);
 
-	if (err == 0) {
-		err = mutexLock(mutex->mutexh);
+	if (err == EOK) {
+		err = -mutexLock(mutex->mutexh);
 	}
 
-	return -err;
+	return err;
 }
 
 
@@ -899,11 +1021,11 @@ int pthread_mutex_trylock(pthread_mutex_t *mutex)
 {
 	int err = pthread_mutex_lazy_init(mutex, NULL);
 
-	if (err == 0) {
-		err = mutexTry(mutex->mutexh);
+	if (err == EOK) {
+		err = -mutexTry(mutex->mutexh);
 	}
 
-	return -err;
+	return err;
 }
 
 
@@ -911,11 +1033,11 @@ int pthread_mutex_unlock(pthread_mutex_t *mutex)
 {
 	int err = pthread_mutex_lazy_init(mutex, NULL);
 
-	if (err == 0) {
-		err = mutexUnlock(mutex->mutexh);
+	if (err == EOK) {
+		err = -mutexUnlock(mutex->mutexh);
 	}
 
-	return -err;
+	return err;
 }
 
 
@@ -937,36 +1059,150 @@ int pthread_mutex_destroy(pthread_mutex_t *mutex)
 
 int pthread_mutexattr_destroy(pthread_mutexattr_t *attr)
 {
-	return 0;
+	return attr == NULL ? EINVAL : EOK;
 }
 
 
 int pthread_mutexattr_init(pthread_mutexattr_t *attr)
 {
+	if (attr == NULL) {
+		return EINVAL;
+	}
+
 	attr->type = PTHREAD_MUTEX_DEFAULT;
-	return 0;
+	attr->robust = PTHREAD_MUTEX_STALLED;
+	/*
+	 * POSIX-DEVIATION: POSIX says that mutexes should have PTHREAD_PRIO_NONE by
+	 * default. Phoenix has PTHREAD_PRIO_INHERIT instead. (Same as in pthread_mutex_init())
+	 */
+	attr->protocol = PTHREAD_PRIO_INHERIT;
+
+	/*
+	 * Set prioceiling to the LOWEST criticality to force the caller to explicitly
+	 * configure it before trying to lock.
+	 */
+	attr->prioceiling = pthread_common.pthread_max_prio_rr;
+
+	return EOK;
 }
 
 
-int pthread_mutexattr_gettype(const pthread_mutexattr_t *attr, int *type)
+#define DECLARE_PTHREAD_MUTEXATTR_GET(attr_name, attr_type, res) DECLARE_PTHREAD_ATTR_GET_EX(mutexattr, attr_name, attr_type, res, { *(res) = attr->attr_name; })
+DECLARE_PTHREAD_MUTEXATTR_GET(prioceiling, int, prioceiling);
+DECLARE_PTHREAD_MUTEXATTR_GET(protocol, int, protocol);
+DECLARE_PTHREAD_MUTEXATTR_GET(robust, int, robust);
+DECLARE_PTHREAD_MUTEXATTR_GET(type, int, type);
+
+
+int pthread_mutexattr_getpshared(const pthread_mutexattr_t *__restrict attr, int *__restrict pshared)
 {
-	*type = attr->type;
-	return 0;
+	if (attr == NULL || pshared == NULL) {
+		return EINVAL;
+	}
+
+	*(pshared) = PTHREAD_PROCESS_PRIVATE;
+
+	return EOK;
+}
+
+
+int pthread_mutexattr_setprioceiling(pthread_mutexattr_t *attr, int prioceiling)
+{
+	if (attr == NULL) {
+		return EINVAL;
+	}
+
+	/*
+	 * POSIX-DEVIATION: POSIX says that prioceiling should be in range of allowed
+	 * SCHED_FIFO priorities. Kernel currently doesn't support SCHED_FIFO, so
+	 * check against SCHED_RR priorities instead.
+	 */
+	if (prioceiling > pthread_common.pthread_max_prio_rr || prioceiling < pthread_common.pthread_min_prio_rr) {
+		return EINVAL;
+	}
+
+	attr->prioceiling = prioceiling;
+
+	return EOK;
+}
+
+
+int pthread_mutexattr_setprotocol(pthread_mutexattr_t *attr, int protocol)
+{
+	if (attr == NULL) {
+		return EINVAL;
+	}
+
+	if (protocol != PTHREAD_PRIO_NONE && protocol != PTHREAD_PRIO_INHERIT && protocol != PTHREAD_PRIO_PROTECT) {
+		return EINVAL;
+	}
+
+	attr->protocol = protocol;
+
+	return EOK;
+}
+
+
+int pthread_mutexattr_setpshared(pthread_mutexattr_t *attr, int pshared)
+{
+	if (attr == NULL) {
+		return EINVAL;
+	}
+
+	/* TODO: commodify with the rest of pshared setters */
+	if (pshared != PTHREAD_PROCESS_PRIVATE && pshared != PTHREAD_PROCESS_SHARED) {
+		return EINVAL;
+	}
+
+	/* OS-LIMITATION: PTHREAD_PROCESS_SHARED not supported */
+	if (pshared == PTHREAD_PROCESS_SHARED) {
+		return ENOTSUP;
+	}
+
+	return EOK;
+}
+
+
+int pthread_mutexattr_setrobust(pthread_mutexattr_t *attr, int robust)
+{
+	if (attr == NULL) {
+		return EINVAL;
+	}
+
+	if (robust != PTHREAD_MUTEX_STALLED && robust != PTHREAD_MUTEX_ROBUST) {
+		return EINVAL;
+	}
+
+	attr->robust = robust;
+
+	return EOK;
 }
 
 
 int pthread_mutexattr_settype(pthread_mutexattr_t *attr, int type)
 {
-	int err = EINVAL;
-
-	/* clang-format off */
-	if ((type == PTHREAD_MUTEX_NORMAL) || (type == PTHREAD_MUTEX_ERRORCHECK) ||
-			(type == PTHREAD_MUTEX_RECURSIVE) || (type == PTHREAD_MUTEX_DEFAULT)) {
-		/* clang-format on */
-
-		attr->type = type;
-		err = 0;
+	if (attr == NULL) {
+		return EINVAL;
 	}
+
+	if (type != PTHREAD_MUTEX_NORMAL && type != PTHREAD_MUTEX_ERRORCHECK && type != PTHREAD_MUTEX_RECURSIVE && type != PTHREAD_MUTEX_DEFAULT) {
+		return EINVAL;
+	}
+
+	attr->type = type;
+
+	return EOK;
+}
+
+
+int pthread_mutex_consistent(pthread_mutex_t *mutex)
+{
+	int err = pthread_mutex_lazy_init(mutex, NULL);
+
+	if (err == EOK) {
+		err = -mutexConsistent(mutex->mutexh);
+	}
+
 	return err;
 }
 
@@ -979,17 +1215,100 @@ int sched_yield(void)
 
 int sched_get_priority_max(int policy)
 {
-	sched_info_t info;
-	int err = SET_ERRNO(schedInfo(getpid(), policy, &info));
-	return err < 0 ? err : info.maxPriority;
+	int err = check_sched_policy(policy);
+	if (err < 0) {
+		return SET_ERRNO(err);
+	}
+
+	return pthread_common.pthread_max_prio_rr;
 }
 
 
 int sched_get_priority_min(int policy)
 {
-	sched_info_t info;
-	int err = SET_ERRNO(schedInfo(getpid(), policy, &info));
-	return err < 0 ? err : info.minPriority;
+	int err = check_sched_policy(policy);
+	if (err < 0) {
+		return SET_ERRNO(err);
+	}
+
+	return pthread_common.pthread_min_prio_rr;
+}
+
+
+int sched_setparam(pid_t pid, const struct sched_param *param)
+{
+	if (pid < 0 || param == NULL) {
+		return SET_ERRNO(-EINVAL);
+	}
+	sched_params_t p = { 0 };
+	p.priorityBase = param->sched_priority;
+	int err = SET_ERRNO(schedSet(pid, 0, SCHED_RR, &p));
+	return err < 0 ? err : EOK;
+}
+
+
+int sched_getparam(pid_t pid, struct sched_param *param)
+{
+	if (pid < 0 || param == NULL) {
+		return SET_ERRNO(-EINVAL);
+	}
+	sched_params_t p;
+	int err = SET_ERRNO(schedGet(pid, 0, &p));
+	if (err < 0) {
+		return err;
+	}
+	param->sched_priority = p.priorityBase;
+	return EOK;
+}
+
+
+int sched_setscheduler(pid_t pid, int policy, const struct sched_param *param)
+{
+	if (pid < 0 || param == NULL) {
+		return SET_ERRNO(-EINVAL);
+	}
+
+	int err = check_sched_policy(policy);
+	if (err < 0) {
+		return SET_ERRNO(err);
+	}
+
+	err = sched_setparam(pid, param);
+	return err < 0 ? err : SCHED_RR;
+}
+
+
+int sched_getscheduler(pid_t pid)
+{
+	if (pid < 0) {
+		return SET_ERRNO(-EINVAL);
+	}
+	sched_params_t p;
+	int err = SET_ERRNO(schedGet(pid, 0, &p));
+	return err < 0 ? err : p.policy;
+}
+
+
+static void us_to_timespec(time_t abstime_us, struct timespec *__restrict time)
+{
+	time->tv_sec = abstime_us / (1000 * 1000);
+	time->tv_nsec = (abstime_us % (1000 * 1000)) * 1000;
+}
+
+
+int sched_rr_get_interval(pid_t pid, struct timespec *tp)
+{
+	if (pid < 0 || tp == NULL) {
+		return SET_ERRNO(-EINVAL);
+	}
+
+	/* Check that pid exists through kill */
+	if (pid != 0 && kill(pid, 0) < 0) {
+		return SET_ERRNO(-ESRCH);
+	}
+
+	us_to_timespec(pthread_common.pthread_rr_interval, tp);
+	return EOK;
 }
 
 
@@ -1060,6 +1379,9 @@ int pthread_condattr_getclock(const pthread_condattr_t *__restrict attr, clockid
 static int pthread_condattr_to_condAttr(const pthread_condattr_t *pattr, struct condAttr *attr)
 {
 	int ret = 0;
+
+	attr->type = PH_COND_NORMAL;
+
 	switch (pattr->clock_id) {
 		case CLOCK_REALTIME:
 			attr->clock = PH_CLOCK_REALTIME;
@@ -1103,7 +1425,7 @@ int pthread_cond_init(pthread_cond_t *__restrict cond, const pthread_condattr_t 
 	if (cond == NULL) {
 		return EINVAL;
 	}
-	atomic_store_explicit(&cond->initialized, RESOURCE_UNINITIALIZED, memory_order_relaxed);
+	__atomic_store_n(&cond->initialized, RESOURCE_UNINITIALIZED, __ATOMIC_RELAXED);
 	return pthread_cond_lazy_init(cond, attr);
 }
 
@@ -1150,14 +1472,15 @@ int pthread_cond_wait(pthread_cond_t *__restrict cond, pthread_mutex_t *__restri
 {
 	int err = pthread_cond_lazy_init(cond, NULL);
 
-	if (err == 0) {
+	if (err == EOK) {
 		err = pthread_mutex_lazy_init(mutex, NULL);
 	}
 
-	if (err == 0) {
-		err = condWait(cond->condh, mutex->mutexh, 0);
+	if (err == EOK) {
+		err = -condWait(cond->condh, mutex->mutexh, 0);
 	}
-	return -err;
+
+	return err;
 }
 
 
@@ -1176,18 +1499,19 @@ int pthread_cond_timedwait(pthread_cond_t *__restrict cond,
 
 	err = pthread_cond_lazy_init(cond, NULL);
 
-	if (err == 0) {
+	if (err == EOK) {
 		err = pthread_mutex_lazy_init(mutex, NULL);
 	}
 
-	if (err == 0) {
-		err = condWait(cond->condh, mutex->mutexh, abstime_us);
+	if (err == EOK) {
+		err = -condWait(cond->condh, mutex->mutexh, abstime_us);
 	}
 
-	if (err == -ETIME) {
-		err = -ETIMEDOUT;
+	if (err == ETIME) {
+		err = ETIMEDOUT;
 	}
-	return -err;
+
+	return err;
 }
 
 
@@ -1783,8 +2107,92 @@ int pthread_rwlock_init(pthread_rwlock_t *__restrict__ rwlock, const pthread_rwl
 	if (rwlock == NULL) {
 		return EINVAL;
 	}
-	atomic_store_explicit(&rwlock->initialized, RESOURCE_UNINITIALIZED, memory_order_relaxed);
+	__atomic_store_n(&rwlock->initialized, RESOURCE_UNINITIALIZED, __ATOMIC_RELAXED);
 	return pthread_rwlock_lazy_init(rwlock, attr);
+}
+
+
+int pthread_spin_destroy(pthread_spinlock_t *lock)
+{
+	return lock == NULL ? EINVAL : EOK;
+}
+
+
+int pthread_spin_init(pthread_spinlock_t *lock, int pshared)
+{
+	if (lock == NULL || (pshared != PTHREAD_PROCESS_SHARED && pshared != PTHREAD_PROCESS_PRIVATE)) {
+		return EINVAL;
+	}
+
+	if (pshared != PTHREAD_PROCESS_PRIVATE) {
+		return ENOTSUP;
+	}
+
+	__atomic_store_n(&lock->locked, 0, __ATOMIC_RELAXED);
+
+	return EOK;
+}
+
+
+int pthread_spin_lock(pthread_spinlock_t *lock)
+{
+	if (lock == NULL) {
+		return EINVAL;
+	}
+
+	while (__atomic_exchange_n(&lock->locked, 1, __ATOMIC_ACQUIRE) != 0) {
+		while (__atomic_load_n(&lock->locked, __ATOMIC_RELAXED) != 0) {
+			/* TODO: detect if we have SMP. If so, actually spin for a while */
+			sched_yield();
+		}
+	}
+
+	return 0;
+}
+
+
+int pthread_spin_trylock(pthread_spinlock_t *lock)
+{
+	if (lock == NULL) {
+		return EINVAL;
+	}
+
+	if (__atomic_load_n(&lock->locked, __ATOMIC_RELAXED) != 0) {
+		return EBUSY;
+	}
+
+	if (__atomic_exchange_n(&lock->locked, 1, __ATOMIC_ACQUIRE) == 0) {
+		return 0;
+	}
+
+	return EBUSY;
+}
+
+
+int pthread_spin_unlock(pthread_spinlock_t *lock)
+{
+	if (lock == NULL) {
+		return EINVAL;
+	}
+
+	__atomic_store_n(&lock->locked, 0, __ATOMIC_RELEASE);
+
+	return 0;
+}
+
+
+static void pthread_cache_policies(void)
+{
+	sched_info_t info;
+	int err;
+
+	err = schedInfo(SCHED_RR, &info);
+	(void)err;
+	assert(err == EOK);
+
+	pthread_common.pthread_min_prio_rr = info.minPriority;
+	pthread_common.pthread_max_prio_rr = info.maxPriority;
+	pthread_common.pthread_rr_interval = info.interval;
 }
 
 
@@ -1798,5 +2206,6 @@ void _pthread_init(void)
 	pthread_common.pthread_list = NULL;
 	pthread_common.pthread_fork_handlers = NULL;
 	pthread_create_main();
+	pthread_cache_policies();
 	pthread_common.to_cleanup.stack = NULL;
 }

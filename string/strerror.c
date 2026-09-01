@@ -3,7 +3,7 @@
  *
  * libphoenix
  *
- * string/strerror (errno names)
+ * string/strerror (POSIX error messages)
  *
  * Copyright 2018 Phoenix Systems
  * Author: Michal Miroslaw, Aleksander Kaminski

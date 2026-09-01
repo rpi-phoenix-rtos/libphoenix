@@ -87,6 +87,27 @@ int chdir(const char *path)
 }
 
 
+extern int sys_fdpath(int fd, char *buf, size_t size);
+
+
+int fchdir(int fildes)
+{
+	char buf[PATH_MAX];
+	int len = sys_fdpath(fildes, buf, sizeof(buf));
+
+	if (len < 0) {
+		/* -EBADF (bad fd) or -ENOENT (fd has no recorded path: socket/pipe/...). */
+		return SET_ERRNO(len);
+	}
+
+	/* The kernel recorded fd's canonical path at open time (shared across dup), so
+	 * fchdir() is just chdir() to it. chdir re-validates it is a directory
+	 * (-ENOTDIR for a regular-file fd) and updates the cwd string + PWD, so fchdir
+	 * composes correctly with resolve_path()/getcwd() and gnulib's *at emulation. */
+	return chdir(buf);
+}
+
+
 static int getcwd_len(void)
 {
 	int len;

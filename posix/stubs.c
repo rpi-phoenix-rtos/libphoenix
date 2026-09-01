@@ -98,23 +98,6 @@ int seteuid(uid_t uid)
 }
 
 
-int fchdir(int fildes)
-{
-	/* Not implementable as a stub: Phoenix's cwd is a userspace path string
-	 * (unistd/dir.c) and there is no fd->path reverse map, so there is nothing to
-	 * chdir to here. Returning 0 (as this used to) reports success without changing
-	 * the cwd, which silently corrupts every caller that relies on it — notably
-	 * gnulib's save_cwd/fchdir/unlink emulation of unlinkat(), which then unlinks in
-	 * the wrong directory and breaks `rm -r` / fts. A libc must never claim success
-	 * for work it did not do, so fail loudly instead. (Consumers such as coreutils'
-	 * gnulib supply their own tracked rpl_fchdir when told the system one is absent;
-	 * a real fix is the *at family backed by the fs-server oid-relative ops.) */
-	(void)fildes;
-	errno = ENOSYS;
-	return -1;
-}
-
-
 char *ttyname(int fildes)
 {
 	return NULL;

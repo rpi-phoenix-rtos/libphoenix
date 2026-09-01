@@ -33,9 +33,11 @@ long sysconf(int name)
 {
 	switch (name) {
 		case _SC_OPEN_MAX:
-			/* value got from MAX_FD_COUNT (kernel) */
-			/* TODO: come up with a solution to access a macro defined in kernel posix module */
-			return 512;
+			/* Must match the kernel's per-process fd limit (MAX_FD_COUNT in
+			 * phoenix-rtos-kernel posix.c, currently 1024); returning less makes
+			 * fd-array-sizing / fd-iterating programs miss the upper fds.
+			 * TODO: expose MAX_FD_COUNT via a shared header instead of hardcoding. */
+			return 1024;
 		case _SC_IOV_MAX:
 			return IOV_MAX;
 		case _SC_ATEXIT_MAX:

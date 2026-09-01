@@ -35,6 +35,18 @@ int statvfs(const char *path, struct statvfs *buf)
 	}
 	int res = sys_statvfs(canonical, -1, buf);
 
+	/* POSIX: a pathname with a trailing '/' must name a directory. resolve_path()
+	 * strips trailing slashes, so enforce it here (root "/" excluded by len > 1). */
+	if (res == 0) {
+		size_t len = strlen(path);
+		if ((len > 1) && (path[len - 1] == '/')) {
+			struct stat st;
+			if ((stat(canonical, &st) == 0) && (S_ISDIR(st.st_mode) == 0)) {
+				res = -ENOTDIR;
+			}
+		}
+	}
+
 	free(canonical);
 
 	return set_errno(res);
@@ -43,6 +55,13 @@ int statvfs(const char *path, struct statvfs *buf)
 
 int fstatvfs(int fildes, struct statvfs *buf)
 {
+	/* A negative fd is never valid; guard it here because sys_statvfs() treats
+	 * fd == -1 as "use the path argument" (see statvfs() above), which would
+	 * otherwise mis-handle fstatvfs(-1) instead of failing with EBADF. */
+	if (fildes < 0) {
+		return set_errno(-EBADF);
+	}
+
 	int res = sys_statvfs(NULL, fildes, buf);
 
 	return set_errno(res);

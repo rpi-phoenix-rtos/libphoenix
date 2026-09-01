@@ -62,6 +62,13 @@ extern int chown(const char *path, uid_t owner, gid_t group);
 extern int lchown(const char *path, uid_t owner, gid_t group);
 
 
+/* The *at() family (dirfd-relative). AT_* flags live in <fcntl.h>. */
+extern int fstatat(int dirfd, const char *path, struct stat *buf, int flag);
+extern int fchmodat(int dirfd, const char *path, mode_t mode, int flag);
+extern int mkdirat(int dirfd, const char *path, mode_t mode);
+extern int mknodat(int dirfd, const char *path, mode_t mode, dev_t dev);
+
+
 #ifdef __cplusplus
 }
 #endif

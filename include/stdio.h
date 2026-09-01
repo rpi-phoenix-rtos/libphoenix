@@ -176,6 +176,10 @@ int remove(const char *filename);
 int rename(const char *old_filename, const char *new_filename);
 
 
+/* dirfd-relative rename (the *at() family; AT_* flags in <fcntl.h>). */
+int renameat(int olddirfd, const char *oldpath, int newdirfd, const char *newpath);
+
+
 /* Sets the file position to the beginning of the file of the given stream. */
 void rewind(FILE *stream);
 

@@ -243,6 +243,25 @@ extern ssize_t readlink(const char *path, char *buf, size_t bufsiz);
 extern int access(const char *pathname, int mode);
 
 
+/* The *at() family (dirfd-relative). AT_* flags + openat live in <fcntl.h>. */
+extern int unlinkat(int dirfd, const char *path, int flag);
+
+
+extern int faccessat(int dirfd, const char *path, int mode, int flag);
+
+
+extern int fchownat(int dirfd, const char *path, uid_t owner, gid_t group, int flag);
+
+
+extern ssize_t readlinkat(int dirfd, const char *path, char *buf, size_t bufsiz);
+
+
+extern int symlinkat(const char *target, int newdirfd, const char *linkpath);
+
+
+extern int linkat(int olddirfd, const char *oldpath, int newdirfd, const char *newpath, int flag);
+
+
 extern char *getcwd(char *buf, size_t size);
 
 

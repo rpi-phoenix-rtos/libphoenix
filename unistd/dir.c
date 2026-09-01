@@ -92,11 +92,20 @@ extern int sys_fdpath(int fd, char *buf, size_t size);
 
 int fchdir(int fildes)
 {
-	char buf[PATH_MAX];
-	int len = sys_fdpath(fildes, buf, sizeof(buf));
+	/* Heap, not a PATH_MAX stack array: fchdir() is reached from gnulib's *at/fchdir
+	 * emulation during deep directory walks, where per-frame PATH_MAX buffers can
+	 * overflow the user stack (see the *at wrappers in unistd/at.c). */
+	char *buf = malloc(PATH_MAX);
+	int len, ret;
 
+	if (buf == NULL) {
+		return SET_ERRNO(-ENOMEM);
+	}
+
+	len = sys_fdpath(fildes, buf, PATH_MAX);
 	if (len < 0) {
 		/* -EBADF (bad fd) or -ENOENT (fd has no recorded path: socket/pipe/...). */
+		free(buf);
 		return SET_ERRNO(len);
 	}
 
@@ -104,7 +113,9 @@ int fchdir(int fildes)
 	 * fchdir() is just chdir() to it. chdir re-validates it is a directory
 	 * (-ENOTDIR for a regular-file fd) and updates the cwd string + PWD, so fchdir
 	 * composes correctly with resolve_path()/getcwd() and gnulib's *at emulation. */
-	return chdir(buf);
+	ret = chdir(buf);
+	free(buf);
+	return ret;
 }
 
 

@@ -255,6 +255,45 @@ char *stpcpy(char *dest, const char *src)
 #endif
 
 
+char *stpncpy(char *dest, const char *src, size_t n)
+{
+	size_t i;
+
+	for (i = 0; (i < n) && (src[i] != '\0'); ++i) {
+		dest[i] = src[i];
+	}
+
+	/* POSIX: return a pointer to the first NUL written (i.e. dest + strlen
+	 * copied), or dest + n if src had no terminating NUL within n bytes. */
+	char *end = dest + i;
+
+	for (; i < n; ++i) {
+		dest[i] = '\0';
+	}
+
+	return end;
+}
+
+
+void *memccpy(void *dest, const void *src, int c, size_t n)
+{
+	unsigned char *d = (unsigned char *)dest;
+	const unsigned char *s = (const unsigned char *)src;
+	unsigned char uc = (unsigned char)c;
+	size_t i;
+
+	for (i = 0; i < n; ++i) {
+		d[i] = s[i];
+		if (s[i] == uc) {
+			/* POSIX: pointer to the byte in dest just past the copied c. */
+			return d + i + 1;
+		}
+	}
+
+	return NULL;
+}
+
+
 #ifndef __MEMMOVE
 #define __MEMMOVE
 void *memmove(void *dest, const void *src, size_t n)
@@ -401,6 +440,35 @@ char *strtok(char *s1, const char *s2)
 	}
 
 	return s1;
+}
+
+
+char *strtok_r(char *s, const char *sep, char **lasts)
+{
+	char *tokend;
+
+	if (s == NULL) {
+		s = *lasts;
+	}
+
+	s += strspn(s, sep);
+
+	if (*s == '\0') {
+		*lasts = s;
+		return NULL;
+	}
+
+	tokend = s + strcspn(s, sep);
+
+	if (*tokend != '\0') {
+		*tokend = '\0';
+		*lasts = tokend + 1;
+	}
+	else {
+		*lasts = tokend;
+	}
+
+	return s;
 }
 
 

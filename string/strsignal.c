@@ -14,6 +14,8 @@
  */
 
 #include <signal.h>
+#include <stdio.h>
+#include <errno.h>
 
 char *strsignal(int signum)
 {
@@ -83,4 +85,22 @@ char *strsignal(int signum)
 		default:
 			return "Unknown signal";
 	}
+}
+
+
+void psignal(int sig, const char *s)
+{
+	/* POSIX: write "<s>: <description>\n" (or just "<description>\n" when s is
+	 * null/empty) to stderr. psignal returns no value and must not leave errno
+	 * changed on behalf of the caller. */
+	int saved = errno;
+
+	if ((s != NULL) && (*s != '\0')) {
+		(void)fprintf(stderr, "%s: %s\n", s, strsignal(sig));
+	}
+	else {
+		(void)fprintf(stderr, "%s\n", strsignal(sig));
+	}
+
+	errno = saved;
 }

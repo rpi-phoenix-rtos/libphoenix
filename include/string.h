@@ -99,6 +99,17 @@ extern char *stpcpy(char *dest, const char *src);
 extern char *strncpy(char *dest, const char *src, size_t n);
 
 
+/* Copies at most n characters from src to dest, NUL-padding dest to n bytes.
+ * Returns a pointer to the terminating NUL written to dest (or dest + n). */
+extern char *stpncpy(char *dest, const char *src, size_t n);
+
+
+/* Copies bytes from src to dest, stopping after the first byte equal to
+ * (unsigned char)c is copied, or after n bytes. Returns a pointer just past
+ * the copied c in dest, or NULL if c was not found in the first n bytes. */
+extern void *memccpy(void *dest, const void *src, int c, size_t n);
+
+
 /*  copies up to size - 1 characters from the NUL-terminated string src to dst, NUL-terminating the result */
 extern size_t strlcpy(char *dst, const char *src, size_t size);
 
@@ -155,6 +166,10 @@ extern char *strsep(char **string_ptr, const char *delimiter);
 
 /* Breaks string str into a series of tokens separated by delim. */
 extern char *strtok(char *str, const char *delim);
+
+
+/* Reentrant strtok: caller supplies the saved-state pointer in *saveptr. */
+extern char *strtok_r(char *str, const char *delim, char **saveptr);
 
 
 /* Transforms the first n characters of the string src into corrent locale and places them in the string dest. */

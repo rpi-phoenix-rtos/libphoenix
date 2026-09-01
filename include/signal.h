@@ -179,6 +179,11 @@ extern int sigwait(const sigset_t *, int *);
 extern int signalPostPosix(int pid, int tid, int signal);
 
 
+/* Writes the signal description for sig (prefixed by "s: " when s is non-empty)
+ * to stderr, followed by a newline. */
+extern void psignal(int sig, const char *s);
+
+
 #ifdef __cplusplus
 }
 #endif

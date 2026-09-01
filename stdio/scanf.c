@@ -35,6 +35,7 @@
 #define PTRDIFF    0x800  /* t: ptrdiff_t */
 #define SHORTSHORT 0x4000 /* hh: char */
 #define UNSIGNED   0x8000 /* %[oupxX] conversions */
+#define ALLOC      0x10000 /* m: allocate the buffer, store char ** (POSIX %ms/%m[/%mc) */
 
 
 #define SIGNOK   0x40  /* +/- is (still) legal */
@@ -179,6 +180,10 @@ static int scanf_parse(char *ccltab, const char *inp, int *inr, char const *fmt0
 			switch (c) {
 				case '*':
 					flags |= SUPPRESS;
+					continue;
+
+				case 'm':
+					flags |= ALLOC;
 					continue;
 
 				case 'l':
@@ -374,7 +379,19 @@ static int scanf_parse(char *ccltab, const char *inp, int *inr, char const *fmt0
 				}
 
 				if ((flags & SUPPRESS) == 0) {
-					memcpy(va_arg(ap, char *), inp, width);
+					if ((flags & ALLOC) != 0) {
+						/* %mc: allocate exactly `width` bytes (no NUL, like %c). */
+						char **allocDst = va_arg(ap, char **);
+						char *b = malloc(width);
+						if (b == NULL) {
+							return (nconversions != 0 ? nassigned : -1); /* errno set by malloc */
+						}
+						memcpy(b, inp, width);
+						*allocDst = b;
+					}
+					else {
+						memcpy(va_arg(ap, char *), inp, width);
+					}
 					nassigned++;
 				}
 
@@ -409,7 +426,19 @@ static int scanf_parse(char *ccltab, const char *inp, int *inr, char const *fmt0
 					}
 				}
 				else {
-					p0 = p = va_arg(ap, char *);
+					char **allocDst = NULL;
+					if ((flags & ALLOC) != 0) {
+						/* Bounded by the remaining input, so one up-front alloc suffices. */
+						size_t maxn = (width > (size_t)*inr) ? (size_t)*inr : width;
+						allocDst = va_arg(ap, char **);
+						p0 = p = malloc(maxn + 1);
+						if (p0 == NULL) {
+							return (nconversions != 0 ? nassigned : -1); /* errno set by malloc */
+						}
+					}
+					else {
+						p0 = p = va_arg(ap, char *);
+					}
 					while (ccltab[(unsigned char)*inp] != 0) {
 						(*inr)--;
 						*p++ = *inp++;
@@ -418,6 +447,9 @@ static int scanf_parse(char *ccltab, const char *inp, int *inr, char const *fmt0
 						}
 						if (*inr <= 0) {
 							if (p == p0) {
+								if (allocDst != NULL) {
+									free(p0);
+								}
 								return (nconversions != 0 ? nassigned : -1);
 							}
 							break;
@@ -425,9 +457,15 @@ static int scanf_parse(char *ccltab, const char *inp, int *inr, char const *fmt0
 					}
 					n = p - p0;
 					if (n == 0) {
+						if (allocDst != NULL) {
+							free(p0);
+						}
 						return nassigned;
 					}
 					*p = 0;
+					if (allocDst != NULL) {
+						*allocDst = p0;
+					}
 					nassigned++;
 				}
 				nread += n;
@@ -452,7 +490,18 @@ static int scanf_parse(char *ccltab, const char *inp, int *inr, char const *fmt0
 					}
 				}
 				else {
-					p0 = p = va_arg(ap, char *);
+					char **allocDst = NULL;
+					if ((flags & ALLOC) != 0) {
+						size_t maxn = (width > (size_t)*inr) ? (size_t)*inr : width;
+						allocDst = va_arg(ap, char **);
+						p0 = p = malloc(maxn + 1);
+						if (p0 == NULL) {
+							return (nconversions != 0 ? nassigned : -1); /* errno set by malloc */
+						}
+					}
+					else {
+						p0 = p = va_arg(ap, char *);
+					}
 					while (isspace(*inp) == 0) {
 						(*inr)--;
 						*p++ = *inp++;
@@ -464,6 +513,9 @@ static int scanf_parse(char *ccltab, const char *inp, int *inr, char const *fmt0
 						}
 					}
 					*p = 0;
+					if (allocDst != NULL) {
+						*allocDst = p0;
+					}
 					nread += p - p0;
 					nassigned++;
 				}

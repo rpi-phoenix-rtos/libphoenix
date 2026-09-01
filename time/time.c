@@ -433,7 +433,7 @@ size_t strftime(char *__restrict s, size_t maxsize, const char *__restrict forma
 				res = snprintf(s + size, maxsize - size, "%.3s", tmp);
 				break;
 			case 'c':
-				res = snprintf(s + size, maxsize - size, "%.3s %.3s %u %02u:%02u:%02u %u",
+				res = snprintf(s + size, maxsize - size, "%.3s %.3s %2u %02u:%02u:%02u %u",
 						wdayasc[timeptr->tm_wday < 7 ? timeptr->tm_wday : 7],
 						monasc[timeptr->tm_mon < 12 ? timeptr->tm_mon : 12],
 						timeptr->tm_mday,
@@ -441,6 +441,65 @@ size_t strftime(char *__restrict s, size_t maxsize, const char *__restrict forma
 						timeptr->tm_min,
 						timeptr->tm_sec,
 						1900 + timeptr->tm_year);
+				break;
+			case 'C': /* century (year / 100) */
+				res = snprintf(s + size, maxsize - size, "%02u", (1900 + timeptr->tm_year) / 100);
+				break;
+			case 'h': /* same as %b */
+				tmp = monasc[timeptr->tm_mon < 12 ? timeptr->tm_mon : 12];
+				res = snprintf(s + size, maxsize - size, "%.3s", tmp);
+				break;
+			case 'D': /* %m/%d/%y */
+			case 'x': /* locale date (C locale == %D) */
+				res = snprintf(s + size, maxsize - size, "%02u/%02u/%02u",
+						timeptr->tm_mon < 12 ? timeptr->tm_mon + 1 : 13,
+						timeptr->tm_mday, timeptr->tm_year % 100);
+				break;
+			case 'F': /* %Y-%m-%d */
+				res = snprintf(s + size, maxsize - size, "%u-%02u-%02u",
+						1900 + timeptr->tm_year,
+						timeptr->tm_mon < 12 ? timeptr->tm_mon + 1 : 13,
+						timeptr->tm_mday);
+				break;
+			case 'I': /* hour, 12-hour clock */
+				res = snprintf(s + size, maxsize - size, "%02u",
+						(timeptr->tm_hour % 12 == 0) ? 12u : (unsigned)(timeptr->tm_hour % 12));
+				break;
+			case 'p': /* AM/PM */
+				res = snprintf(s + size, maxsize - size, "%s", timeptr->tm_hour < 12 ? "AM" : "PM");
+				break;
+			case 'R': /* %H:%M */
+				res = snprintf(s + size, maxsize - size, "%02u:%02u", timeptr->tm_hour, timeptr->tm_min);
+				break;
+			case 'r': /* %I:%M:%S %p */
+				res = snprintf(s + size, maxsize - size, "%02u:%02u:%02u %s",
+						(timeptr->tm_hour % 12 == 0) ? 12u : (unsigned)(timeptr->tm_hour % 12),
+						timeptr->tm_min, timeptr->tm_sec, timeptr->tm_hour < 12 ? "AM" : "PM");
+				break;
+			case 'X': /* locale time (C locale == %T) */
+				res = snprintf(s + size, maxsize - size, "%02u:%02u:%02u",
+						timeptr->tm_hour, timeptr->tm_min, timeptr->tm_sec);
+				break;
+			case 'u': /* ISO weekday 1..7, Monday=1 */
+				res = snprintf(s + size, maxsize - size, "%u",
+						timeptr->tm_wday == 0 ? 7u : (unsigned)timeptr->tm_wday);
+				break;
+			case 'U': /* week of year, Sunday as first day */
+				res = snprintf(s + size, maxsize - size, "%02u",
+						(unsigned)((timeptr->tm_yday + 7 - timeptr->tm_wday) / 7));
+				break;
+			case 'W': /* week of year, Monday as first day */
+				res = snprintf(s + size, maxsize - size, "%02u",
+						(unsigned)((timeptr->tm_yday + 7 - (timeptr->tm_wday == 0 ? 6 : timeptr->tm_wday - 1)) / 7));
+				break;
+			case 'z': /* timezone offset (Phoenix runs in UTC) */
+				res = snprintf(s + size, maxsize - size, "+0000");
+				break;
+			case 'n':
+				res = snprintf(s + size, maxsize - size, "\n");
+				break;
+			case 't':
+				res = snprintf(s + size, maxsize - size, "\t");
 				break;
 			case 'd':
 				res = snprintf(s + size, maxsize - size, "%02u", timeptr->tm_mday);

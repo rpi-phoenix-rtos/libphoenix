@@ -56,16 +56,8 @@ enum {
 };
 
 
-enum { F_RDLCK, F_UNLCK, F_WRLCK };
-
-
-struct flock {
-	short l_type;
-	short l_whence;
-	off_t l_start;
-	off_t l_len;
-	pid_t l_pid;
-};
+/* F_RDLCK/F_UNLCK/F_WRLCK and struct flock come from <phoenix/posix-fcntl.h>
+ * (single ABI-shared definition with the kernel). */
 
 
 #ifdef __cplusplus

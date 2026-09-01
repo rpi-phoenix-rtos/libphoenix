@@ -781,17 +781,20 @@ int destroy_dev(const char *path)
 }
 
 
-extern int sys_fcntl(int fd, int cmd, unsigned val);
+extern int sys_fcntl(int fd, int cmd, unsigned long val);
 
 
 int fcntl(int fd, int cmd, ...)
 {
 	va_list ap;
-	unsigned val;
+	unsigned long val;
 
-	/* FIXME: handle varargs properly */
+	/* The third argument is either an int flag (F_SETFD/F_SETFL/F_DUPFD) or a
+	 * `struct flock *` pointer (F_GETLK/F_SETLK/F_SETLKW). Read it at full
+	 * register width so the pointer is not truncated on 64-bit targets
+	 * (aarch64: a 32-bit read would zero the high half of x2). */
 	va_start(ap, cmd);
-	val = va_arg(ap, unsigned);
+	val = va_arg(ap, unsigned long);
 	va_end(ap);
 
 	return SET_ERRNO(sys_fcntl(fd, cmd, val));

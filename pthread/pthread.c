@@ -333,8 +333,6 @@ int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
 
 static void _pthread_release(pthread_ctx *ctx, int self)
 {
-	void *prev_stack = pthread_common.to_cleanup.stack;
-	size_t prev_stacksize = pthread_common.to_cleanup.stacksize;
 	void *stack = ctx->stack;
 	size_t stacksize = ctx->stacksize;
 
@@ -348,19 +346,15 @@ static void _pthread_release(pthread_ctx *ctx, int self)
 
 	LIST_REMOVE(&pthread_common.pthread_list, ctx);
 
-	if (self != 0) {
-		pthread_common.to_cleanup.stack = ctx->stack;
-		pthread_common.to_cleanup.stacksize = ctx->stacksize;
-	}
-	else {
-		pthread_common.to_cleanup.stack = NULL;
-	}
-
 	_pthread_ctx_put(ctx);
 
-	if (prev_stack != NULL) {
-		munmap(prev_stack, prev_stacksize);
-	}
+	/* A detached thread (self != 0) is still executing on `stack` here, so it
+	 * cannot munmap it; and freeing it from the NEXT exiting thread (the old
+	 * `to_cleanup` deferred-free scheme) races the owner on SMP -> the owner
+	 * faults in its own munmap epilogue. Leak the detached stack for now
+	 * (diagnostic + interim; proper reclaim via a live thread is TODO). The join
+	 * path (self == 0) runs on the JOINER's own stack, so freeing the joined
+	 * thread's stack here is safe. */
 	if (self == 0 && stack != NULL) {
 		munmap(stack, stacksize);
 	}
@@ -404,6 +398,11 @@ int pthread_join(pthread_t thread, void **value_ptr)
 	}
 
 	_pthread_release(ctx, 0);
+
+	/* _pthread_release() runs under pthread_list_lock but does not unlock (the
+	 * detached self-exit path relies on the kernel force-unlocking on death).
+	 * A live joiner MUST release it here or it leaks the lock forever. */
+	mutexUnlock(pthread_common.pthread_list_lock);
 
 	return 0;
 }

@@ -405,169 +405,287 @@ time_t timegm(struct tm *tm)
 }
 
 
+static int strftime_weeksInYear(int y)
+{
+	int p = (y + y / 4 - y / 100 + y / 400) % 7;
+	int p1 = ((y - 1) + (y - 1) / 4 - (y - 1) / 100 + (y - 1) / 400) % 7;
+	return ((p == 4) || (p1 == 3)) ? 53 : 52;
+}
+
+
+static int strftime_isoWeek(const struct tm *tm, int *isoYear)
+{
+	int year = tm->tm_year + 1900;
+	int wday = (tm->tm_wday + 6) % 7; /* ISO weekday: Monday = 0 .. Sunday = 6 */
+	int week = (tm->tm_yday - wday + 10) / 7;
+
+	if (week < 1) {
+		year -= 1;
+		week = strftime_weeksInYear(year);
+	}
+	else if (week > strftime_weeksInYear(year)) {
+		year += 1;
+		week = 1;
+	}
+
+	if (isoYear != NULL) {
+		*isoYear = year;
+	}
+
+	return week;
+}
+
+
 size_t strftime(char *__restrict s, size_t maxsize, const char *__restrict format, const struct tm *__restrict timeptr)
 {
-	int res;
 	size_t size = 0;
-	const char *c = format, *tmp;
+	const char *c = format;
 	struct tm time;
+	char buf[64];
+	int isoYear;
 
 	while (size < maxsize) {
-		if (*c == '%') {
+		if (*c != '%') {
+			if (*c == '\0') {
+				s[size] = '\0';
+				return size;
+			}
+			s[size++] = *c++;
+			continue;
+		}
+
+		/* '%' -> optional flags, then an optional decimal field width */
+		c++;
+		int padOverride = 0; /* 0 = use the specifier's default pad char */
+		for (;;) {
+			if (*c == '0') {
+				padOverride = '0';
+			}
+			else if (*c == '_') {
+				padOverride = ' ';
+			}
+			else if ((*c == '-') || (*c == '^') || (*c == '#')) {
+				/* accepted but not otherwise honoured */
+			}
+			else {
+				break;
+			}
 			c++;
-			switch (*c) {
-			case 'A':
-				tmp = wdayasc[timeptr->tm_wday < 7 ? timeptr->tm_wday : 7];
-				res = snprintf(s + size, maxsize - size, "%s", tmp);
-				break;
+		}
+
+		int width = 0;
+		while ((*c >= '0') && (*c <= '9')) {
+			width = width * 10 + (*c - '0');
+			c++;
+		}
+
+		/* Numeric specifiers put the RAW number in buf and set a default minimum
+		 * width + pad char; string/composite specifiers put their natural text in
+		 * buf with defMinWidth 0. The field is padded to max(width, defMinWidth). */
+		int defMinWidth = 0;
+		int defPad = '0';
+		int skip = 0;
+		buf[0] = '\0';
+
+		switch (*c) {
 			case 'a':
-				tmp = wdayasc[timeptr->tm_wday < 7 ? timeptr->tm_wday : 7];
-				res = snprintf(s + size, maxsize - size, "%.3s", tmp);
+				snprintf(buf, sizeof(buf), "%.3s", wdayasc[timeptr->tm_wday < 7 ? timeptr->tm_wday : 7]);
+				defPad = ' ';
 				break;
-			case 'B':
-				tmp = monasc[timeptr->tm_mon < 12 ? timeptr->tm_mon : 12];
-				res = snprintf(s + size, maxsize - size, "%s", tmp);
+			case 'A':
+				snprintf(buf, sizeof(buf), "%s", wdayasc[timeptr->tm_wday < 7 ? timeptr->tm_wday : 7]);
+				defPad = ' ';
 				break;
 			case 'b':
-				tmp = monasc[timeptr->tm_mon < 12 ? timeptr->tm_mon : 12];
-				res = snprintf(s + size, maxsize - size, "%.3s", tmp);
+			case 'h':
+				snprintf(buf, sizeof(buf), "%.3s", monasc[timeptr->tm_mon < 12 ? timeptr->tm_mon : 12]);
+				defPad = ' ';
+				break;
+			case 'B':
+				snprintf(buf, sizeof(buf), "%s", monasc[timeptr->tm_mon < 12 ? timeptr->tm_mon : 12]);
+				defPad = ' ';
 				break;
 			case 'c':
-				res = snprintf(s + size, maxsize - size, "%.3s %.3s %2u %02u:%02u:%02u %u",
+				snprintf(buf, sizeof(buf), "%.3s %.3s %2u %02u:%02u:%02u %u",
 						wdayasc[timeptr->tm_wday < 7 ? timeptr->tm_wday : 7],
 						monasc[timeptr->tm_mon < 12 ? timeptr->tm_mon : 12],
-						timeptr->tm_mday,
-						timeptr->tm_hour,
-						timeptr->tm_min,
-						timeptr->tm_sec,
+						timeptr->tm_mday, timeptr->tm_hour, timeptr->tm_min, timeptr->tm_sec,
 						1900 + timeptr->tm_year);
+				defPad = ' ';
 				break;
-			case 'C': /* century (year / 100) */
-				res = snprintf(s + size, maxsize - size, "%02u", (1900 + timeptr->tm_year) / 100);
-				break;
-			case 'h': /* same as %b */
-				tmp = monasc[timeptr->tm_mon < 12 ? timeptr->tm_mon : 12];
-				res = snprintf(s + size, maxsize - size, "%.3s", tmp);
-				break;
-			case 'D': /* %m/%d/%y */
-			case 'x': /* locale date (C locale == %D) */
-				res = snprintf(s + size, maxsize - size, "%02u/%02u/%02u",
-						timeptr->tm_mon < 12 ? timeptr->tm_mon + 1 : 13,
-						timeptr->tm_mday, timeptr->tm_year % 100);
-				break;
-			case 'F': /* %Y-%m-%d */
-				res = snprintf(s + size, maxsize - size, "%u-%02u-%02u",
-						1900 + timeptr->tm_year,
-						timeptr->tm_mon < 12 ? timeptr->tm_mon + 1 : 13,
-						timeptr->tm_mday);
-				break;
-			case 'I': /* hour, 12-hour clock */
-				res = snprintf(s + size, maxsize - size, "%02u",
-						(timeptr->tm_hour % 12 == 0) ? 12u : (unsigned)(timeptr->tm_hour % 12));
-				break;
-			case 'p': /* AM/PM */
-				res = snprintf(s + size, maxsize - size, "%s", timeptr->tm_hour < 12 ? "AM" : "PM");
-				break;
-			case 'R': /* %H:%M */
-				res = snprintf(s + size, maxsize - size, "%02u:%02u", timeptr->tm_hour, timeptr->tm_min);
-				break;
-			case 'r': /* %I:%M:%S %p */
-				res = snprintf(s + size, maxsize - size, "%02u:%02u:%02u %s",
-						(timeptr->tm_hour % 12 == 0) ? 12u : (unsigned)(timeptr->tm_hour % 12),
-						timeptr->tm_min, timeptr->tm_sec, timeptr->tm_hour < 12 ? "AM" : "PM");
-				break;
-			case 'X': /* locale time (C locale == %T) */
-				res = snprintf(s + size, maxsize - size, "%02u:%02u:%02u",
-						timeptr->tm_hour, timeptr->tm_min, timeptr->tm_sec);
-				break;
-			case 'u': /* ISO weekday 1..7, Monday=1 */
-				res = snprintf(s + size, maxsize - size, "%u",
-						timeptr->tm_wday == 0 ? 7u : (unsigned)timeptr->tm_wday);
-				break;
-			case 'U': /* week of year, Sunday as first day */
-				res = snprintf(s + size, maxsize - size, "%02u",
-						(unsigned)((timeptr->tm_yday + 7 - timeptr->tm_wday) / 7));
-				break;
-			case 'W': /* week of year, Monday as first day */
-				res = snprintf(s + size, maxsize - size, "%02u",
-						(unsigned)((timeptr->tm_yday + 7 - (timeptr->tm_wday == 0 ? 6 : timeptr->tm_wday - 1)) / 7));
-				break;
-			case 'z': /* timezone offset (Phoenix runs in UTC) */
-				res = snprintf(s + size, maxsize - size, "+0000");
-				break;
-			case 'n':
-				res = snprintf(s + size, maxsize - size, "\n");
-				break;
-			case 't':
-				res = snprintf(s + size, maxsize - size, "\t");
+			case 'C':
+				snprintf(buf, sizeof(buf), "%u", (1900 + timeptr->tm_year) / 100);
+				defMinWidth = 2;
 				break;
 			case 'd':
-				res = snprintf(s + size, maxsize - size, "%02u", timeptr->tm_mday);
+				snprintf(buf, sizeof(buf), "%u", timeptr->tm_mday);
+				defMinWidth = 2;
 				break;
 			case 'e':
-				res = snprintf(s + size, maxsize - size, "%2u", timeptr->tm_mday);
+				snprintf(buf, sizeof(buf), "%u", timeptr->tm_mday);
+				defMinWidth = 2;
+				defPad = ' ';
+				break;
+			case 'D':
+			case 'x':
+				snprintf(buf, sizeof(buf), "%02u/%02u/%02u",
+						timeptr->tm_mon < 12 ? timeptr->tm_mon + 1 : 13, timeptr->tm_mday, timeptr->tm_year % 100);
+				defPad = ' ';
+				break;
+			case 'F':
+				snprintf(buf, sizeof(buf), "%u-%02u-%02u", 1900 + timeptr->tm_year,
+						timeptr->tm_mon < 12 ? timeptr->tm_mon + 1 : 13, timeptr->tm_mday);
+				defPad = ' ';
 				break;
 			case 'H':
-				res = snprintf(s + size, maxsize - size, "%02u", timeptr->tm_hour);
+				snprintf(buf, sizeof(buf), "%u", timeptr->tm_hour);
+				defMinWidth = 2;
+				break;
+			case 'I':
+				snprintf(buf, sizeof(buf), "%u", (timeptr->tm_hour % 12 == 0) ? 12u : (unsigned)(timeptr->tm_hour % 12));
+				defMinWidth = 2;
 				break;
 			case 'j':
-				res = snprintf(s + size, maxsize - size, "%03u", timeptr->tm_yday + 1);
-				break;
-			case 'M':
-				res = snprintf(s + size, maxsize - size, "%02u", timeptr->tm_min);
+				snprintf(buf, sizeof(buf), "%u", timeptr->tm_yday + 1);
+				defMinWidth = 3;
 				break;
 			case 'm':
-				res = snprintf(s + size, maxsize - size, "%02u", timeptr->tm_mon < 12 ? timeptr->tm_mon + 1 : 13);
+				snprintf(buf, sizeof(buf), "%u", timeptr->tm_mon < 12 ? timeptr->tm_mon + 1 : 13);
+				defMinWidth = 2;
+				break;
+			case 'M':
+				snprintf(buf, sizeof(buf), "%u", timeptr->tm_min);
+				defMinWidth = 2;
+				break;
+			case 'p':
+				snprintf(buf, sizeof(buf), "%s", timeptr->tm_hour < 12 ? "AM" : "PM");
+				defPad = ' ';
+				break;
+			case 'R':
+				snprintf(buf, sizeof(buf), "%02u:%02u", timeptr->tm_hour, timeptr->tm_min);
+				defPad = ' ';
+				break;
+			case 'r':
+				snprintf(buf, sizeof(buf), "%02u:%02u:%02u %s",
+						(timeptr->tm_hour % 12 == 0) ? 12u : (unsigned)(timeptr->tm_hour % 12),
+						timeptr->tm_min, timeptr->tm_sec, timeptr->tm_hour < 12 ? "AM" : "PM");
+				defPad = ' ';
 				break;
 			case 'S':
-				res = snprintf(s + size, maxsize - size, "%02u", timeptr->tm_sec);
+				snprintf(buf, sizeof(buf), "%u", timeptr->tm_sec);
+				defMinWidth = 2;
 				break;
 			case 's':
 				memcpy(&time, timeptr, sizeof(struct tm));
-				res = snprintf(s + size, maxsize - size, "%llu", mktime(&time));
+				snprintf(buf, sizeof(buf), "%llu", mktime(&time));
+				defMinWidth = 1;
 				break;
 			case 'T':
-				res = snprintf(s + size, maxsize - size, "%02u:%02u:%02u",
-						timeptr->tm_hour, timeptr->tm_min, timeptr->tm_sec);
+			case 'X':
+				snprintf(buf, sizeof(buf), "%02u:%02u:%02u", timeptr->tm_hour, timeptr->tm_min, timeptr->tm_sec);
+				defPad = ' ';
+				break;
+			case 'u':
+				snprintf(buf, sizeof(buf), "%u", timeptr->tm_wday == 0 ? 7u : (unsigned)timeptr->tm_wday);
+				defMinWidth = 1;
 				break;
 			case 'w':
-				res = snprintf(s + size, maxsize - size, "%u", timeptr->tm_wday < 7 ? timeptr->tm_wday : 7);
+				snprintf(buf, sizeof(buf), "%u", timeptr->tm_wday < 7 ? timeptr->tm_wday : 7);
+				defMinWidth = 1;
+				break;
+			case 'U':
+				snprintf(buf, sizeof(buf), "%u", (unsigned)((timeptr->tm_yday + 7 - timeptr->tm_wday) / 7));
+				defMinWidth = 2;
+				break;
+			case 'W':
+				snprintf(buf, sizeof(buf), "%u",
+						(unsigned)((timeptr->tm_yday + 7 - (timeptr->tm_wday == 0 ? 6 : timeptr->tm_wday - 1)) / 7));
+				defMinWidth = 2;
+				break;
+			case 'V':
+				snprintf(buf, sizeof(buf), "%u", (unsigned)strftime_isoWeek(timeptr, NULL));
+				defMinWidth = 2;
+				break;
+			case 'g':
+				(void)strftime_isoWeek(timeptr, &isoYear);
+				snprintf(buf, sizeof(buf), "%u", (unsigned)(isoYear % 100));
+				defMinWidth = 2;
+				break;
+			case 'G':
+				(void)strftime_isoWeek(timeptr, &isoYear);
+				snprintf(buf, sizeof(buf), "%u", (unsigned)isoYear);
+				defMinWidth = 1;
 				break;
 			case 'Y':
-				res = snprintf(s + size, maxsize - size, "%u", 1900 + timeptr->tm_year);
+				snprintf(buf, sizeof(buf), "%u", 1900 + timeptr->tm_year);
+				defMinWidth = 1;
 				break;
 			case 'y':
-				res = snprintf(s + size, maxsize - size, "%02u", timeptr->tm_year % 100);
+				snprintf(buf, sizeof(buf), "%u", timeptr->tm_year % 100);
+				defMinWidth = 2;
+				break;
+			case 'z':
+				snprintf(buf, sizeof(buf), "+0000");
+				defPad = ' ';
+				break;
+			case 'n':
+				buf[0] = '\n';
+				buf[1] = '\0';
+				defPad = ' ';
+				break;
+			case 't':
+				buf[0] = '\t';
+				buf[1] = '\0';
+				defPad = ' ';
 				break;
 			case 'Z':
-				c++;
-				continue;
-			case '%':
-				s[size] = *c;
-				res = 1;
+				skip = 1; /* no timezone name available -> emit nothing */
 				break;
-			default: /* Unsupported conversion specifier */
-				if (maxsize - size < 3)
+			case '%':
+				buf[0] = '%';
+				buf[1] = '\0';
+				defPad = ' ';
+				break;
+			case '\0':
+				/* trailing '%': emit it literally and stop */
+				if (size + 1 >= maxsize) {
 					return 0;
+				}
 				s[size++] = '%';
-				s[size++] = *(c++);
-				continue;
-			}
-
-			if (res >= maxsize - size)
-				return 0;
-			size += res;
-
-		} else if (*c == 0) {
-			s[size] = 0;
-			return size;
-		} else {
-			s[size++] = *c;
+				s[size] = '\0';
+				return size;
+			default:
+				/* unknown specifier: emit "%<c>" verbatim */
+				snprintf(buf, sizeof(buf), "%%%c", *c);
+				defPad = ' ';
+				break;
 		}
-		c++;
+
+		c++; /* consume the specifier character */
+
+		if (skip != 0) {
+			continue;
+		}
+
+		size_t len = strlen(buf);
+		size_t fieldWidth = ((size_t)width > (size_t)defMinWidth) ? (size_t)width : (size_t)defMinWidth;
+		int padCh = (padOverride != 0) ? padOverride : defPad;
+		size_t pad = (fieldWidth > len) ? (fieldWidth - len) : 0;
+
+		/* need room for pad + len chars plus the terminating NUL */
+		if ((pad + len) >= (maxsize - size)) {
+			return 0;
+		}
+
+		while (pad-- > 0) {
+			s[size++] = (char)padCh;
+		}
+		size_t i;
+		for (i = 0; i < len; i++) {
+			s[size++] = buf[i];
+		}
 	}
 
-	/* Length of the result string would exceed max size */
 	return 0;
 }
 

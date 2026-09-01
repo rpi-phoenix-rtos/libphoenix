@@ -74,6 +74,19 @@ typedef struct pthread_fork_handlers_t {
 } pthread_fork_handlers_t;
 
 
+/* A detached thread cannot free its own live stack, and freeing it from another
+ * concurrently-exiting thread races the owner (SMP) -> the owner faults in its
+ * munmap epilogue. Instead, on exit a detached thread parks its stack here; a
+ * LIVE thread later reclaims it (threadJoin confirms the owner is off-stack,
+ * then munmap) from its OWN stack. See _pthread_reapRetired(). */
+typedef struct pthread_retired {
+	void *stack;
+	size_t stacksize;
+	handle_t tid;
+	struct pthread_retired *next;
+} pthread_retired_t;
+
+
 static struct {
 	handle_t pthread_key_lock;
 	handle_t pthread_list_lock;
@@ -82,10 +95,7 @@ static struct {
 	pthread_cond_t pthread_once_cond;
 	pthread_ctx *pthread_list;
 	pthread_fork_handlers_t *pthread_fork_handlers;
-	struct {
-		void *stack;
-		size_t stacksize;
-	} to_cleanup;
+	pthread_retired_t *retired; /* detached stacks awaiting reclaim by a live thread */
 
 	/*
 	 * TODO: replace with an array indexed by SCHED_FIFO, SCHED_RR, etc. once more
@@ -138,6 +148,7 @@ static const pthread_rwlockattr_t pthread_rwlockattr_default = {
 
 
 static __attribute__((noreturn)) void pthread_do_exit(pthread_ctx *ctx, void *value_ptr, int cleanup);
+static void _pthread_reapRetired(void);
 
 
 static void _pthread_ctx_get(pthread_ctx *ctx)
@@ -249,6 +260,10 @@ static int pthread_create_main(void)
 int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
 		void *(*start_routine)(void *), void *arg)
 {
+	/* Reclaim any detached-thread stacks parked by earlier exits (from this live
+	 * thread's own stack, before taking pthread_list_lock). */
+	_pthread_reapRetired();
+
 	const pthread_attr_t *attrs = &pthread_attr_default;
 
 	if (attr != NULL) {
@@ -331,10 +346,47 @@ int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
 }
 
 
+/* Reclaim detached-thread stacks parked on the retired list. Called by LIVE
+ * threads (pthread_create/pthread_join) from their OWN stack, NOT holding
+ * pthread_list_lock. threadJoin() blocks until each detached owner has fully
+ * terminated (reached the process ghost list = provably off its stack), making
+ * the munmap race-free; the whole list is popped atomically so concurrent
+ * reapers never double-free the same node. */
+static void _pthread_reapRetired(void)
+{
+	pthread_retired_t *list;
+
+	mutexLock(pthread_common.pthread_list_lock);
+	list = pthread_common.retired;
+	pthread_common.retired = NULL;
+	mutexUnlock(pthread_common.pthread_list_lock);
+
+	while (list != NULL) {
+		pthread_retired_t *node = list;
+		list = list->next;
+
+		/* A parked thread is already in its exit path (pthread_do_exit ->
+		 * endthread), so this join returns as soon as it becomes a ghost. Any
+		 * non-EINTR error just means it is already gone -> munmap is still safe. */
+		if (node->tid > 0) {
+			int err;
+			do {
+				err = threadJoin(node->tid, 0);
+			} while (err == -EINTR);
+		}
+		if (node->stack != NULL) {
+			munmap(node->stack, node->stacksize);
+		}
+		free(node);
+	}
+}
+
+
 static void _pthread_release(pthread_ctx *ctx, int self)
 {
 	void *stack = ctx->stack;
 	size_t stacksize = ctx->stacksize;
+	handle_t tid = ctx->id;
 
 	while (ctx->cleanup_list != NULL) {
 		pthread_cleanup_t *head = ctx->cleanup_list;
@@ -348,14 +400,25 @@ static void _pthread_release(pthread_ctx *ctx, int self)
 
 	_pthread_ctx_put(ctx);
 
-	/* A detached thread (self != 0) is still executing on `stack` here, so it
-	 * cannot munmap it; and freeing it from the NEXT exiting thread (the old
-	 * `to_cleanup` deferred-free scheme) races the owner on SMP -> the owner
-	 * faults in its own munmap epilogue. Leak the detached stack for now
-	 * (diagnostic + interim; proper reclaim via a live thread is TODO). The join
-	 * path (self == 0) runs on the JOINER's own stack, so freeing the joined
-	 * thread's stack here is safe. */
-	if (self == 0 && stack != NULL) {
+	if (self != 0) {
+		/* Detached self-exit: we are still running on `stack`, so we cannot free
+		 * it here. Park it (with our tid) for a live thread to reclaim via
+		 * _pthread_reapRetired(). Runs under pthread_list_lock (held across
+		 * endthread), same as the pthread_common list mutations above. On OOM,
+		 * fall back to leaking the stack rather than an unsafe free. */
+		if (stack != NULL) {
+			pthread_retired_t *node = malloc(sizeof(*node));
+			if (node != NULL) {
+				node->stack = stack;
+				node->stacksize = stacksize;
+				node->tid = tid;
+				node->next = pthread_common.retired;
+				pthread_common.retired = node;
+			}
+		}
+	}
+	else if (stack != NULL) {
+		/* Join path runs on the JOINER's own stack -> safe to free now. */
 		munmap(stack, stacksize);
 	}
 }
@@ -372,6 +435,10 @@ int pthread_join(pthread_t thread, void **value_ptr)
 	if (ctx == NULL) {
 		return EINVAL;
 	}
+
+	/* Opportunistically reclaim parked detached stacks (before taking the lock,
+	 * on this live joiner's own stack). */
+	_pthread_reapRetired();
 
 	mutexLock(pthread_common.pthread_list_lock);
 
@@ -2206,5 +2273,5 @@ void _pthread_init(void)
 	pthread_common.pthread_fork_handlers = NULL;
 	pthread_create_main();
 	pthread_cache_policies();
-	pthread_common.to_cleanup.stack = NULL;
+	pthread_common.retired = NULL;
 }

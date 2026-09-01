@@ -17,6 +17,7 @@
 #include <limits.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <sys/stat.h>
@@ -27,54 +28,75 @@ extern int sys_fdpath(int fd, char *buf, size_t size);
 
 
 /*
- * Resolve an *at() (dirfd, path) pair to a single path in `out` (must be
- * PATH_MAX bytes). An absolute path, or dirfd == AT_FDCWD, is used verbatim (the
- * underlying path-based syscall then resolves it against '/' or the cwd exactly
- * as the plain call would). Otherwise the directory fd's canonical path is
- * prepended: dirpath + '/' + path. The combined path is absolute, so the base
- * function's resolve_path() still handles '.', '..' and symlinks in `path`.
+ * Resolve an *at() (dirfd, path) pair to a single absolute-or-cwd-relative path.
+ * Returns a malloc()'d string the caller must free(), or NULL with errno set.
+ *
+ * The path buffers are heap-allocated on purpose: PATH_MAX-sized stack arrays in
+ * these wrappers (called from deep, allocation-heavy code like coreutils' fts)
+ * add up quickly and can overflow the user stack -- keep the frames small.
+ *
+ * An absolute path, or dirfd == AT_FDCWD, is used verbatim (the underlying
+ * path-based syscall then resolves it against '/' or the cwd exactly as the plain
+ * call would). Otherwise the directory fd's canonical path is prepended:
+ * dirpath + '/' + path -- an absolute result, so the base function's
+ * resolve_path() still handles '.', '..' and symlinks in `path`.
  */
-static int at_path(int dirfd, const char *path, char *out)
+static char *at_resolve(int dirfd, const char *path)
 {
-	char dbuf[PATH_MAX];
+	char *dbuf, *out;
 	size_t dlen, plen;
 	int r;
 
 	if (path == NULL) {
-		return SET_ERRNO(-EFAULT);
+		errno = EFAULT;
+		return NULL;
 	}
 
 	if ((path[0] == '/') || (dirfd == AT_FDCWD)) {
-		if (strlen(path) >= PATH_MAX) {
-			return SET_ERRNO(-ENAMETOOLONG);
+		out = strdup(path);
+		if (out == NULL) {
+			errno = ENOMEM;
 		}
-		strcpy(out, path);
-		return 0;
+		return out;
 	}
 
-	r = sys_fdpath(dirfd, dbuf, sizeof(dbuf));
+	dbuf = malloc(PATH_MAX);
+	if (dbuf == NULL) {
+		errno = ENOMEM;
+		return NULL;
+	}
+
+	r = sys_fdpath(dirfd, dbuf, PATH_MAX);
 	if (r < 0) {
+		free(dbuf);
 		/* -EBADF (no such fd) or -ENOENT (fd has no path: socket/pipe/...). */
-		return SET_ERRNO(r);
+		errno = -r;
+		return NULL;
 	}
 
 	dlen = strlen(dbuf);
 	plen = strlen(path);
-	if ((dlen + 1U + plen) >= PATH_MAX) {
-		return SET_ERRNO(-ENAMETOOLONG);
+
+	out = malloc(dlen + 1U + plen + 1U);
+	if (out == NULL) {
+		free(dbuf);
+		errno = ENOMEM;
+		return NULL;
 	}
 
 	memcpy(out, dbuf, dlen);
 	out[dlen] = '/';
 	memcpy(out + dlen + 1U, path, plen + 1U);
-	return 0;
+	free(dbuf);
+	return out;
 }
 
 
 int openat(int dirfd, const char *path, int oflag, ...)
 {
-	char full[PATH_MAX];
+	char *full;
 	mode_t mode = 0;
+	int r;
 
 	if ((oflag & O_CREAT) != 0) {
 		va_list ap;
@@ -83,153 +105,206 @@ int openat(int dirfd, const char *path, int oflag, ...)
 		va_end(ap);
 	}
 
-	if (at_path(dirfd, path, full) != 0) {
+	full = at_resolve(dirfd, path);
+	if (full == NULL) {
 		return -1;
 	}
 
-	return open(full, oflag, mode);
+	r = open(full, oflag, mode);
+	free(full);
+	return r;
 }
 
 
 int unlinkat(int dirfd, const char *path, int flag)
 {
-	char full[PATH_MAX];
+	char *full;
+	int r;
 
-	if (at_path(dirfd, path, full) != 0) {
+	full = at_resolve(dirfd, path);
+	if (full == NULL) {
 		return -1;
 	}
 
-	return ((flag & AT_REMOVEDIR) != 0) ? rmdir(full) : unlink(full);
+	r = ((flag & AT_REMOVEDIR) != 0) ? rmdir(full) : unlink(full);
+	free(full);
+	return r;
 }
 
 
 int fstatat(int dirfd, const char *path, struct stat *buf, int flag)
 {
-	char full[PATH_MAX];
+	char *full;
+	int r;
 
-	if (at_path(dirfd, path, full) != 0) {
+	full = at_resolve(dirfd, path);
+	if (full == NULL) {
 		return -1;
 	}
 
-	return ((flag & AT_SYMLINK_NOFOLLOW) != 0) ? lstat(full, buf) : stat(full, buf);
+	r = ((flag & AT_SYMLINK_NOFOLLOW) != 0) ? lstat(full, buf) : stat(full, buf);
+	free(full);
+	return r;
 }
 
 
 int faccessat(int dirfd, const char *path, int mode, int flag)
 {
-	char full[PATH_MAX];
+	char *full;
+	int r;
 
 	(void)flag; /* AT_EACCESS not distinguished (no euid/ruid split); AT_SYMLINK_NOFOLLOW rare */
 
-	if (at_path(dirfd, path, full) != 0) {
+	full = at_resolve(dirfd, path);
+	if (full == NULL) {
 		return -1;
 	}
 
-	return access(full, mode);
+	r = access(full, mode);
+	free(full);
+	return r;
 }
 
 
 int fchmodat(int dirfd, const char *path, mode_t mode, int flag)
 {
-	char full[PATH_MAX];
+	char *full;
+	int r;
 
 	(void)flag; /* AT_SYMLINK_NOFOLLOW (lchmod) not implemented; chmod follows links */
 
-	if (at_path(dirfd, path, full) != 0) {
+	full = at_resolve(dirfd, path);
+	if (full == NULL) {
 		return -1;
 	}
 
-	return chmod(full, mode);
+	r = chmod(full, mode);
+	free(full);
+	return r;
 }
 
 
 int fchownat(int dirfd, const char *path, uid_t owner, gid_t group, int flag)
 {
-	char full[PATH_MAX];
+	char *full;
+	int r;
 
-	if (at_path(dirfd, path, full) != 0) {
+	full = at_resolve(dirfd, path);
+	if (full == NULL) {
 		return -1;
 	}
 
-	return ((flag & AT_SYMLINK_NOFOLLOW) != 0) ? lchown(full, owner, group) : chown(full, owner, group);
+	r = ((flag & AT_SYMLINK_NOFOLLOW) != 0) ? lchown(full, owner, group) : chown(full, owner, group);
+	free(full);
+	return r;
 }
 
 
 int mkdirat(int dirfd, const char *path, mode_t mode)
 {
-	char full[PATH_MAX];
+	char *full;
+	int r;
 
-	if (at_path(dirfd, path, full) != 0) {
+	full = at_resolve(dirfd, path);
+	if (full == NULL) {
 		return -1;
 	}
 
-	return mkdir(full, mode);
+	r = mkdir(full, mode);
+	free(full);
+	return r;
 }
 
 
 int mknodat(int dirfd, const char *path, mode_t mode, dev_t dev)
 {
-	char full[PATH_MAX];
+	char *full;
+	int r;
 
-	if (at_path(dirfd, path, full) != 0) {
+	full = at_resolve(dirfd, path);
+	if (full == NULL) {
 		return -1;
 	}
 
-	return mknod(full, mode, dev);
+	r = mknod(full, mode, dev);
+	free(full);
+	return r;
 }
 
 
 int renameat(int olddirfd, const char *oldpath, int newdirfd, const char *newpath)
 {
-	char oldfull[PATH_MAX], newfull[PATH_MAX];
+	char *oldfull, *newfull;
+	int r;
 
-	if (at_path(olddirfd, oldpath, oldfull) != 0) {
+	oldfull = at_resolve(olddirfd, oldpath);
+	if (oldfull == NULL) {
 		return -1;
 	}
-	if (at_path(newdirfd, newpath, newfull) != 0) {
+	newfull = at_resolve(newdirfd, newpath);
+	if (newfull == NULL) {
+		free(oldfull);
 		return -1;
 	}
 
-	return rename(oldfull, newfull);
+	r = rename(oldfull, newfull);
+	free(oldfull);
+	free(newfull);
+	return r;
 }
 
 
 ssize_t readlinkat(int dirfd, const char *path, char *buf, size_t bufsiz)
 {
-	char full[PATH_MAX];
+	char *full;
+	ssize_t r;
 
-	if (at_path(dirfd, path, full) != 0) {
+	full = at_resolve(dirfd, path);
+	if (full == NULL) {
 		return -1;
 	}
 
-	return readlink(full, buf, bufsiz);
+	r = readlink(full, buf, bufsiz);
+	free(full);
+	return r;
 }
 
 
 int symlinkat(const char *target, int newdirfd, const char *linkpath)
 {
-	char full[PATH_MAX];
+	char *full;
+	int r;
 
-	if (at_path(newdirfd, linkpath, full) != 0) {
+	full = at_resolve(newdirfd, linkpath);
+	if (full == NULL) {
 		return -1;
 	}
 
-	return symlink(target, full);
+	r = symlink(target, full);
+	free(full);
+	return r;
 }
 
 
 int linkat(int olddirfd, const char *oldpath, int newdirfd, const char *newpath, int flag)
 {
-	char oldfull[PATH_MAX], newfull[PATH_MAX];
+	char *oldfull, *newfull;
+	int r;
 
 	(void)flag; /* AT_SYMLINK_FOLLOW: link() behaviour on the resolved paths */
 
-	if (at_path(olddirfd, oldpath, oldfull) != 0) {
+	oldfull = at_resolve(olddirfd, oldpath);
+	if (oldfull == NULL) {
 		return -1;
 	}
-	if (at_path(newdirfd, newpath, newfull) != 0) {
+	newfull = at_resolve(newdirfd, newpath);
+	if (newfull == NULL) {
+		free(oldfull);
 		return -1;
 	}
 
-	return link(oldfull, newfull);
+	r = link(oldfull, newfull);
+	free(oldfull);
+	free(newfull);
+	return r;
 }

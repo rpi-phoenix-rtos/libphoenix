@@ -155,6 +155,16 @@ mode_t umask(mode_t cmask)
 }
 
 
+/* Apply the process file-creation mask to a mode, as POSIX requires of every
+ * creating call (open O_CREAT, creat, mkdir, mkfifo, mknod). Only the permission
+ * bits are affected. Shared with open()/mkfifo() in unistd/file.c, which cannot
+ * see the static _umask directly. */
+mode_t _libc_applyUmask(mode_t mode)
+{
+	return mode & (mode_t)(~_umask);
+}
+
+
 int lstat(const char *path, struct stat *buf)
 {
 	char *canonical;
@@ -216,6 +226,8 @@ int mkdir(const char *path, mode_t mode)
 		free(canonical_name);
 		return SET_ERRNO(-ENOENT);
 	}
+
+	mode = _libc_applyUmask(mode);
 
 	msg_t msg = {
 		.type = mtCreate,

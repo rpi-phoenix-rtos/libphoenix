@@ -633,6 +633,14 @@ static int scanf_parse(char *ccltab, const char *inp, int *inr, char const *fmt0
 					}
 				}
 				if ((flags & NDIGITS) != 0) {
+					/* No valid digit matched. If input still remains, a
+					 * non-matching character is present -> this is a matching
+					 * failure, so return the number of items already assigned
+					 * (POSIX). EOF (-1) is only for input exhausted before any
+					 * conversion or matching failure. */
+					if (*inr > 0) {
+						return nassigned;
+					}
 					return (nconversions != 0 ? nassigned : -1);
 				}
 
@@ -716,6 +724,12 @@ static int scanf_parse(char *ccltab, const char *inp, int *inr, char const *fmt0
 				}
 
 				if (is_zero && (srcbuf == p)) {
+					/* No float was matched. As for integers, a non-matching
+					 * character with input still available is a matching failure
+					 * (return the count), not EOF. */
+					if (*inr > 0) {
+						return nassigned;
+					}
 					return (nconversions != 0 ? nassigned : -1);
 				}
 

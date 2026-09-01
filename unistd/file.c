@@ -318,12 +318,22 @@ int unlink(const char *path)
 {
 	char *canonical;
 	int err;
+	struct stat st;
 
 	/* resolve_last_symlink = 0 -> we should delete symlink instead of target file */
 	canonical = resolve_path(path, NULL, 0, 0);
 
 	if (canonical == NULL)
 		return -1; /* errno set by resolve_path */
+
+	/* POSIX: unlink() shall not remove a directory (that is rmdir()'s job). Phoenix's
+	 * filesystem servers share mtUnlink for both unlink and rmdir, so the check is
+	 * enforced here. lstat() (final symlink NOT followed) still lets unlink() remove
+	 * a symlink that points at a directory. */
+	if (lstat(canonical, &st) == 0 && S_ISDIR(st.st_mode)) {
+		free(canonical);
+		return SET_ERRNO(-EISDIR);
+	}
 
 	err = sys_unlink(canonical);
 	free(canonical);

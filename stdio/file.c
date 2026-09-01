@@ -1521,5 +1521,14 @@ FILE *tmpfile(void)
 
 int remove(const char *path)
 {
+	struct stat st;
+
+	/* POSIX: remove() is equivalent to rmdir() for a directory and unlink()
+	 * otherwise. lstat() (no-follow) keeps a symlink-to-directory on the unlink()
+	 * path, matching unlink()/rmdir() semantics. */
+	if ((lstat(path, &st) == 0) && S_ISDIR(st.st_mode)) {
+		return rmdir(path);
+	}
+
 	return unlink(path);
 }

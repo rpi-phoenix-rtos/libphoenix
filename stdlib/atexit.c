@@ -63,8 +63,15 @@ static int _atexit_register(int isarg, void (*fn)(void), void *arg, void *handle
 	mutexLock(atexit_common.lock);
 	node = atexit_common.head;
 
-	/* Allocate new node if there are no free slots left */
-	if (atexit_common.idx == ATEXIT_MAX) {
+	/* Allocate new node if there are no free slots left.
+	 *
+	 * >= rather than ==: with an equality test, an idx that ever exceeded
+	 * ATEXIT_MAX (however it got there) never matched again, so every
+	 * subsequent registration wrote node->destructors[idx], node->args[idx] and
+	 * node->handles[idx] PAST the end of the node -- straight into whatever
+	 * follows it. Observed on a Pi4 with idx == 180 against ATEXIT_MAX == 32,
+	 * having overwritten the head pointer and idx of atexit_common itself. */
+	if (atexit_common.idx >= ATEXIT_MAX) {
 		node = (struct atexit_node *)calloc(1, sizeof(struct atexit_node));
 		if (node == NULL) {
 			mutexUnlock(atexit_common.lock);
@@ -104,6 +111,22 @@ void __cxa_finalize(void *handle)
 	/* Iteration has to be over the atexit_common.head and newest node must be restored at the end
 	 * as the atexit functions may register new atexit functions. */
 	while (atexit_common.head != NULL) {
+		/* Clamp before use. idx is decremented below, so a value above
+		 * ATEXIT_MAX would read past the arrays, and a value of 0 would wrap to
+		 * UINT_MAX -- and 0 is reachable here: the destructors called below run
+		 * with the lock dropped and may register new handlers, which allocates
+		 * a fresh node and resets idx to 0 (see the note above). */
+		if (atexit_common.idx > ATEXIT_MAX) {
+			atexit_common.idx = ATEXIT_MAX;
+		}
+
+		if (atexit_common.idx == 0) {
+			/* Nothing left in this node: step to the previous one. */
+			atexit_common.head = atexit_common.head->prev;
+			atexit_common.idx = ATEXIT_MAX;
+			continue;
+		}
+
 		atexit_common.idx--;
 		destructor_t destructor = atexit_common.head->destructors[atexit_common.idx];
 		/* Do not call already called destructors and destructors not from current handle. */
@@ -121,11 +144,6 @@ void __cxa_finalize(void *handle)
 				destructor();
 			}
 			mutexLock(atexit_common.lock);
-		}
-
-		if (atexit_common.idx == 0) {
-			atexit_common.head = atexit_common.head->prev;
-			atexit_common.idx = ATEXIT_MAX;
 		}
 	}
 

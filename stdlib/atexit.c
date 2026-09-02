@@ -14,6 +14,8 @@
  */
 
 #include <stdlib.h>
+#include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 #include <sys/threads.h>
 
@@ -43,6 +45,36 @@ static struct {
 	struct atexit_node *newestNode;
 	unsigned int idx;
 } atexit_common = { .head = &((struct atexit_node) {}) };
+
+
+/* Diagnostic: is the atexit bookkeeping still self-consistent?
+ *
+ * Returns 0 if it is, or a bitmask naming what is wrong. Exists because
+ * atexit_common has been observed corrupted on a Pi4 -- idx far above
+ * ATEXIT_MAX, head overwritten with the kernel's thread-stack fill byte -- and
+ * the crash only surfaces much later, at exit, in __cxa_finalize. A caller that
+ * polls this can say WHEN the damage appeared instead of only that it did.
+ * Deliberately read-only and lock-free so it is safe to call from anywhere. */
+int _atexit_check(void)
+{
+	int bad = 0;
+
+	if (atexit_common.idx > ATEXIT_MAX) {
+		bad |= 1;
+	}
+	if (atexit_common.head == NULL) {
+		bad |= 2;
+	}
+	else if (((uintptr_t)atexit_common.head & 0x7UL) != 0UL) {
+		/* every node is calloc'd or static, so at least 8-byte aligned */
+		bad |= 4;
+	}
+	if ((atexit_common.newestNode != NULL) && (((uintptr_t)atexit_common.newestNode & 0x7UL) != 0UL)) {
+		bad |= 8;
+	}
+
+	return bad;
+}
 
 
 /* Initialise atexit_common structure before main */
@@ -105,6 +137,21 @@ void __cxa_finalize(void *handle)
 	/* No handlers registered. */
 	if (atexit_common.idx == 0) {
 		return;
+	}
+
+	/* Refuse to walk a list that is visibly broken. Every field here is
+	 * dereferenced or used as an index below, so walking a corrupt list means
+	 * jumping through a wild pointer -- which is what happened on a Pi4, where
+	 * head had been overwritten and idx read 180 against ATEXIT_MAX of 32. A
+	 * process that cannot run its handlers should still exit, and say why,
+	 * rather than take a fault deep inside the C runtime. */
+	{
+		int bad = _atexit_check();
+		if (bad != 0) {
+			fprintf(stderr, "atexit: handler list corrupt (mask=%d, idx=%u, head=%p), skipping handlers\n",
+				bad, atexit_common.idx, (void *)atexit_common.head);
+			return;
+		}
 	}
 
 	mutexLock(atexit_common.lock);

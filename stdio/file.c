@@ -142,11 +142,54 @@ static void buffFree(void *ptr, size_t size)
 }
 
 
-static void file_free(FILE *file)
+/* Is `file` currently on the open-FILE list? Called with the lock held.
+ *
+ * Guards against closing a FILE twice. The second fclose() used to walk into
+ * lib_listRemove() with both links already NULL and write through the NULL prev
+ * pointer, then free() the same allocation again -- so the symptom was either a
+ * Data Abort (observed 2026-09-04 as far=0x10 during quake3e's map load) or,
+ * worse, silent heap corruption when the block had been reused. stdio cannot
+ * mark the FILE itself, because by then the memory is already freed and may
+ * belong to somebody else; the list is the only trustworthy record. */
+static int file_isOpen(const FILE *file)
+{
+	const FILE *it = file_common.list;
+
+	if (it == NULL) {
+		return 0;
+	}
+	do {
+		if (it == file) {
+			return 1;
+		}
+		it = it->next;
+	} while (it != NULL && it != file_common.list);
+
+	return 0;
+}
+
+
+/* Take `file` off the open-FILE list. Returns -1 when it was not on it, i.e.
+ * when this is a second close of the same FILE -- see file_isOpen(). Doing this
+ * FIRST, before touching the stream, is what makes a double fclose() safe: no
+ * fflush of freed memory, no close() of an fd that may have been reused, no
+ * second free() of the block. */
+static int file_unlink(FILE *file)
 {
 	mutexLock(file_common.lock);
+	if (file_isOpen(file) == 0) {
+		mutexUnlock(file_common.lock);
+		return -1;
+	}
 	LIST_REMOVE(&file_common.list, file);
 	mutexUnlock(file_common.lock);
+
+	return 0;
+}
+
+
+static void file_release(FILE *file)
+{
 
 	if (file->buffer != NULL && !(file->flags & F_USRBUF)) {
 		buffFree(file->buffer, file->bufsz);
@@ -155,6 +198,17 @@ static void file_free(FILE *file)
 	resourceDestroy(file->lock);
 
 	free(file);
+}
+
+
+static int file_free(FILE *file)
+{
+	if (file_unlink(file) < 0) {
+		return -1;
+	}
+	file_release(file);
+
+	return 0;
 }
 
 
@@ -167,12 +221,21 @@ int fclose(FILE *stream)
 		return EOF;
 	}
 
+	/* Unlink BEFORE using the stream: if it is already closed, its memory is
+	 * freed (and possibly reused), so fflush()ing it or closing stream->fd
+	 * would act on somebody else's data. Double fclose() is undefined per C,
+	 * but on an RTOS a wild write is the wrong way to say so. */
+	if (file_unlink(stream) < 0) {
+		errno = EBADF;
+		return EOF;
+	}
+
 	err = fflush(stream);
 
 	if (__safe_close(stream->fd) < 0) {
 		err = EOF;
 	}
-	file_free(stream);
+	file_release(stream);
 
 	return err;
 }

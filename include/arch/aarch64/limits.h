@@ -52,6 +52,18 @@
 
 #define PTHREAD_STACK_MIN 256
 
+/* Default stack for a thread created with a NULL/default attr. PTHREAD_STACK_MIN
+ * is a POSIX *floor*, not a usable default: at 256 (one page once aligned) no
+ * ordinary library code fits. libjpeg's Huffman-table setup overflows it while
+ * doing nothing unusual, and before this port had a guard page such an overrun
+ * silently corrupted a neighbouring thread's stack or the heap instead of
+ * faulting. Sized for real C/C++ call chains (glibc uses 8 MiB) while staying
+ * modest in absolute terms, since a process may hold many threads.
+ *
+ * MMU targets only: an arch that does not define this keeps PTHREAD_STACK_MIN,
+ * so the memory-constrained NOMMU targets are unaffected. */
+#define PTHREAD_STACK_DEFAULT (256 * 1024)
+
 /*** POSIX-required defines ***/
 
 #define PATH_MAX    1024  /* Maximum number of bytes the implementation will store as a pathname in a user-supplied buffer of unspecified size, including the terminating null character. MIN: 256 */

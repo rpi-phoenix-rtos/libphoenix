@@ -126,13 +126,20 @@ typedef struct _pthread_cleanup_t {
 } pthread_cleanup_t;
 
 
+/* An arch that does not set its own default keeps the POSIX floor, so the
+ * memory-constrained NOMMU targets see no change from this. */
+#ifndef PTHREAD_STACK_DEFAULT
+#define PTHREAD_STACK_DEFAULT PTHREAD_STACK_MIN
+#endif
+
+
 static const pthread_attr_t pthread_attr_default = {
 	.stackaddr = NULL,
 	.schedpolicy = SCHED_RR,
 	.priority = PRIO_DEFAULT,
 	.detachstate = PTHREAD_CREATE_JOINABLE,
 	.inheritsched = PTHREAD_EXPLICIT_SCHED,
-	.stacksize = ALIGN(PTHREAD_STACK_MIN, PAGE_SIZE),
+	.stacksize = ALIGN(PTHREAD_STACK_DEFAULT, PAGE_SIZE),
 	/* One guard page by default. Without it a thread that overruns its stack
 	 * writes silently into whatever is mapped below -- another thread's stack or
 	 * the heap -- and the fault surfaces somewhere unrelated, minutes and

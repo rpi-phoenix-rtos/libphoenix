@@ -176,6 +176,66 @@ static inline void malloc_chunkSetFooter(chunk_t *chunk)
 }
 
 
+/* Print "<label>0x<hex>\n" without allocating. printf() here would call back
+ * into malloc while its lock is held; debug() is a raw write. */
+static void malloc_debugHex(const char *label, uintptr_t v)
+{
+	static const char hexd[] = "0123456789abcdef";
+	char buf[80];
+	size_t n = 0;
+	int i;
+
+	while ((label[n] != '\0') && (n < 48)) {
+		buf[n] = label[n];
+		n++;
+	}
+	buf[n++] = '0';
+	buf[n++] = 'x';
+	for (i = (int)(sizeof(uintptr_t) * 2) - 1; i >= 0; i--) {
+		buf[n++] = hexd[(v >> (unsigned)(i * 4)) & 0xfu];
+	}
+	buf[n++] = '\n';
+	buf[n] = '\0';
+	debug(buf);
+}
+
+
+/* Is this chunk header self-consistent with the heap it claims to belong to?
+ *
+ * A heap overflow in the caller lands on the NEXT chunk's header, and free()
+ * then derives a write address from the corrupted size (malloc_chunkSetFooter
+ * writes at chunk + size - sizeof(size_t)). That turns one overflow into a
+ * second, unbounded write, which is why the eventual fault usually appears in
+ * an unrelated allocation -- observed as faults in malloc_cmp/lib_rbInsert and
+ * as a jump to a garbage address. Checking the header first localises the
+ * damage to the block that was actually smashed. */
+static int malloc_chunkValid(chunk_t *chunk, const heap_t *heap)
+{
+	uintptr_t base = (uintptr_t)heap;
+	size_t size;
+
+	if ((heap == NULL) || ((base & (uintptr_t)(_PAGE_SIZE - 1)) != 0)) {
+		return 0; /* heaps come from mmap(), so they are page-aligned */
+	}
+	if ((heap->size < sizeof(heap_t)) || ((heap->size & (_PAGE_SIZE - 1)) != 0)) {
+		return 0;
+	}
+	if (((uintptr_t)chunk < base + sizeof(heap_t)) || ((uintptr_t)chunk >= base + heap->size)) {
+		return 0;
+	}
+
+	size = malloc_chunkSize(chunk);
+	if ((size < CHUNK_MIN_SIZE) || ((size & 7u) != 0)) {
+		return 0;
+	}
+	if (((uintptr_t)chunk + size) > (base + heap->size)) {
+		return 0;
+	}
+
+	return 1;
+}
+
+
 static void malloc_chunkInit(chunk_t *chunk, heap_t *heap, size_t size)
 {
 	chunk->size = size;
@@ -501,6 +561,19 @@ void free(void *ptr)
 
 	chunk = (chunk_t *) ((uintptr_t) ptr - CHUNK_OVERHEAD);
 	heap = chunk->heap;
+
+	/* Refuse a free whose header cannot be trusted. Leaking the block is
+	 * strictly better than letting malloc_chunkSetFooter() below write through a
+	 * corrupted size, and the report names the smashed block rather than the
+	 * unrelated allocation that would fault later. */
+	if (malloc_chunkValid(chunk, heap) == 0) {
+		debug("malloc: free() of a corrupt chunk header -- leaking the block\n");
+		malloc_debugHex("malloc:   ptr   = ", (uintptr_t)ptr);
+		malloc_debugHex("malloc:   size  = ", (uintptr_t)(chunk->size));
+		malloc_debugHex("malloc:   heap  = ", (uintptr_t)heap);
+		mutexUnlock(malloc_common.mutex);
+		return;
+	}
 
 	if (!(chunk->size & CHUNK_CUSED)) {
 		debug("Double free detected\n");

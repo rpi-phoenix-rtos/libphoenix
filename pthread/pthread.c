@@ -133,7 +133,16 @@ static const pthread_attr_t pthread_attr_default = {
 	.detachstate = PTHREAD_CREATE_JOINABLE,
 	.inheritsched = PTHREAD_EXPLICIT_SCHED,
 	.stacksize = ALIGN(PTHREAD_STACK_MIN, PAGE_SIZE),
-	.guardsize = 0
+	/* One guard page by default. Without it a thread that overruns its stack
+	 * writes silently into whatever is mapped below -- another thread's stack or
+	 * the heap -- and the fault surfaces somewhere unrelated, minutes and
+	 * megabytes away from the cause. That has cost this port two full root-cause
+	 * hunts (a 44 KiB PCM buffer and a generated index array, both on default
+	 * stacks), and fixing one such caller simply exposes the next. A guard page
+	 * turns the whole class into an immediate fault at the offending store.
+	 * POSIX leaves the default implementation-defined; an explicit 0 is still
+	 * honoured for a caller that really wants no guard. */
+	.guardsize = PAGE_SIZE
 };
 
 
@@ -296,10 +305,12 @@ int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
 		}
 
 		if (guardsize > 0) {
-			if (mprotect(stack, guardsize, PROT_NONE) != 0) {
-				munmap(stack, stacksize);
-				return EAGAIN;
-			}
+			/* Best effort: a guard page is hardening, not a functional
+			 * requirement, and mprotect is unavailable on the NOMMU targets.
+			 * Failing the thread creation over it would break those outright,
+			 * so carry on unguarded instead -- which is exactly the behaviour
+			 * they had when the default guardsize was 0. */
+			(void)mprotect(stack, guardsize, PROT_NONE);
 		}
 	}
 

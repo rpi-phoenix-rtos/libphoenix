@@ -408,12 +408,26 @@ static int __fflush_one(FILE *stream)
 	if ((stream->flags & F_WRITING) != 0) {
 		if (stream->bufpos != 0) {
 			err = full_write(stream->fd, stream->buffer, stream->bufpos);
-			if (err != stream->bufpos) {
+			if (err < 0) {
 				stream->flags |= F_ERROR;
 				ret = -1;
 			}
 			else {
-				stream->bufpos = 0;
+				/* Consume exactly what went out and keep the remainder, the same way
+				 * write_buffer() below already does. full_write() returns a SHORT
+				 * count when the descriptor is non-blocking and hits EAGAIN -- a full
+				 * tty FIFO, i.e. any program printing faster than the UART drains.
+				 * Leaving bufpos spanning the whole buffer made the next flush
+				 * re-transmit the bytes that had already been written, and the
+				 * remainder was never resumed. */
+				stream->bufpos -= (size_t)err;
+				if (stream->bufpos != 0) {
+					if (err > 0) {
+						memmove(stream->buffer, stream->buffer + err, stream->bufpos);
+					}
+					stream->flags |= F_ERROR;
+					ret = -1;
+				}
 			}
 		}
 	}

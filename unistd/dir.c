@@ -276,9 +276,12 @@ static int _resolve_abspath(char *path, char *result, int resolve_last_symlink, 
 			return SET_ERRNO(-ELOOP);
 		}
 
-		assert(symlink_len <= readlink_max_len);
-		if (symlink_len == readlink_max_len) {
-			/* `readlink(..., max_len) == max_len` means result could have been truncated */
+		/* `readlink(..., max_len) == max_len` means the result could have been
+		 * truncated. `>` must be rejected too, not merely asserted: the assert
+		 * below it used to be the only thing standing between an over-reporting
+		 * server and the backwards memmove that follows, and -DNDEBUG deletes it.
+		 * Defence in depth -- _readlink_abs() now clamps as well. */
+		if (symlink_len >= (ssize_t)readlink_max_len) {
 			return SET_ERRNO(-ENAMETOOLONG);
 		}
 
@@ -644,6 +647,20 @@ static ssize_t _readlink_abs(const char *path, char *buf, size_t bufsiz)
 
 	if (msg.o.err < 0) {
 		return SET_ERRNO(msg.o.err);
+	}
+
+	/* Clamp to what we actually offered. msg.o.err is a byte count reported by
+	 * whichever filesystem server owns this oid, and nothing has validated it
+	 * against msg.o.size. A server that over-reports would make the caller in
+	 * _resolve_abspath() walk `p` BACKWARDS past the start of its own PATH_MAX
+	 * heap block -- `p -= symlink_len` then memmove(p, path, symlink_len) --
+	 * writing straight onto the block's malloc chunk header. Clearing
+	 * CHUNK_CUSED there produces a "double free" report on a header that still
+	 * validates, i.e. a memory corruption that points nowhere near its cause.
+	 * The caller's assert() is no guard: the build sets -DNDEBUG
+	 * (phoenix-rtos-build/Makefile.common), so it is compiled out. */
+	if ((size_t)msg.o.err > bufsiz) {
+		return SET_ERRNO(-ENAMETOOLONG);
 	}
 
 	/* number of bytes written without terminating NULL byte */

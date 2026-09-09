@@ -301,11 +301,66 @@ static void _malloc_chunkAdd(chunk_t *chunk)
 }
 
 
+/* Is this free-bin link plausible WITHOUT dereferencing it?
+ *
+ * Deliberately a pure value test. The link may be wild, so reading link->heap to
+ * run malloc_chunkValid() on it would itself fault -- which is the very thing this
+ * exists to avoid. The heap window (see heapLo/heapHi) makes the test possible
+ * without a dereference: every chunk lives inside a heap we mmap'd.
+ *
+ * Measured need: SuperTuxKart faulted at lib_listRemove (sys/list.c:71,
+ * `t->next->prev = t->prev`) on hardware -- one of four distinct STK crash sites,
+ * two of which are inside this allocator rather than in STK's own code. list.c
+ * already rejects NULL links; a garbage non-NULL link goes straight through. This
+ * is the same defect class fixed in the kernel's scheduler the same day, and the
+ * same remedy: check the pointer values before the unlink dereferences them.
+ */
+static int malloc_linkPlausible(const chunk_t *chunk, const chunk_t *link)
+{
+	if ((link == NULL) || (link == chunk)) {
+		return 1; /* not on a list, or a single-element list */
+	}
+	if (((uintptr_t)link & 7u) != 0u) {
+		return 0;
+	}
+	if (malloc_common.heapHi == 0u) {
+		return 1; /* no heap seen yet: nothing to compare against */
+	}
+	if (((uintptr_t)link < malloc_common.heapLo) ||
+			(((uintptr_t)link + sizeof(chunk_t)) > malloc_common.heapHi)) {
+		return 0;
+	}
+	return 1;
+}
+
+
 static void _malloc_chunkRemove(chunk_t *chunk)
 {
 	unsigned int idx;
 	size_t chunksz = malloc_chunkSize(chunk);
 	chunk_t *next = chunk;
+
+	if ((malloc_linkPlausible(chunk, chunk->next) == 0) ||
+			(malloc_linkPlausible(chunk, chunk->prev) == 0)) {
+		/* Drop the whole bin rather than unlink through a garbage pointer. Leaving
+		 * the chunk in place is not an option either -- the next allocation from
+		 * this bin would hand out a corrupted chunk -- so the bin is abandoned,
+		 * exactly as the kernel scheduler abandons a ready queue with a non-thread
+		 * on it. That leaks the chunks still in the bin; the allocator keeps
+		 * working and says which bin it lost. */
+		debug("malloc: free-bin link is not a plausible chunk -- abandoning the bin\n");
+		malloc_debugHex("malloc:   chunk = ", (uintptr_t)chunk);
+		malloc_debugHex("malloc:   next  = ", (uintptr_t)chunk->next);
+		malloc_debugHex("malloc:   prev  = ", (uintptr_t)chunk->prev);
+		malloc_debugHex("malloc:   heapLo= ", malloc_common.heapLo);
+		malloc_debugHex("malloc:   heapHi= ", malloc_common.heapHi);
+		if (chunksz <= CHUNK_SMALLBIN_MAX_SIZE) {
+			idx = malloc_getsidx(chunksz);
+			malloc_common.sbins[idx] = NULL;
+			malloc_common.sbinmap &= ~(1 << idx);
+		}
+		return;
+	}
 
 	if (chunksz <= CHUNK_SMALLBIN_MAX_SIZE) {
 		idx = malloc_getsidx(chunksz);

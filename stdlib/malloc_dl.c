@@ -369,6 +369,19 @@ static void _malloc_chunkRemove(chunk_t *chunk)
 			malloc_common.sbins[idx] = NULL;
 			malloc_common.sbinmap &= ~(1 << idx);
 		}
+		else {
+			/* A large bin is an rbtree plus a same-size list threaded through
+			 * chunk->next/prev -- the very links just rejected -- so unlinking is
+			 * not safe. Drop the tree root instead. This MUST happen: returning
+			 * with the chunk still in lbins[idx] leaves _malloc_allocFrom() free
+			 * to mark it CHUNK_CUSED and hand it out while lib_rbFindEx() can
+			 * still find it, so the same block goes to two callers and the second
+			 * free() of it reports a double free with a perfectly valid header.
+			 * Both the abandon paths are deliberately symmetric now. */
+			idx = malloc_getlidx(chunksz);
+			malloc_common.lbins[idx].root = NULL;
+			malloc_common.lbinmap &= ~(1 << idx);
+		}
 		return;
 	}
 
@@ -537,6 +550,29 @@ static inline void *_malloc_allocFrom(chunk_t *chunk, size_t size)
 		_malloc_chunkRemove(chunk);
 
 	chunk->heap->freesz -= malloc_chunkSize(chunk);
+
+	if ((chunk->size & CHUNK_CUSED) != 0) {
+		/* This chunk is being handed out while already marked in use, i.e. it is
+		 * live with another caller and two pointers to it now exist. The second
+		 * free() of it would report a "double free" with a perfectly valid header
+		 * and no way to tell that the real fault was here, one or more allocations
+		 * earlier -- which is exactly how the AF_UNIX liveness child's exit 70 has
+		 * resisted diagnosis. Report at the moment of the duplicate hand-out
+		 * instead, where the bin state is still the state that caused it.
+		 *
+		 * This is a single check covering EVERY allocation path, since they all
+		 * funnel through here. */
+		debug("malloc: chunk handed out twice -- already CHUNK_CUSED\n");
+		malloc_debugHex("malloc:   chunk = ", (uintptr_t)chunk);
+		malloc_debugHex("malloc:   size  = ", (uintptr_t)(chunk->size));
+		malloc_debugHex("malloc:   want  = ", (uintptr_t)size);
+		malloc_debugHex("malloc:   heap  = ", (uintptr_t)chunk->heap);
+		malloc_debugHex("malloc:   hsize = ", (uintptr_t)chunk->heap->size);
+		malloc_debugHex("malloc:   hfree = ", (uintptr_t)chunk->heap->freesz);
+		malloc_debugHex("malloc:   heapLo= ", malloc_common.heapLo);
+		malloc_debugHex("malloc:   heapHi= ", malloc_common.heapHi);
+		_exit(EX_SOFTWARE);
+	}
 
 	chunk->size |= CHUNK_CUSED;
 

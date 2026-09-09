@@ -80,10 +80,15 @@ struct {
 	 * 0x2000 out of low memory, and that "heap" passed every existing check --
 	 * 0x2000 IS page-aligned, its "size" 0x1000 IS a page multiple, and 0x25e0 IS
 	 * inside 0x2000..0x3000. So the block looked valid, its in-use bit was clear,
-	 * and the allocator reported a DOUBLE FREE and exited EX_SOFTWARE. The
-	 * diagnosis cost a session: the report named a real-looking block that had
-	 * never been allocated. No mmap returns page 2, so a window check separates
-	 * the two cases cheaply. */
+	 * and the allocator reported a DOUBLE FREE and exited EX_SOFTWARE.
+	 *
+	 * ⚠ CORRECTION (measured 2026-09-09, later): the first version of this comment
+	 * argued the pointer must be garbage because "no mmap returns page 2". That is
+	 * FALSE on this port -- a real STK process reports heapLo=0x2000, so the very
+	 * first heap does live at page 2. The window is still worth having as a cheap
+	 * plausibility filter for a WILD pointer, but it does not prove anything about
+	 * that earlier report, and the stray-free conclusion drawn from it does not
+	 * stand on this evidence. */
 	uintptr_t heapLo;
 	uintptr_t heapHi;
 
@@ -243,7 +248,7 @@ static int malloc_chunkValid(chunk_t *chunk, const heap_t *heap)
 	 * what rejects a header fabricated out of unrelated memory, which the
 	 * alignment and range tests below cannot: see the note on heapLo/heapHi. */
 	if (malloc_common.heapHi != 0u) {
-		if ((base < malloc_common.heapLo) || ((base + sizeof(heap_t)) > malloc_common.heapHi)) {
+		if ((base < malloc_common.heapLo) || (base >= malloc_common.heapHi)) {
 			return 0;
 		}
 	}
@@ -326,8 +331,13 @@ static int malloc_linkPlausible(const chunk_t *chunk, const chunk_t *link)
 	if (malloc_common.heapHi == 0u) {
 		return 1; /* no heap seen yet: nothing to compare against */
 	}
-	if (((uintptr_t)link < malloc_common.heapLo) ||
-			(((uintptr_t)link + sizeof(chunk_t)) > malloc_common.heapHi)) {
+	/* Range only -- do NOT require sizeof(chunk_t) to fit. A legitimate chunk near
+	 * the end of a heap fails that: sizeof(chunk_t) includes the rbnode, which only
+	 * LARGE chunks use, and the free-list fields live in the chunk's payload area.
+	 * Measured: STK produced next=prev=0x6ffd8 against heapHi=0x70000, a valid
+	 * chunk that the stricter test rejected -- and rejecting it ABANDONS THE BIN,
+	 * so the "hardening" was leaking live memory. */
+	if (((uintptr_t)link < malloc_common.heapLo) || ((uintptr_t)link >= malloc_common.heapHi)) {
 		return 0;
 	}
 	return 1;

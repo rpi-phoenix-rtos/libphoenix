@@ -146,6 +146,27 @@ int clock_settime(clockid_t clock_id, const struct timespec *tp)
 }
 
 
+int clock_getres(clockid_t clk_id, struct timespec *res)
+{
+	if (clk_id != CLOCK_REALTIME && clk_id != CLOCK_MONOTONIC && clk_id != CLOCK_MONOTONIC_RAW) {
+		return SET_ERRNO(-EINVAL);
+	}
+
+	/* Passing NULL is allowed by POSIX and only validates clk_id. */
+	if (res != NULL) {
+		/*
+		 * gettime() reports microseconds, so that is the resolution every
+		 * clock_gettime() result is truncated to, regardless of how fine the
+		 * underlying hardware counter is.
+		 */
+		res->tv_sec = 0;
+		res->tv_nsec = 1000;
+	}
+
+	return EOK;
+}
+
+
 char *asctime_r(const struct tm *tp, char *buf)
 {
 	int wday, mon;

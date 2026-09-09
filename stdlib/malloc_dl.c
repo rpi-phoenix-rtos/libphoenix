@@ -152,7 +152,11 @@ static long int malloc_chunkIsLast(chunk_t *chunk)
 
 static inline chunk_t *malloc_chunkPrev(chunk_t *chunk)
 {
-	unsigned prevSize = (chunk->size & CHUNK_PUSED) ? 0 : *((size_t *) chunk - 1);
+	/* size_t, not unsigned: the footer is a size_t, so a 32-bit type silently
+	 * truncates any value above 4 GiB -- and, worse, mis-truncates a CORRUPTED
+	 * footer into a plausible-looking small offset, which is exactly the case the
+	 * validation below exists to catch. */
+	size_t prevSize = ((chunk->size & CHUNK_PUSED) != 0) ? 0u : *((size_t *)chunk - 1);
 	if (prevSize == 0)
 		return NULL;
 
@@ -326,14 +330,44 @@ static void _malloc_chunkSplit(chunk_t *chunk, size_t size)
 }
 
 
+/* Report a neighbour whose header did not survive validation, and name the block.
+ *
+ * The join loops walk into the chunks on either side of the one being freed, and
+ * those headers are NOT covered by the caller's malloc_chunkValid() check --
+ * only the freed chunk itself is. A heap overflow out of the PRECEDING block
+ * smashes that block's footer, malloc_chunkPrev() derives a bogus sibling from
+ * it, the backward loop promotes it (it = sibling), and the forward loop's
+ * malloc_chunkIsLast() is then the first code to dereference its garbage ->heap.
+ * That was observed on hardware as a Data Abort at malloc_dl.c:346 with a
+ * page-aligned far address and no indication of which allocation was at fault.
+ *
+ * Validating the neighbour turns that into this message, which names the block. */
+static void malloc_reportBadNeighbour(const char *where, chunk_t *it, chunk_t *sibling)
+{
+	debug("malloc: corrupt ");
+	debug(where);
+	debug(" neighbour chunk header -- stopping coalesce\n");
+	malloc_debugHex("malloc:   chunk    = ", (uintptr_t)it);
+	malloc_debugHex("malloc:   sibling  = ", (uintptr_t)sibling);
+	malloc_debugHex("malloc:   heap     = ", (uintptr_t)it->heap);
+}
+
+
 static void _malloc_chunkJoin(chunk_t *chunk)
 {
 	chunk_t *it = chunk;
 	chunk_t *sibling;
+	/* The caller validated `chunk` against this heap, so it is the trusted
+	 * reference for validating the neighbours we are about to walk into. */
+	const heap_t *heap = chunk->heap;
 
 	/* Join with the previous chunks. */
 	while (!malloc_chunkIsFirst(it) && (it->size & CHUNK_PUSED) == 0) {
 		sibling = malloc_chunkPrev(it);
+		if ((sibling == NULL) || (malloc_chunkValid(sibling, heap) == 0)) {
+			malloc_reportBadNeighbour("prev", it, sibling);
+			break;
+		}
 		_malloc_chunkRemove(sibling);
 		_malloc_chunkRemove(it);
 
@@ -343,8 +377,15 @@ static void _malloc_chunkJoin(chunk_t *chunk)
 	}
 
 	/* Join with the following chunks. */
-	while (!malloc_chunkIsLast(it) && (malloc_chunkNext(it)->size & CHUNK_CUSED) == 0) {
+	while (malloc_chunkIsLast(it) == 0) {
 		sibling = malloc_chunkNext(it);
+		if ((sibling == NULL) || (malloc_chunkValid(sibling, heap) == 0)) {
+			malloc_reportBadNeighbour("next", it, sibling);
+			break;
+		}
+		if ((sibling->size & CHUNK_CUSED) != 0) {
+			break;
+		}
 		_malloc_chunkRemove(it);
 		_malloc_chunkRemove(sibling);
 
@@ -627,6 +668,19 @@ void *realloc(void *ptr, size_t size)
 
 	chunk = (chunk_t *) ((uintptr_t) ptr - CHUNK_OVERHEAD);
 	heap = chunk->heap;
+
+	/* free() validates its chunk header before touching the heap (see the banner
+	 * on malloc_chunkValid); realloc() did not, so a smashed header reached the
+	 * split and the join paths unchecked. Same guard, same outcome: report and
+	 * leak the block rather than derive a write address from a corrupt size. */
+	if (malloc_chunkValid(chunk, heap) == 0) {
+		debug("malloc: realloc() of a corrupt chunk header -- leaking the block\n");
+		malloc_debugHex("malloc:   ptr    = ", (uintptr_t)ptr);
+		malloc_debugHex("malloc:   heap   = ", (uintptr_t)heap);
+		mutexUnlock(malloc_common.mutex);
+		return NULL;
+	}
+
 	chunksz = malloc_chunkSize(chunk);
 
 

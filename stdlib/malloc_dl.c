@@ -69,6 +69,24 @@ struct {
 	size_t allocsz;
 	size_t freesz;
 
+	/* Address window of every heap this allocator has ever mmap'd. Only ever
+	 * widened, so a munmap'd heap leaves its range inside the window -- that is
+	 * fine, this is a plausibility filter, not exact membership, and it costs two
+	 * comparisons on a path that already holds the mutex.
+	 *
+	 * It exists because malloc_chunkValid() could not tell a real header from a
+	 * fabricated one. On 2026-09-09 a child in the AF_UNIX liveness test called
+	 * free() on a garbage pointer (0x25e0); the allocator read chunk->heap =
+	 * 0x2000 out of low memory, and that "heap" passed every existing check --
+	 * 0x2000 IS page-aligned, its "size" 0x1000 IS a page multiple, and 0x25e0 IS
+	 * inside 0x2000..0x3000. So the block looked valid, its in-use bit was clear,
+	 * and the allocator reported a DOUBLE FREE and exited EX_SOFTWARE. The
+	 * diagnosis cost a session: the report named a real-looking block that had
+	 * never been allocated. No mmap returns page 2, so a window check separates
+	 * the two cases cheaply. */
+	uintptr_t heapLo;
+	uintptr_t heapHi;
+
 	handle_t mutex;
 } malloc_common;
 
@@ -220,6 +238,14 @@ static int malloc_chunkValid(chunk_t *chunk, const heap_t *heap)
 
 	if ((heap == NULL) || ((base & (uintptr_t)(_PAGE_SIZE - 1)) != 0)) {
 		return 0; /* heaps come from mmap(), so they are page-aligned */
+	}
+	/* ...and they lie inside the window of heaps we have actually mmap'd. This is
+	 * what rejects a header fabricated out of unrelated memory, which the
+	 * alignment and range tests below cannot: see the note on heapLo/heapHi. */
+	if (malloc_common.heapHi != 0u) {
+		if ((base < malloc_common.heapLo) || ((base + sizeof(heap_t)) > malloc_common.heapHi)) {
+			return 0;
+		}
 	}
 	if ((heap->size < sizeof(heap_t)) || ((heap->size & (_PAGE_SIZE - 1)) != 0)) {
 		return 0;
@@ -419,6 +445,13 @@ static heap_t *_malloc_heapAlloc(size_t size)
 		return NULL;
 	}
 
+	if ((malloc_common.heapLo == 0u) || ((uintptr_t)heap < malloc_common.heapLo)) {
+		malloc_common.heapLo = (uintptr_t)heap;
+	}
+	if (((uintptr_t)heap + heapSize) > malloc_common.heapHi) {
+		malloc_common.heapHi = (uintptr_t)heap + heapSize;
+	}
+
 	chunk = (chunk_t*) heap->space;
 
 	malloc_heapInit(heap, heapSize);
@@ -612,6 +645,12 @@ void free(void *ptr)
 		malloc_debugHex("malloc:   ptr   = ", (uintptr_t)ptr);
 		malloc_debugHex("malloc:   size  = ", (uintptr_t)(chunk->size));
 		malloc_debugHex("malloc:   heap  = ", (uintptr_t)heap);
+		/* Print the window too, so the reader can tell the two cases apart without
+		 * reading this file: a `heap` outside [heapLo, heapHi) means the pointer was
+		 * never allocated here at all (a stray/garbage pointer), whereas one inside
+		 * it means a real block's header was smashed. */
+		malloc_debugHex("malloc:   heapLo= ", malloc_common.heapLo);
+		malloc_debugHex("malloc:   heapHi= ", malloc_common.heapHi);
 		mutexUnlock(malloc_common.mutex);
 		return;
 	}

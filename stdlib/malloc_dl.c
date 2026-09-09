@@ -617,7 +617,24 @@ void free(void *ptr)
 	}
 
 	if (!(chunk->size & CHUNK_CUSED)) {
-		debug("Double free detected\n");
+		/* Name the block. This message used to be the bare string below, which
+		 * is how it cost a session to interpret: the AF_UNIX liveness test's
+		 * forked child hit this roughly 1 in 50 iterations, and all the parent
+		 * could see was WEXITSTATUS == 70 (EX_SOFTWARE), with nothing to say
+		 * which allocation or heap was involved -- or even that the allocator
+		 * was the reporter.
+		 *
+		 * Note what reaching HERE already tells us, because the branch above
+		 * catches the other case: malloc_chunkValid() passed, so the header is
+		 * self-consistent with its heap and only the in-use bit is clear. That
+		 * separates a genuine double free from a smashed header, which is the
+		 * first question to ask. */
+		debug("malloc: double free() -- block already on the free list\n");
+		malloc_debugHex("malloc:   ptr   = ", (uintptr_t)ptr);
+		malloc_debugHex("malloc:   size  = ", (uintptr_t)(chunk->size));
+		malloc_debugHex("malloc:   heap  = ", (uintptr_t)heap);
+		malloc_debugHex("malloc:   hsize = ", (uintptr_t)heap->size);
+		malloc_debugHex("malloc:   hfree = ", (uintptr_t)heap->freesz);
 		_exit(EX_SOFTWARE);
 	}
 

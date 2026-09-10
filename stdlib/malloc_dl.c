@@ -862,8 +862,45 @@ void free(void *ptr)
 
 	if (heap->freesz == heap->size - sizeof(heap_t)) {
 		chunk = (chunk_t *) heap->space;
-		_malloc_chunkRemove(chunk);
-		munmap(heap, heap->size);
+
+		/* `freesz` says every byte is free; it does NOT say the heap is a single
+		 * chunk. Normally it is -- coalescing merges each newly freed block into
+		 * its free neighbours, so the last free() leaves one chunk spanning the
+		 * heap -- but two paths break that and both are reachable:
+		 *
+		 *   * _malloc_chunkJoin() BREAKS out of either loop on a neighbour that
+		 *     fails validation (see malloc_reportBadNeighbour), leaving the blocks
+		 *     on the far side of the bad header free but separate;
+		 *   * _malloc_chunkRemove() can take its abandon path while a join is
+		 *     mid-merge, so a chunk stays free without being unlinked.
+		 *
+		 * Unmapping then leaves every free chunk in this heap OTHER than the first
+		 * one still threaded into a free bin, pointing into memory we just handed
+		 * back. mmap() reuses the region for the next heap of the same size, and
+		 * the dangling entry now reads as a perfectly sane chunk header whose
+		 * fields are the NEW heap's: `size` = the heap size (a page multiple),
+		 * `heap` = its freesz, and the first chunk's size where `next` belongs.
+		 * That is precisely the report seen on hardware from SuperTuxKart --
+		 * 13 abandoned bins in one run, page-aligned addresses marching upward at
+		 * the heap-size stride -- and it is self-feeding: each abandon can leave
+		 * another chunk unremoved, producing the next dangling entry.
+		 *
+		 * So only release the heap when it really is one chunk covering it. The
+		 * alternative is to walk a chunk grid we already have reason to distrust;
+		 * leaking one heap is strictly better than a dangling free-bin entry,
+		 * which is unbounded corruption. `heap->size` is a page multiple and
+		 * sizeof(heap_t) is 8-aligned, so the FLOOR in _malloc_heapAlloc()'s
+		 * malloc_chunkInit() is the identity here and the sizes compare exactly. */
+		if (malloc_chunkSize(chunk) != (heap->size - sizeof(heap_t))) {
+			debug("malloc: heap fully free but not one chunk -- not releasing it\n");
+			malloc_debugHex("malloc:   heap  = ", (uintptr_t)heap);
+			malloc_debugHex("malloc:   hsize = ", (uintptr_t)heap->size);
+			malloc_debugHex("malloc:   csize = ", (uintptr_t)malloc_chunkSize(chunk));
+		}
+		else {
+			_malloc_chunkRemove(chunk);
+			munmap(heap, heap->size);
+		}
 	}
 
 	mutexUnlock(malloc_common.mutex);

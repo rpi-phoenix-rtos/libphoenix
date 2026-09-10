@@ -344,6 +344,49 @@ static int malloc_linkPlausible(const chunk_t *chunk, const chunk_t *link)
 }
 
 
+/* Does this address look like the base of a HEAP rather than a chunk?
+ *
+ * A rejected free-bin link that is really a heap base decodes, field for field,
+ * as a heap_t header followed by its first chunk -- and that decode is what
+ * identified the SuperTuxKart corruption on hardware, by hand, from a report that
+ * printed the raw words. Doing it here means the next occurrence says so itself
+ * instead of waiting for someone to re-derive it.
+ *
+ * The tells, none of which a real chunk can satisfy at once:
+ *   * page-aligned. A heap comes from mmap(); a heap's FIRST chunk sits at
+ *     heap + sizeof(heap_t) and so is never page-aligned.
+ *   * `size` reads as a whole number of pages -- that is heap->size.
+ *   * the chunk that WOULD start at heap + sizeof(heap_t) points its ->heap back
+ *     at this very address, and its size fits inside the heap.
+ *
+ * Deliberately no new bookkeeping: every read is inside the candidate region,
+ * which the caller already range-checked against the heap window, so this cannot
+ * fault where the existing report does not.
+ */
+static int malloc_looksLikeHeapBase(const chunk_t *chunk)
+{
+	const heap_t *heap = (const heap_t *)chunk;
+	const chunk_t *first;
+	size_t hsize;
+
+	if (((uintptr_t)chunk & (uintptr_t)(_PAGE_SIZE - 1)) != 0u) {
+		return 0;
+	}
+
+	hsize = heap->size;
+	if ((hsize < (sizeof(heap_t) + CHUNK_MIN_SIZE)) || ((hsize & (_PAGE_SIZE - 1)) != 0u)) {
+		return 0;
+	}
+
+	first = (const chunk_t *)((uintptr_t)chunk + sizeof(heap_t));
+	if (first->heap != heap) {
+		return 0;
+	}
+
+	return ((first->size & ~(size_t)(CHUNK_CUSED | CHUNK_PUSED)) <= (hsize - sizeof(heap_t))) ? 1 : 0;
+}
+
+
 static void _malloc_chunkRemove(chunk_t *chunk)
 {
 	unsigned int idx;
@@ -383,6 +426,10 @@ static void _malloc_chunkRemove(chunk_t *chunk)
 		}
 		malloc_debugHex("malloc:   heapLo= ", malloc_common.heapLo);
 		malloc_debugHex("malloc:   heapHi= ", malloc_common.heapHi);
+		/* 1 here means the bin held a pointer to a HEAP BASE, not to a chunk --
+		 * a different defect from a corrupted chunk header, and the one measured
+		 * on hardware. See malloc_looksLikeHeapBase(). */
+		malloc_debugHex("malloc:   hbase?= ", (uintptr_t)malloc_looksLikeHeapBase(chunk));
 		if (chunksz <= CHUNK_SMALLBIN_MAX_SIZE) {
 			idx = malloc_getsidx(chunksz);
 			malloc_common.sbins[idx] = NULL;

@@ -470,12 +470,58 @@ static void _malloc_chunkRemove(chunk_t *chunk)
 			malloc_common.lbinmap &= ~(1 << idx);
 	}
 	else if (chunk->node.parent != &chunk->node) {
-		next->node = chunk->node;
-		rb_transplant(&malloc_common.lbins[idx], &chunk->node, &next->node);
-		if (next->node.left != NULL)
-			next->node.left->parent = &next->node;
-		if (next->node.right != NULL)
-			next->node.right->parent = &next->node;
+		/* Hand the tree node over to the new list head -- but ONLY if the tree
+		 * actually links to this node.
+		 *
+		 * rb_transplant() writes through u->parent unconditionally
+		 * (`u->parent->left = v`), and the abandon path above sets
+		 * lbins[idx].root = NULL WITHOUT touching the orphaned chunks' node
+		 * fields or their same-size lists. So after any abandon, a chunk can
+		 * still carry a parent pointer into the dropped tree. Removing it later
+		 * takes this branch and stores 8 bytes through that stale parent -- into
+		 * memory the allocator may since have handed out. That is an 8-byte
+		 * pointer-shaped write into somebody's payload, and it is also how a
+		 * large-bin tree link comes to point INSIDE a live allocation: from there
+		 * a walk yields lib_treeof(node) = node - 32, so a link landing at
+		 * heap_base + 32 surfaces the heap base itself -- which is exactly what
+		 * the free-bin reports show (`hbase?=1` on 24 of 25 events, measured on
+		 * SuperTuxKart).
+		 *
+		 * The invariant that makes the write safe is local and cheap: a parent
+		 * may only be written through when it points back at us. rb_transplant()
+		 * dereferences that parent regardless, so testing it first is strictly
+		 * safer than the status quo, never less. */
+		rbnode_t *parent = chunk->node.parent;
+		int linked;
+
+		if (parent == NULL) {
+			linked = (malloc_common.lbins[idx].root == &chunk->node) ? 1 : 0;
+		}
+		else if (malloc_common.lbins[idx].root == NULL) {
+			/* Tree was abandoned; nothing can legitimately be transplanted. */
+			linked = 0;
+		}
+		else {
+			linked = ((parent->left == &chunk->node) || (parent->right == &chunk->node)) ? 1 : 0;
+		}
+
+		if (linked != 0) {
+			next->node = chunk->node;
+			rb_transplant(&malloc_common.lbins[idx], &chunk->node, &next->node);
+			if (next->node.left != NULL)
+				next->node.left->parent = &next->node;
+			if (next->node.right != NULL)
+				next->node.right->parent = &next->node;
+		}
+		else {
+			/* Orphaned by an earlier abandon. Drop it from the list's point of
+			 * view and leave the tree alone rather than writing through a pointer
+			 * the tree no longer owns. */
+			debug("malloc: stale large-bin node -- not transplanting\n");
+			malloc_debugHex("malloc:   chunk  = ", (uintptr_t)chunk);
+			malloc_debugHex("malloc:   parent = ", (uintptr_t)parent);
+			malloc_debugHex("malloc:   root   = ", (uintptr_t)malloc_common.lbins[idx].root);
+		}
 	}
 }
 

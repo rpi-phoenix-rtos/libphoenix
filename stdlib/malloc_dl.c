@@ -362,6 +362,25 @@ static void _malloc_chunkRemove(chunk_t *chunk)
 		malloc_debugHex("malloc:   chunk = ", (uintptr_t)chunk);
 		malloc_debugHex("malloc:   next  = ", (uintptr_t)chunk->next);
 		malloc_debugHex("malloc:   prev  = ", (uintptr_t)chunk->prev);
+		/* Discriminators, not decoration. `size` carries the CHUNK_CUSED bit: set
+		 * on a chunk sitting in a free bin means the block was handed out again
+		 * while still binned, which is a different defect from a write-after-free
+		 * and needs a different fix. `heap` should point at the mmap'd heap that
+		 * owns this chunk; a wild value there says the header itself is gone
+		 * rather than just the payload. And `pay2`/`pay3` are the payload words
+		 * PAST the two link fields: the links overlap the payload (CHUNK_OVERHEAD
+		 * is 16, so payload starts exactly at `next`), so whether the corruption
+		 * continues beyond the first 16 bytes separates a long run of data written
+		 * into a freed block from a single small field write. Measured on STK: the
+		 * clobbered word is one integer near 0x8000 with its top six bytes zero,
+		 * which reads as a field, not a stream -- pay2/pay3 confirm or refute that
+		 * without another guess. */
+		malloc_debugHex("malloc:   size  = ", (uintptr_t)chunk->size);
+		malloc_debugHex("malloc:   heap  = ", (uintptr_t)chunk->heap);
+		if (chunksz >= (CHUNK_OVERHEAD + (4u * sizeof(size_t)))) {
+			malloc_debugHex("malloc:   pay2  = ", (uintptr_t) * (size_t *)((uintptr_t)chunk + 32u));
+			malloc_debugHex("malloc:   pay3  = ", (uintptr_t) * (size_t *)((uintptr_t)chunk + 40u));
+		}
 		malloc_debugHex("malloc:   heapLo= ", malloc_common.heapLo);
 		malloc_debugHex("malloc:   heapHi= ", malloc_common.heapHi);
 		if (chunksz <= CHUNK_SMALLBIN_MAX_SIZE) {

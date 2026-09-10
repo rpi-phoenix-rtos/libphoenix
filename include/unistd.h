@@ -97,7 +97,69 @@ extern "C" {
 #define _PC_TIMESTAMP_RESOLUTION 21
 #define _PC_NAME_MAX             22
 
+/* POSIX option macros — "does this implementation support feature X".
+ *
+ * libphoenix declares _POSIX_VERSION 200809L but used to define NO option macro
+ * at all, only the limits above. That is not a cosmetic gap: the portable way to
+ * ask for a monotonic clock is
+ *
+ *     #if _POSIX_TIMERS > 0 && defined(_POSIX_MONOTONIC_CLOCK)
+ *
+ * and on Phoenix that was always false, so portable code silently took its
+ * fallback path. Two shipped ports were measured doing exactly that and timing
+ * themselves off the WALL clock, which steps when ntpclient sets the time:
+ * Quake II's frame timer and MicroPython's time.ticks_ms()/ticks_us() (both since
+ * fixed per-port). It also defeated libstdc++'s own configure probe, which is
+ * what left std::chrono::steady_clock at 1-second resolution.
+ *
+ * Values are 200809L to match _POSIX_VERSION. A supported option MUST be a
+ * positive value, never 0 or -1: a great deal of real code tests these with a
+ * bare #ifdef, so -1 ("not supported", the convention used for the unsupported
+ * options above) reads as SUPPORTED to it.
+ *
+ * Blast radius before adding these was measured across all 58 extracted port
+ * source trees rather than guessed — see
+ * docs/misc/2026-09-10-posix-option-macros-blast-radius.md in the coordination
+ * repo. Only claim one here when libphoenix really implements the group; the
+ * groups deliberately NOT claimed (no sem_*, no pthread_barrier_*, no
+ * posix_spawn, no shm_open, no sigqueue, no mq_*, no clock_getcpuclockid) are
+ * left undefined so portable code keeps taking its fallback.
+ */
 #define _POSIX_SPIN_LOCKS 202405L
+
+/* clock_gettime/clock_settime/clock_getres over a genuinely monotonic
+ * CLOCK_MONOTONIC, plus nanosleep. */
+#define _POSIX_MONOTONIC_CLOCK             200809L
+/* clock_nanosleep. */
+#define _POSIX_CLOCK_SELECTION             200809L
+/* pthread_create/join/mutex/cond/key: the core threading group. */
+#define _POSIX_THREADS                     200809L
+/* pthread_attr_setstacksize / _setstack. */
+#define _POSIX_THREAD_ATTR_STACKSIZE       200809L
+#define _POSIX_THREAD_ATTR_STACKADDR       200809L
+/* pthread_setschedparam, pthread_attr_setschedpolicy/param. */
+#define _POSIX_THREAD_PRIORITY_SCHEDULING  200809L
+/* sched_setscheduler/getscheduler/setparam/get_priority_max. */
+#define _POSIX_PRIORITY_SCHEDULING         200809L
+/* pthread_rwlock_* complete. */
+#define _POSIX_READER_WRITER_LOCKS         200809L
+/* mprotect. */
+#define _POSIX_MEMORY_PROTECTION           200809L
+/* fsync. */
+#define _POSIX_FSYNC                       200809L
+
+/* ⚠ _POSIX_TIMERS is claimed with a known shortfall, deliberately. The clock
+ * side is complete — clock_gettime, clock_settime and clock_getres all exist —
+ * but the timer_create/timer_settime/timer_gettime/timer_delete/timer_getoverrun
+ * family does NOT. It is claimed anyway because the alternative is worse: this
+ * is the macro that gates every portable "can I have a monotonic clock" test
+ * (openssl's rand_unix.c and MicroPython both spell it exactly as above), so
+ * leaving it undefined keeps that code silently on the wall clock. A caller that
+ * reaches for timer_create() instead gets an undefined-symbol error at link
+ * time, which is loud, immediate and easy to diagnose — the opposite of the
+ * silent mistiming this fixes. Implementing the timer_* family is the way to
+ * make this claim unconditional. */
+#define _POSIX_TIMERS                      200809L
 
 extern long sysconf(int name);
 

@@ -321,7 +321,16 @@ static int malloc_chunkInWindow(const chunk_t *chunk)
 	if (malloc_common.heapHi == 0u) {
 		return 0;
 	}
-	if ((p < malloc_common.heapLo) || ((p + sizeof(chunk_t)) > malloc_common.heapHi)) {
+	/* RANGE ONLY. Requiring sizeof(chunk_t) to fit rejects legitimate chunks near
+	 * a heap's end, because sizeof(chunk_t) includes the rbnode that only LARGE
+	 * chunks ever use while the free-list fields live in the payload. That is the
+	 * same trap malloc_linkPlausible() documents above, and adding
+	 * `+ sizeof(chunk_t)` here reintroduced it: measured on hardware, the
+	 * small-bin head check then fired ~390 times per SuperTuxKart run in EVERY
+	 * run, including runs that had been clean, dropping healthy bins and leaking
+	 * their chunks. A hardening check that rejects valid input is worse than no
+	 * check -- it converts a rare fault into constant quiet damage. */
+	if ((p < malloc_common.heapLo) || (p >= malloc_common.heapHi)) {
 		return 0;
 	}
 	return 1;

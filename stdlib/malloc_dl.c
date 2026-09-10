@@ -865,7 +865,32 @@ static void *_malloc_allocSmall(size_t size)
 		return _malloc_allocLarge(size);
 
 	idxSize = idx << 3;
-	if ((chunk = malloc_common.sbins[idx]) == NULL) {
+	chunk = malloc_common.sbins[idx];
+
+	/* Validate the small-bin head for the same reason _malloc_allocLarge()
+	 * validates the tree's answer, and it is NOT redundant with it: measured on
+	 * hardware, a run produced 34 free-bin reports whose `chunk` was a heap base
+	 * while the large-bin lookup check fired ZERO times, so the bad pointer
+	 * reaches _malloc_chunkRemove() through this path, not the rbtree.
+	 *
+	 * What misled me into checking only the large path first: the reported chunk
+	 * size was 0xd000, which classifies as large -- but that size is read FROM the
+	 * bad pointer, so it says nothing about which bin handed it out. A heap base
+	 * taken from sbins[] reads its own heap->size as a chunk size and is then
+	 * reported down the large-bin branch. Size is an output here, never evidence
+	 * of provenance. */
+	if ((chunk != NULL) && ((malloc_chunkInWindow(chunk) == 0) ||
+			(malloc_chunkValid(chunk, chunk->heap) == 0))) {
+		debug("malloc: small-bin head is not a chunk -- dropping the bin\n");
+		malloc_debugHex("malloc:   chunk = ", (uintptr_t)chunk);
+		malloc_debugHex("malloc:   idx   = ", (uintptr_t)idx);
+		malloc_debugHex("malloc:   hbase?= ", (uintptr_t)malloc_looksLikeHeapBase(chunk));
+		malloc_common.sbins[idx] = NULL;
+		malloc_common.sbinmap &= ~(1 << idx);
+		chunk = NULL;
+	}
+
+	if (chunk == NULL) {
 		if ((heap = _malloc_heapAlloc(idxSize)) == NULL)
 			return NULL;
 

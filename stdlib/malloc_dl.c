@@ -544,13 +544,23 @@ static inline void *_malloc_allocFrom(chunk_t *chunk, size_t size)
 {
 	chunk_t *chunkNext;
 
-	if (malloc_chunkCanSplit(chunk, size))
-		_malloc_chunkSplit(chunk, size);
-	else
-		_malloc_chunkRemove(chunk);
-
-	chunk->heap->freesz -= malloc_chunkSize(chunk);
-
+	/* ⚠ THIS CHECK MUST STAY AHEAD OF THE SPLIT. It tests CHUNK_CUSED, and
+	 * _malloc_chunkSplit() ERASES that bit -- `chunk->size = size | CHUNK_PUSED`
+	 * is a plain assignment, not an |=. Sitting after the split (where this used
+	 * to live) the condition is provably false on every split hand-out, and a
+	 * split is the COMMON case: malloc_chunkCanSplit() needs only
+	 * chunkSize >= size + CHUNK_MIN_SIZE, which a large-bin chunk almost always
+	 * satisfies. So the detector could not fire in exactly the case it was added
+	 * for, while its comment claimed it covered "EVERY allocation path".
+	 *
+	 * That matters beyond the code: "duplicate hand-out refuted over ~300
+	 * instrumented AF_UNIX liveness children" was banked as an eliminated
+	 * mechanism in docs/KNOWN-ISSUES.md on the strength of this check. It was
+	 * refuted by an instrument that could not report. The mechanism is open again.
+	 *
+	 * Reading the bin chunk's own header before the split is also the more
+	 * informative moment: `size` is the whole free-bin chunk, and `hfree` is the
+	 * pre-decrement figure, i.e. the bin state that produced the duplicate. */
 	if ((chunk->size & CHUNK_CUSED) != 0) {
 		/* This chunk is being handed out while already marked in use, i.e. it is
 		 * live with another caller and two pointers to it now exist. The second
@@ -558,10 +568,7 @@ static inline void *_malloc_allocFrom(chunk_t *chunk, size_t size)
 		 * and no way to tell that the real fault was here, one or more allocations
 		 * earlier -- which is exactly how the AF_UNIX liveness child's exit 70 has
 		 * resisted diagnosis. Report at the moment of the duplicate hand-out
-		 * instead, where the bin state is still the state that caused it.
-		 *
-		 * This is a single check covering EVERY allocation path, since they all
-		 * funnel through here. */
+		 * instead, where the bin state is still the state that caused it. */
 		debug("malloc: chunk handed out twice -- already CHUNK_CUSED\n");
 		malloc_debugHex("malloc:   chunk = ", (uintptr_t)chunk);
 		malloc_debugHex("malloc:   size  = ", (uintptr_t)(chunk->size));
@@ -573,6 +580,13 @@ static inline void *_malloc_allocFrom(chunk_t *chunk, size_t size)
 		malloc_debugHex("malloc:   heapHi= ", malloc_common.heapHi);
 		_exit(EX_SOFTWARE);
 	}
+
+	if (malloc_chunkCanSplit(chunk, size))
+		_malloc_chunkSplit(chunk, size);
+	else
+		_malloc_chunkRemove(chunk);
+
+	chunk->heap->freesz -= malloc_chunkSize(chunk);
 
 	chunk->size |= CHUNK_CUSED;
 
@@ -793,6 +807,27 @@ void free(void *ptr)
 		malloc_debugHex("malloc:   heap  = ", (uintptr_t)heap);
 		malloc_debugHex("malloc:   hsize = ", (uintptr_t)heap->size);
 		malloc_debugHex("malloc:   hfree = ", (uintptr_t)heap->freesz);
+		/* The two footers, which is what separates "the allocator wrote this
+		 * header" from "something else did".
+		 *
+		 * malloc_chunkSetFooter() is the ONLY writer of the trailing size word,
+		 * and free() runs it on every free, so on a header the allocator itself
+		 * last touched `foot` equals the size with the flag bits masked off. If
+		 * `foot` disagrees, the size word was written after the last setFooter --
+		 * i.e. by a heap overrun landing on this header, or by a neighbour's
+		 * over-reported size planting its footer here. Both reads are in bounds:
+		 * malloc_chunkValid() above already established chunk + size <= heap end,
+		 * and `prevfoot` sits inside the heap header for the first chunk.
+		 *
+		 * `prevfoot` is the input the backward join at _malloc_chunkJoin() would
+		 * have used, so it also says whether the chunk grid below this block is
+		 * intact -- which is how a stale pointer into a REUSED heap (where every
+		 * printed field above is legitimately sane) gives itself away.
+		 *
+		 * Zero cost on the normal path: this branch already ends in _exit(). */
+		malloc_debugHex("malloc:   foot  = ",
+			(uintptr_t) * ((size_t *)((uintptr_t)chunk + malloc_chunkSize(chunk)) - 1));
+		malloc_debugHex("malloc:   pfoot = ", (uintptr_t) * ((size_t *)chunk - 1));
 		_exit(EX_SOFTWARE);
 	}
 

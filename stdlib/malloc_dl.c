@@ -69,6 +69,22 @@ struct {
 	size_t allocsz;
 	size_t freesz;
 
+	/* The last few heaps handed back to the kernel, newest at `relIdx - 1`.
+	 *
+	 * Diagnostic, not bookkeeping: a free-bin entry must never point into a heap
+	 * we have released, so if a rejected link falls inside one of these the entry
+	 * is a STALE POINTER INTO RECYCLED MEMORY -- proven, not inferred. That is
+	 * the reading the field data points at: one report's chunk decoded as a fresh
+	 * heap header (hbase?=1) while another at the same stride decoded as live
+	 * 16-bit GPU index data (0,1,2,3,...), which is what recycled memory looks
+	 * like when you read it as a chunk. mmap reuses addresses, so "looks sane"
+	 * and "looks like garbage" are the same defect seen at different moments. */
+	struct {
+		uintptr_t base;
+		size_t size;
+	} released[8];
+	unsigned int relIdx;
+
 	/* Address window of every heap this allocator has ever mmap'd. Only ever
 	 * widened, so a munmap'd heap leaves its range inside the window -- that is
 	 * fine, this is a plausibility filter, not exact membership, and it costs two
@@ -337,6 +353,27 @@ static int malloc_chunkInWindow(const chunk_t *chunk)
 }
 
 
+/* Did this address belong to one of the last heaps we released? A pure value
+ * test over a tiny ring, so it is safe on a pointer we will not dereference.
+ * A hit PROVES the free-bin entry is a stale pointer into recycled memory. */
+static int malloc_wasReleased(const chunk_t *chunk)
+{
+	uintptr_t p = (uintptr_t)chunk;
+	unsigned int i;
+
+	for (i = 0; i < 8u; i++) {
+		if (malloc_common.released[i].size == 0u) {
+			continue;
+		}
+		if ((p >= malloc_common.released[i].base) &&
+				(p < (malloc_common.released[i].base + malloc_common.released[i].size))) {
+			return 1;
+		}
+	}
+	return 0;
+}
+
+
 /* Is this free-bin link plausible WITHOUT dereferencing it?
  *
  * Deliberately a pure value test. The link may be wild, so reading link->heap to
@@ -461,6 +498,8 @@ static void _malloc_chunkRemove(chunk_t *chunk)
 		 * a different defect from a corrupted chunk header, and the one measured
 		 * on hardware. See malloc_looksLikeHeapBase(). */
 		malloc_debugHex("malloc:   hbase?= ", (uintptr_t)malloc_looksLikeHeapBase(chunk));
+		/* 1 here PROVES a stale pointer into a heap we already released. */
+		malloc_debugHex("malloc:   freed?= ", (uintptr_t)malloc_wasReleased(chunk));
 		if (chunksz <= CHUNK_SMALLBIN_MAX_SIZE) {
 			idx = malloc_getsidx(chunksz);
 			malloc_common.sbins[idx] = NULL;
@@ -1130,6 +1169,9 @@ void free(void *ptr)
 		}
 		else {
 			_malloc_chunkRemove(chunk);
+			malloc_common.released[malloc_common.relIdx & 7u].base = (uintptr_t)heap;
+			malloc_common.released[malloc_common.relIdx & 7u].size = heap->size;
+			++malloc_common.relIdx;
 			munmap(heap, heap->size);
 		}
 	}

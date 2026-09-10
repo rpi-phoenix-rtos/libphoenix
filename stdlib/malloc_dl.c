@@ -728,6 +728,22 @@ void free(void *ptr)
 {
 	chunk_t *chunk, *chunkNext;
 	heap_t *heap;
+	/* Who called free(). This is THE datum both reports below were missing: they
+	 * describe the block perfectly and say nothing about which code freed it, so
+	 * a "double free" has to be chased by reading every free() site that could
+	 * touch a block of that size. Reading it here (rather than in a helper) is
+	 * what makes it free()'s caller instead of free() itself.
+	 *
+	 * Costs nothing on the normal path -- it is one register read, and only the
+	 * report branches use it. Portable across our arches; level 0 needs no frame
+	 * pointer.
+	 *
+	 * To resolve it: the installed binaries are stripped, so run addr2line
+	 * against the unstripped copy --
+	 *   aarch64-phoenix-addr2line -fe .buildroot/_build/<target>/prog/<prog> <addr>
+	 * ⚠ if free() got inlined into a caller inside libphoenix itself (realloc,
+	 * say) this names that caller's caller; treat it as a strong hint, not gospel. */
+	const void *caller = __builtin_return_address(0);
 
 	if (ptr == NULL)
 		return;
@@ -743,6 +759,7 @@ void free(void *ptr)
 	 * unrelated allocation that would fault later. */
 	if (malloc_chunkValid(chunk, heap) == 0) {
 		debug("malloc: free() of a corrupt chunk header -- leaking the block\n");
+		malloc_debugHex("malloc:   caller= ", (uintptr_t)caller);
 		malloc_debugHex("malloc:   ptr   = ", (uintptr_t)ptr);
 		malloc_debugHex("malloc:   size  = ", (uintptr_t)(chunk->size));
 		malloc_debugHex("malloc:   heap  = ", (uintptr_t)heap);
@@ -770,6 +787,7 @@ void free(void *ptr)
 		 * separates a genuine double free from a smashed header, which is the
 		 * first question to ask. */
 		debug("malloc: double free() -- block already on the free list\n");
+		malloc_debugHex("malloc:   caller= ", (uintptr_t)caller);
 		malloc_debugHex("malloc:   ptr   = ", (uintptr_t)ptr);
 		malloc_debugHex("malloc:   size  = ", (uintptr_t)(chunk->size));
 		malloc_debugHex("malloc:   heap  = ", (uintptr_t)heap);

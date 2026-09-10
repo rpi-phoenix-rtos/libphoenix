@@ -306,6 +306,28 @@ static void _malloc_chunkAdd(chunk_t *chunk)
 }
 
 
+/* Is this pointer inside a heap this allocator has actually mmap'd, and aligned
+ * like a chunk? A pure value test, so it is safe to run on a pointer we are not
+ * yet willing to dereference -- which is the whole point: malloc_chunkValid()
+ * reads chunk->heap, and a pointer synthesised by a stray tree walk may not be
+ * readable at all. */
+static int malloc_chunkInWindow(const chunk_t *chunk)
+{
+	uintptr_t p = (uintptr_t)chunk;
+
+	if ((p & 7u) != 0u) {
+		return 0;
+	}
+	if (malloc_common.heapHi == 0u) {
+		return 0;
+	}
+	if ((p < malloc_common.heapLo) || ((p + sizeof(chunk_t)) > malloc_common.heapHi)) {
+		return 0;
+	}
+	return 1;
+}
+
+
 /* Is this free-bin link plausible WITHOUT dereferencing it?
  *
  * Deliberately a pure value test. The link may be wild, so reading link->heap to
@@ -732,6 +754,40 @@ static void *_malloc_allocLarge(size_t size)
 			break;
 
 		binmap = binmap & ~(1 << idx++);
+	}
+
+	/* The tree's answer is a POINTER DERIVED BY SUBTRACTION -- lib_treeof() takes
+	 * 32 off the node address -- so a tree link that no longer points at a node
+	 * yields a plausible-looking chunk pointer out of whatever bytes it landed on.
+	 * The free-bin links a few lines below get malloc_linkPlausible(); this result
+	 * was handed to _malloc_allocFrom() unchecked, which is asymmetric for no
+	 * reason.
+	 *
+	 * Measured on hardware (SuperTuxKart, libphoenix 3e78cbf): a run produced 10
+	 * reports whose `chunk` was a HEAP BASE (`hbase?=1`), and walking the callers
+	 * of _malloc_chunkRemove() leaves this lookup as the only one that can produce
+	 * one -- heap_base + 32 is the first chunk's payload, so a link landing there
+	 * comes back as heap_base. Validating here turns that into a contained, named
+	 * event and falls back to a fresh heap, WITHOUT needing to know yet how a node
+	 * survives its chunk's allocation. */
+	if ((chunk != NULL) && (malloc_chunkInWindow(chunk) == 0)) {
+		/* Not even inside a heap we mmap'd: do not dereference it at all. */
+		debug("malloc: large-bin lookup returned a wild pointer -- dropping the bin\n");
+		malloc_debugHex("malloc:   chunk = ", (uintptr_t)chunk);
+		malloc_debugHex("malloc:   heapLo= ", malloc_common.heapLo);
+		malloc_debugHex("malloc:   heapHi= ", malloc_common.heapHi);
+		malloc_common.lbins[idx].root = NULL;
+		malloc_common.lbinmap &= ~(1 << idx);
+		chunk = NULL;
+	}
+	else if ((chunk != NULL) && (malloc_chunkValid(chunk, chunk->heap) == 0)) {
+		debug("malloc: large-bin lookup returned a non-chunk -- dropping the bin\n");
+		malloc_debugHex("malloc:   chunk = ", (uintptr_t)chunk);
+		malloc_debugHex("malloc:   want  = ", (uintptr_t)size);
+		malloc_debugHex("malloc:   hbase?= ", (uintptr_t)malloc_looksLikeHeapBase(chunk));
+		malloc_common.lbins[idx].root = NULL;
+		malloc_common.lbinmap &= ~(1 << idx);
+		chunk = NULL;
 	}
 
 	if (chunk == NULL) {

@@ -25,6 +25,13 @@ endif
 
 CFLAGS += -Iinclude -fno-builtin-malloc
 
+# Diagnostic build knob: LIBC_STARTUP_TRACE=y prints one line per pre-main
+# initialiser via the raw debug() syscall, to localise a hang before main().
+# Off by default; see misc/init.c for what it is for.
+ifeq ($(LIBC_STARTUP_TRACE), y)
+CFLAGS += -DLIBC_STARTUP_TRACE
+endif
+
 # FIXME: Find a proper way to provide different versions of libphoenix to projects
 ifdef LIBPHOENIX_IO_NO_FLOAT
 CFLAGS += -DIO_NO_FLOAT

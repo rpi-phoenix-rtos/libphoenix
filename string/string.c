@@ -80,7 +80,10 @@ int strncasecmp(const char *s1, const char *s2, size_t n)
 	const char *p;
 	unsigned int k;
 
-	for (p = s1, k = 0; *p && k < n; p++, k++) {
+	/* `k < n` MUST come first: C evaluates left to right, so testing *p first
+	 * dereferences the byte at index n -- one past what strncasecmp is allowed to
+	 * read. See strncmp() below for the fault this produced on hardware. */
+	for (p = s1, k = 0; (k < n) && (*p != '\0'); p++, k++) {
 
 		if (tolower(*p) < tolower(*(s2 + k)))
 			return -1;
@@ -106,7 +109,18 @@ int strncmp(const char *s1, const char *s2, size_t n)
 	const unsigned char *p;
 	size_t k = 0;
 
-	for (p = us1, k = 0; *p && k < n; p++, k++) {
+	/* `k < n` MUST come first. With *p tested first, C's left-to-right evaluation
+	 * reads us1[n] before the bound is checked, so strncmp() touches one byte more
+	 * than the standard allows ("compares not more than n characters"). Harmless
+	 * until that byte is the first of an unmapped page, and then it is a fault in
+	 * the caller's name: measured on a Raspberry Pi 4 as
+	 *   Exception #36: Data Abort (EL0) ... far=0x0cf0e000
+	 * inside strncmp with n=1 and s1=0x0cf0dfff -- the last byte of a mapped page,
+	 * reached from AngelScript's asCTokenizer::IsKeyWord() while SuperTuxKart
+	 * loaded its scripts. The loop compared s1[0], matched, advanced p to the page
+	 * boundary and re-tested *p. Rare by construction (it needs a string ending
+	 * exactly at a page end), which is why it read as an intermittent crash. */
+	for (p = us1, k = 0; (k < n) && (*p != '\0'); p++, k++) {
 		if (*p < *(us2 + k))
 			return -1;
 		else if (*p > *(us2 + k))

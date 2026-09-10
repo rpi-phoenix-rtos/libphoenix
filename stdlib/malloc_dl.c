@@ -731,6 +731,49 @@ static inline void *_malloc_allocFrom(chunk_t *chunk, size_t size)
 }
 
 
+/* Walk a large bin's rbtree and report any node that is not a free chunk.
+ *
+ * Reading the code has not produced the answer to "how does a tree node survive
+ * its chunk being allocated?" -- three proposed mechanisms were each refuted by
+ * their own instrument -- so observe it instead. This runs only when a lookup has
+ * already come back bad and the bin is about to be dropped, so it costs nothing
+ * on the normal path and cannot make a healthy tree worse.
+ *
+ * Every pointer is value-tested with malloc_chunkInWindow() BEFORE it is
+ * dereferenced, and the visit count is bounded: the tree we are auditing is by
+ * assumption damaged, so it may contain cycles as easily as wild pointers.
+ *
+ * CHUNK_CUSED set on a node's chunk is the finding to look for -- it means a
+ * live, handed-out block is still linked into the free tree, which is the
+ * structural defect rather than a symptom of it.
+ */
+#define MALLOC_AUDIT_MAX 24u
+
+static void malloc_auditLargeBin(rbnode_t *node, unsigned int depth, unsigned int *visited)
+{
+	chunk_t *chunk;
+
+	if ((node == NULL) || (*visited >= MALLOC_AUDIT_MAX) || (depth > 16u)) {
+		return;
+	}
+	++(*visited);
+
+	chunk = lib_treeof(chunk_t, node, node);
+	if (malloc_chunkInWindow(chunk) == 0) {
+		malloc_debugHex("malloc:   [audit] wild node   = ", (uintptr_t)node);
+		return;
+	}
+	if ((chunk->size & CHUNK_CUSED) != 0u) {
+		malloc_debugHex("malloc:   [audit] USED chunk in free tree = ", (uintptr_t)chunk);
+		malloc_debugHex("malloc:   [audit]   size  = ", (uintptr_t)chunk->size);
+		malloc_debugHex("malloc:   [audit]   hbase?= ", (uintptr_t)malloc_looksLikeHeapBase(chunk));
+	}
+
+	malloc_auditLargeBin(node->left, depth + 1u, visited);
+	malloc_auditLargeBin(node->right, depth + 1u, visited);
+}
+
+
 static void *_malloc_allocLarge(size_t size)
 {
 	/* Lookup table to speed-up operation reverse to malloc_getlidx(). */
@@ -785,6 +828,11 @@ static void *_malloc_allocLarge(size_t size)
 		malloc_debugHex("malloc:   chunk = ", (uintptr_t)chunk);
 		malloc_debugHex("malloc:   want  = ", (uintptr_t)size);
 		malloc_debugHex("malloc:   hbase?= ", (uintptr_t)malloc_looksLikeHeapBase(chunk));
+		{
+			unsigned int visited = 0u;
+			malloc_auditLargeBin(malloc_common.lbins[idx].root, 0u, &visited);
+			malloc_debugHex("malloc:   [audit] nodes = ", (uintptr_t)visited);
+		}
 		malloc_common.lbins[idx].root = NULL;
 		malloc_common.lbinmap &= ~(1 << idx);
 		chunk = NULL;

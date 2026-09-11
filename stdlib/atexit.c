@@ -38,13 +38,25 @@ struct atexit_node {
 };
 
 
-/* The first node is statically allocated to provide at least 32 function slots */
+/* The first node is statically allocated to provide at least 32 function slots.
+ *
+ * It is a NAMED object rather than the address of a file-scope compound literal
+ * (`&((struct atexit_node){})`, which this used to be). That construct is legal
+ * C -- the literal has static storage duration -- but it leaves the only pointer
+ * to the node in an initialised .data word, and on this target that word has
+ * been observed reading back as NULL: _atexit_init() then did
+ * memset(NULL, 0, sizeof(struct atexit_node)) and the process died on the first
+ * `dc zva`, before main(). Caught on hardware as 2070 identical
+ * Data Abort (EL0) with far=0x0 in a psh applet (see _atexit_init below).
+ * A named object is the same storage with a name the recovery path can use. */
+static struct atexit_node atexit_firstNode;
+
 static struct {
 	handle_t lock;
 	struct atexit_node *head;
 	struct atexit_node *newestNode;
 	unsigned int idx;
-} atexit_common = { .head = &((struct atexit_node) {}) };
+} atexit_common = { .head = &atexit_firstNode };
 
 
 /* Diagnostic: is the atexit bookkeeping still self-consistent?
@@ -81,6 +93,16 @@ int _atexit_check(void)
 void _atexit_init(void)
 {
 	mutexCreate(&atexit_common.lock);
+
+	/* head is initialised statically, so a NULL here means the initialised word
+	 * did not survive into this process image -- observed on hardware. Dereferen-
+	 * cing it kills the process before main() with no diagnostic at all, which is
+	 * a far worse failure than re-pointing it at the node that certainly exists.
+	 * Recover rather than fault: the storage is a named static object. */
+	if (atexit_common.head == NULL) {
+		atexit_common.head = &atexit_firstNode;
+	}
+
 	memset(atexit_common.head, 0, sizeof(struct atexit_node));
 	atexit_common.idx = 0;
 	atexit_common.newestNode = atexit_common.head;

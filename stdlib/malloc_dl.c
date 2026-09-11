@@ -85,6 +85,18 @@ struct {
 	} released[8];
 	unsigned int relIdx;
 
+	/* Base addresses of heaps currently mmap'd, newest wrapping at 16.
+	 *
+	 * Settles the one reading `hbase?=` cannot: that test is a value test, so a
+	 * LIVE allocated block whose payload happens to begin with a size-like word
+	 * and a self-pointer -- a perfectly ordinary embedded list head -- would also
+	 * satisfy it. If the rejected address instead matches a base we actually
+	 * mmap'd, it IS a heap base and no coincidence is involved. Paired with
+	 * `freed?=` (which reads 0 on every event so far, i.e. the heap was never
+	 * released) this says whether a LIVE heap's base is sitting in a free bin. */
+	uintptr_t live[16];
+	unsigned int liveIdx;
+
 	/* Address window of every heap this allocator has ever mmap'd. Only ever
 	 * widened, so a munmap'd heap leaves its range inside the window -- that is
 	 * fine, this is a plausibility filter, not exact membership, and it costs two
@@ -353,6 +365,24 @@ static int malloc_chunkInWindow(const chunk_t *chunk)
 }
 
 
+/* Is this address the base of a heap we actually mmap'd (and have not released)?
+ * Pure value test over a small ring, safe on a pointer we will not dereference.
+ * A hit removes the last alternative to the heap-base reading: that `hbase?=`
+ * matched a live block whose payload merely looks like a heap header. */
+static int malloc_isLiveHeapBase(const chunk_t *chunk)
+{
+	uintptr_t p = (uintptr_t)chunk;
+	unsigned int i;
+
+	for (i = 0; i < 16u; i++) {
+		if ((malloc_common.live[i] != 0u) && (malloc_common.live[i] == p)) {
+			return 1;
+		}
+	}
+	return 0;
+}
+
+
 /* Did this address belong to one of the last heaps we released? A pure value
  * test over a tiny ring, so it is safe on a pointer we will not dereference.
  * A hit PROVES the free-bin entry is a stale pointer into recycled memory. */
@@ -500,6 +530,8 @@ static void _malloc_chunkRemove(chunk_t *chunk)
 		malloc_debugHex("malloc:   hbase?= ", (uintptr_t)malloc_looksLikeHeapBase(chunk));
 		/* 1 here PROVES a stale pointer into a heap we already released. */
 		malloc_debugHex("malloc:   freed?= ", (uintptr_t)malloc_wasReleased(chunk));
+		/* 1 here is PROOF the bin held a heap base, not a look-alike payload. */
+		malloc_debugHex("malloc:   lheap?= ", (uintptr_t)malloc_isLiveHeapBase(chunk));
 		if (chunksz <= CHUNK_SMALLBIN_MAX_SIZE) {
 			idx = malloc_getsidx(chunksz);
 			malloc_common.sbins[idx] = NULL;
@@ -704,6 +736,9 @@ static heap_t *_malloc_heapAlloc(size_t size)
 	if (heap == MAP_FAILED) {
 		return NULL;
 	}
+
+	malloc_common.live[malloc_common.liveIdx & 15u] = (uintptr_t)heap;
+	++malloc_common.liveIdx;
 
 	if ((malloc_common.heapLo == 0u) || ((uintptr_t)heap < malloc_common.heapLo)) {
 		malloc_common.heapLo = (uintptr_t)heap;
@@ -1172,6 +1207,16 @@ void free(void *ptr)
 			malloc_common.released[malloc_common.relIdx & 7u].base = (uintptr_t)heap;
 			malloc_common.released[malloc_common.relIdx & 7u].size = heap->size;
 			++malloc_common.relIdx;
+			/* Drop it from the live ring, or `lheap?=` would keep claiming a
+			 * released heap is still live and invert the reading. */
+			{
+				unsigned int i;
+				for (i = 0; i < 16u; i++) {
+					if (malloc_common.live[i] == (uintptr_t)heap) {
+						malloc_common.live[i] = 0u;
+					}
+				}
+			}
 			munmap(heap, heap->size);
 		}
 	}

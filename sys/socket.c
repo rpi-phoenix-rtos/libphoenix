@@ -527,7 +527,19 @@ int getaddrinfo(const char *node, const char *service,
 		return smo->ret;
 	}
 
-	*res = msg.o.data = realloc(msg.o.data, bufsz);
+	/* realloc() must not be assigned over its own argument: on failure it returns
+	 * NULL while the original block stays allocated, so this both LEAKED that
+	 * block and handed the caller `*res = NULL` with a success return -- and every
+	 * caller then dereferences it (ntpclient does `res->ai_family` immediately).
+	 * Shrinking to bufsz is also optional, so a failure here need not fail the
+	 * call: keep the larger buffer instead. */
+	{
+		struct addrinfo *shrunk = realloc(msg.o.data, bufsz);
+		if (shrunk != NULL) {
+			msg.o.data = shrunk;
+		}
+	}
+	*res = msg.o.data;
 
 	for (ai = msg.o.data; ai; ai = ai->ai_next) {
 		if (bufsz < (void *)ai - msg.o.data + sizeof(*ai))

@@ -94,8 +94,15 @@ struct {
 	 * mmap'd, it IS a heap base and no coincidence is involved. Paired with
 	 * `freed?=` (which reads 0 on every event so far, i.e. the heap was never
 	 * released) this says whether a LIVE heap's base is sitting in a free bin. */
-	uintptr_t live[16];
+	/* 256 slots, not 16: SuperTuxKart gives almost every large allocation its own
+	 * mmap'd heap, so a 16-entry ring evicts a base long before a bin entry
+	 * pointing at it is rejected -- which makes `lheap?=0` mean "evicted" rather
+	 * than "never a heap" and renders the field useless. Measured: 3 events all
+	 * read lheap?=0 while hbase?=1, with no way to tell the readings apart.
+	 * 2 KiB of BSS is a fair price for a verdict that discriminates. */
+	uintptr_t live[256];
 	unsigned int liveIdx;
+	unsigned int liveOverflow;
 
 	/* Address window of every heap this allocator has ever mmap'd. Only ever
 	 * widened, so a munmap'd heap leaves its range inside the window -- that is
@@ -374,7 +381,7 @@ static int malloc_isLiveHeapBase(const chunk_t *chunk)
 	uintptr_t p = (uintptr_t)chunk;
 	unsigned int i;
 
-	for (i = 0; i < 16u; i++) {
+	for (i = 0; i < 256u; i++) {
 		if ((malloc_common.live[i] != 0u) && (malloc_common.live[i] == p)) {
 			return 1;
 		}
@@ -532,6 +539,9 @@ static void _malloc_chunkRemove(chunk_t *chunk)
 		malloc_debugHex("malloc:   freed?= ", (uintptr_t)malloc_wasReleased(chunk));
 		/* 1 here is PROOF the bin held a heap base, not a look-alike payload. */
 		malloc_debugHex("malloc:   lheap?= ", (uintptr_t)malloc_isLiveHeapBase(chunk));
+		/* Non-zero means the live ring wrapped over still-live entries, so a
+		 * `lheap?=0` above may mean "evicted", not "not a heap". */
+		malloc_debugHex("malloc:   lovfl = ", (uintptr_t)malloc_common.liveOverflow);
 		if (chunksz <= CHUNK_SMALLBIN_MAX_SIZE) {
 			idx = malloc_getsidx(chunksz);
 			malloc_common.sbins[idx] = NULL;
@@ -737,7 +747,13 @@ static heap_t *_malloc_heapAlloc(size_t size)
 		return NULL;
 	}
 
-	malloc_common.live[malloc_common.liveIdx & 15u] = (uintptr_t)heap;
+	if (malloc_common.live[malloc_common.liveIdx & 255u] != 0u) {
+		/* Overwriting a still-live entry: the ring is too small for this
+		 * workload and `lheap?=0` can no longer be trusted. Say so rather than
+		 * report a verdict that cannot discriminate. */
+		++malloc_common.liveOverflow;
+	}
+	malloc_common.live[malloc_common.liveIdx & 255u] = (uintptr_t)heap;
 	++malloc_common.liveIdx;
 
 	if ((malloc_common.heapLo == 0u) || ((uintptr_t)heap < malloc_common.heapLo)) {
@@ -1211,7 +1227,7 @@ void free(void *ptr)
 			 * released heap is still live and invert the reading. */
 			{
 				unsigned int i;
-				for (i = 0; i < 16u; i++) {
+				for (i = 0; i < 256u; i++) {
 					if (malloc_common.live[i] == (uintptr_t)heap) {
 						malloc_common.live[i] = 0u;
 					}

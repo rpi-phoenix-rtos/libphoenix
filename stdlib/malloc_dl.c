@@ -886,6 +886,32 @@ static heap_t *_malloc_heapAlloc(size_t size)
 		return NULL;
 	}
 
+	/* This region may be one we released earlier: mmap reuses addresses. Drop any
+	 * released[] record that overlaps it, or malloc_chunkValid() would go on
+	 * treating the NEW heap's perfectly valid chunks as stale pointers into the
+	 * old one and reject every allocation from it.
+	 *
+	 * Measured 2026-09-12: without this, adding the released[] test to
+	 * malloc_chunkValid() broke quakespasm, quake3e and yquake2 in one gate --
+	 * 163641 allocator messages in a single run, and near-NULL faults
+	 * (far=0x200, far=0x30) where callers dereferenced a malloc() that had
+	 * returned NULL. */
+	{
+		uintptr_t nbase = (uintptr_t)heap;
+		unsigned int ri;
+
+		for (ri = 0; ri < 8u; ri++) {
+			if (malloc_common.released[ri].size == 0u) {
+				continue;
+			}
+			if ((nbase < (malloc_common.released[ri].base + malloc_common.released[ri].size))
+					&& (malloc_common.released[ri].base < (nbase + heapSize))) {
+				malloc_common.released[ri].base = 0u;
+				malloc_common.released[ri].size = 0u;
+			}
+		}
+	}
+
 	if (malloc_common.live[malloc_common.liveIdx & 255u] != 0u) {
 		/* Overwriting a still-live entry: the ring is too small for this
 		 * workload and `lheap?=0` can no longer be trusted. Say so rather than

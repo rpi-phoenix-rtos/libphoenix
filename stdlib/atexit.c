@@ -18,6 +18,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/threads.h>
+#include <sys/debug.h>
 
 
 /* The atexit_node structure uses uint32_t for flags that
@@ -100,6 +101,15 @@ void _atexit_init(void)
 	 * a far worse failure than re-pointing it at the node that certainly exists.
 	 * Recover rather than fault: the storage is a named static object. */
 	if (atexit_common.head == NULL) {
+		/* Reaching here is NOT routine defensiveness. It means a statically initialised
+		 * .data word read back as NULL in this process, which is a memory-integrity
+		 * failure that would hit ANY statically initialised pointer -- this one merely
+		 * happens to be dereferenced early enough to be fatal. Recovering silently would
+		 * hide the only evidence that it still happens at all, so report it.
+		 * debug() is a raw syscall with no stdio, malloc or locking, which is why it is
+		 * safe here: _file_init() has not run, and an fprintf would deadlock on exactly
+		 * the machinery being initialised. */
+		debug("libc: atexit head read back NULL -- .data did not survive into this process image; recovered\n");
 		atexit_common.head = &atexit_firstNode;
 	}
 

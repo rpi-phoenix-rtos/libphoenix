@@ -202,8 +202,63 @@ static inline int malloc_chunkIsFirst(chunk_t *chunk)
 }
 
 
+static void malloc_reportBadHeapSize(const char *where, const heap_t *heap);
+
+
+/* The missing UPPER bound on heap->size.
+ *
+ * Measured (2026-09-12, three separate boots across two builds): a LIVE heap whose
+ * ->size reads 0x80000001_0000d000 when the real size is 0xd000 -- the low 32 bits
+ * intact, garbage in the high half. That value is page-aligned and far larger than
+ * sizeof(heap_t), so it satisfied every test malloc_chunkValid() applied, and the
+ * walk then evaluated `heap + heap->size` into a wild address and dereferenced it.
+ * The report prints heapEnd = 0x80000001_0ccad000 and heapEnd - size is exactly the
+ * heap base, so the faulting pointer is that arithmetic and nothing else.
+ *
+ * A heap cannot extend past the window mmap has actually handed us, so heapHi bounds
+ * it exactly. Wrap is tested separately: base + size overflowing would otherwise make
+ * the range test below pass by accident.
+ *
+ * Safe to call on the paths where ->heap may itself be wrong -- it vets the pointer
+ * before dereferencing it, which is the whole reason it exists. */
+static int malloc_heapSizeValid(const heap_t *heap)
+{
+	uintptr_t base = (uintptr_t)heap;
+	size_t sz;
+
+	if ((heap == NULL) || ((base & (uintptr_t)(_PAGE_SIZE - 1)) != 0u)) {
+		return 0;
+	}
+	if (malloc_common.heapHi != 0u) {
+		if ((base < malloc_common.heapLo) || (base >= malloc_common.heapHi)) {
+			return 0;
+		}
+	}
+
+	sz = heap->size;
+	if ((sz < sizeof(heap_t)) || ((sz & (size_t)(_PAGE_SIZE - 1)) != 0u)) {
+		return 0;
+	}
+	if ((base + sz) < base) {
+		return 0;
+	}
+	if ((malloc_common.heapHi != 0u) && ((base + sz) > malloc_common.heapHi)) {
+		return 0;
+	}
+
+	return 1;
+}
+
+
 static long int malloc_chunkIsLast(chunk_t *chunk)
 {
+	/* Answering "yes, last" is the conservative reply: it stops the coalesce walk
+	 * instead of stepping to an address derived from a size we do not believe. */
+	if (malloc_heapSizeValid(chunk->heap) == 0) {
+		malloc_reportBadHeapSize("chunkIsLast", chunk->heap);
+		return 1;
+	}
+
 	return ((uintptr_t) chunk + malloc_chunkSize(chunk) + CHUNK_MIN_SIZE > (uintptr_t) chunk->heap + chunk->heap->size);
 }
 
@@ -228,6 +283,11 @@ static long int malloc_chunkIsLast(chunk_t *chunk)
  * Using it here removes the wrong-heap arithmetic from the loop entirely. */
 static long int malloc_chunkIsLastIn(chunk_t *chunk, const heap_t *heap)
 {
+	if (malloc_heapSizeValid(heap) == 0) {
+		malloc_reportBadHeapSize("chunkIsLastIn", heap);
+		return 1;
+	}
+
 	return ((uintptr_t)chunk + malloc_chunkSize(chunk) + CHUNK_MIN_SIZE
 			> (uintptr_t)heap + heap->size);
 }
@@ -284,6 +344,39 @@ static void malloc_debugHex(const char *label, uintptr_t v)
 	buf[n++] = '\n';
 	buf[n] = '\0';
 	debug(buf);
+}
+
+
+/* Reported once per process on purpose: a wild heap->size is a STATE, not an event.
+ * Once a header carries one, every later walk over that heap would report again and
+ * the flood would cost more than it tells (a previous instrument produced 163641
+ * lines that way). The first report carries the evidence; the guard does the work. */
+static void malloc_reportBadHeapSize(const char *where, const heap_t *heap)
+{
+	static int badSizeReported = 0;
+
+	if (badSizeReported != 0) {
+		return;
+	}
+	badSizeReported = 1;
+
+	debug("malloc: heap->size is not a plausible heap size -- refusing to walk past it (");
+	debug(where);
+	debug(")\n");
+	malloc_debugHex("malloc:   heap     = ", (uintptr_t)heap);
+	/* Re-check the pointer before reading through it: this reporter runs precisely
+	 * when the heap is untrustworthy, and ->heap being wild is one of the reasons. */
+	if ((heap != NULL) && (((uintptr_t)heap & (uintptr_t)(_PAGE_SIZE - 1)) == 0u)
+			&& ((malloc_common.heapHi == 0u)
+				|| (((uintptr_t)heap >= malloc_common.heapLo)
+					&& ((uintptr_t)heap < malloc_common.heapHi)))) {
+		malloc_debugHex("malloc:   size     = ", (uintptr_t)heap->size);
+	}
+	else {
+		debug("malloc:   size     = <heap pointer outside the mmap'd window; not read>\n");
+	}
+	malloc_debugHex("malloc:   heapLo   = ", malloc_common.heapLo);
+	malloc_debugHex("malloc:   heapHi   = ", malloc_common.heapHi);
 }
 
 
@@ -354,7 +447,11 @@ static int malloc_chunkValid(chunk_t *chunk, const heap_t *heap)
 			return 0;
 		}
 	}
-	if ((heap->size < sizeof(heap_t)) || ((heap->size & (_PAGE_SIZE - 1)) != 0)) {
+	/* Alignment and a lower bound are not enough on their own: the corruption on
+	 * record (0x80000001_0000d000 where the real size is 0xd000) is page-aligned and
+	 * far above sizeof(heap_t), so it passed this test and the caller then walked to
+	 * base + size. malloc_heapSizeValid() adds the upper bound that catches it. */
+	if (malloc_heapSizeValid(heap) == 0) {
 		return 0;
 	}
 	if (((uintptr_t)chunk < base + sizeof(heap_t)) || ((uintptr_t)chunk >= base + heap->size)) {

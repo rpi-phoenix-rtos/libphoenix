@@ -208,6 +208,31 @@ static long int malloc_chunkIsLast(chunk_t *chunk)
 }
 
 
+/* Same test, but against a heap the CALLER already trusts instead of chunk->heap.
+ *
+ * Why it exists: malloc_chunkValid() checks that a chunk's ADDRESS lies inside the
+ * given heap; it never checks that the chunk's own ->heap field agrees. So a chunk
+ * can pass validation while carrying a wrong ->heap, and malloc_chunkIsLast() then
+ * computes the heap end from that wrong pointer. If the wrong heap is larger or
+ * based lower, the end lands past the real one, the "is this the last chunk?" test
+ * says no, and the walk steps to chunk+size -- which is exactly the real heap's end,
+ * a PAGE-ALIGNED address just outside it.
+ *
+ * That is the fingerprint in every corrupt-neighbour report on record: 11 of 11
+ * siblings page-aligned, while the chunks they came from were only 16-byte aligned
+ * (0 of 11). Random bytes over a size field land page-aligned with p ~ 1/256, so
+ * 11 for 11 is ~1e-27 -- the walk was reaching a heap edge by construction.
+ *
+ * In _malloc_chunkJoin() the reference heap is trustworthy: it is the caller's
+ * chunk->heap, and every chunk promoted into `it` was validated as lying inside it.
+ * Using it here removes the wrong-heap arithmetic from the loop entirely. */
+static long int malloc_chunkIsLastIn(chunk_t *chunk, const heap_t *heap)
+{
+	return ((uintptr_t)chunk + malloc_chunkSize(chunk) + CHUNK_MIN_SIZE
+			> (uintptr_t)heap + heap->size);
+}
+
+
 static inline chunk_t *malloc_chunkPrev(chunk_t *chunk)
 {
 	/* size_t, not unsigned: the footer is a size_t, so a 32-bit type silently
@@ -746,8 +771,21 @@ static void _malloc_chunkJoin(chunk_t *chunk)
 		it = sibling;
 	}
 
-	/* Join with the following chunks. */
-	while (malloc_chunkIsLast(it) == 0) {
+	/* `it` may have been promoted by the loop above. malloc_chunkValid() checks a chunk's
+	 * ADDRESS against the heap, never that its own ->heap field agrees, so a promoted `it`
+	 * can carry a stale ->heap -- which is precisely what makes the walk below overrun to a
+	 * page-aligned address. Name it here rather than inferring it from the neighbour report.
+	 * (Checking `chunk->heap` would be pointless: `heap` was captured from it at entry.) */
+	if (it->heap != heap) {
+		malloc_debugHex("malloc: promoted chunk's ->heap disagrees with the join reference: chunk = ",
+			(uintptr_t)it);
+		malloc_debugHex("malloc:   its ->heap = ", (uintptr_t)it->heap);
+		malloc_debugHex("malloc:   reference  = ", (uintptr_t)heap);
+	}
+
+	/* Join with the following chunks. Boundary computed against the TRUSTED reference
+	 * heap, not it->heap -- see malloc_chunkIsLastIn(). */
+	while (malloc_chunkIsLastIn(it, heap) == 0) {
 		sibling = malloc_chunkNext(it);
 		if ((sibling == NULL) || (malloc_chunkValid(sibling, heap) == 0)) {
 			malloc_reportBadNeighbour("next", it, sibling, heap);

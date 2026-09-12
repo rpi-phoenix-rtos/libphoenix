@@ -669,7 +669,23 @@ static void _malloc_chunkSplit(chunk_t *chunk, size_t size)
  * That was observed on hardware as a Data Abort at malloc_dl.c:346 with a
  * page-aligned far address and no indication of which allocation was at fault.
  *
- * Validating the neighbour turns that into this message, which names the block. */
+ * Validating the neighbour turns that into this message, which names the block.
+ *
+ * ⚠ 2026-09-12, MEASURED: the overflow story above does NOT fit the reports. Across
+ * every occurrence on record (11 events, 7 runs, all SuperTuxKart) the derived
+ * `sibling` is PAGE-ALIGNED -- 11 of 11 -- while the `chunk` it was derived from is
+ * only 16-byte aligned (0 of 11 page-aligned). `sibling` is `chunk + chunkSize(chunk)`,
+ * so an application scribbling arbitrary bytes over a size/footer would land on a page
+ * boundary with p ~ 1/256 per event; 11 for 11 is ~1e-27. The walk is reaching a page
+ * boundary BY CONSTRUCTION, and the page-aligned things in this allocator are heap
+ * bases and heap ends (mmap'd, page-multiple sizes).
+ *
+ * That points at malloc_chunkIsLast() failing to stop the walk -- i.e. the chunk's
+ * ->heap or that heap's ->size disagreeing with the chunk's real heap -- rather than at
+ * a userspace buffer overflow. One run showed five events whose sibling was the SAME
+ * address (0x0d12a000) reached from five different chunks in three different heaps,
+ * which is what a wrong chunk->heap association looks like and is not what random
+ * corruption looks like. Aim there before re-litigating the overflow theory. */
 static void malloc_reportBadNeighbour(const char *where, chunk_t *it, chunk_t *sibling)
 {
 	debug("malloc: corrupt ");

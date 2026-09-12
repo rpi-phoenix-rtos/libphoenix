@@ -384,8 +384,38 @@ static void malloc_chunkInit(chunk_t *chunk, heap_t *heap, size_t size)
 }
 
 
+static int malloc_isLiveHeapBase(const chunk_t *chunk);
+
+
 static void _malloc_chunkAdd(chunk_t *chunk)
 {
+	/* Catch a HEAP BASE being put into a free bin -- the first cause we have not
+	 * been able to name. Every corrupt bin entry on record decodes as a heap_t
+	 * rather than a chunk_t: `size` reads the heap size (0xd000) and `heap` reads
+	 * its freesz, and the coalesce walk then steps to base+0xd000, that heap's
+	 * END, which is where it faults.
+	 *
+	 * No code inserts a heap base: all five conversion sites use heap->space, so
+	 * a real chunk starts at heap+sizeof(heap_t) and can never BE the base. If
+	 * this fires, the bad entry is being inserted here and we have the moment it
+	 * happens; if it never fires, the entry arrives by some other route (a stale
+	 * pointer into a region mmap recycled) and the search moves elsewhere.
+	 *
+	 * The ring scan is 256 entries, so it is gated behind a page-aligned test
+	 * first: a heap base always is, a real chunk almost never is, and that keeps
+	 * this off the hot path. */
+	if ((((uintptr_t)chunk & (uintptr_t)(_PAGE_SIZE - 1)) == 0u)
+			&& (malloc_isLiveHeapBase(chunk) != 0)) {
+		static int addReported = 0;
+		if (addReported == 0) {
+			addReported = 1;
+			debug("malloc: a LIVE HEAP BASE is being added to a free bin -- this is the first cause\n");
+			malloc_debugHex("malloc:   chunk = ", (uintptr_t)chunk);
+			malloc_debugHex("malloc:   size  = ", (uintptr_t)chunk->size);
+			malloc_debugHex("malloc:   heap  = ", (uintptr_t)chunk->heap);
+		}
+	}
+
 	unsigned int idx;
 	size_t chunksz = malloc_chunkSize(chunk);
 	chunk_t *exist;

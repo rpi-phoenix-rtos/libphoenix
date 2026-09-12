@@ -1673,6 +1673,21 @@ int pthread_setspecific(pthread_key_t key, const void *value)
 {
 	int err = 0;
 	pthread_ctx *ctx = (pthread_ctx *)pthread_self();
+
+	/* pthread_self() returns NULL on a thread this library did not create (one
+	 * started with beginthread(), for instance). Without this check the call
+	 * below dereferences NULL -- _pthread_ctx_get() does ++ctx->refcount -- and
+	 * the process dies on a WRITE to a near-zero address.
+	 *
+	 * That matters more than it looks: libstdc++ here is built with threads but
+	 * WITHOUT TLS (_GLIBCXX_HAS_GTHREADS=1, _GLIBCXX_HAVE_TLS undef), so its
+	 * per-thread state -- __cxa_eh_globals among it -- goes through pthread
+	 * keys. Any C++ code reaching this on a non-pthread thread would crash in
+	 * libc rather than get an error. */
+	if (ctx == NULL) {
+		return EINVAL;
+	}
+
 	pthread_ctx_get(ctx);
 	mutexLock(pthread_common.pthread_key_lock);
 	pthread_key_data_t *head = ctx->key_data_list;
@@ -1708,6 +1723,15 @@ void *pthread_getspecific(pthread_key_t key)
 {
 	void *value = NULL;
 	pthread_ctx *ctx = (pthread_ctx *)pthread_self();
+
+	/* See pthread_setspecific(): NULL here means a thread this library did not
+	 * create. POSIX gives getspecific no way to report an error, and "no value
+	 * has been set" is exactly what such a thread has, so return NULL rather
+	 * than dereferencing it. */
+	if (ctx == NULL) {
+		return NULL;
+	}
+
 	pthread_ctx_get(ctx);
 	mutexLock(pthread_common.pthread_key_lock);
 	pthread_key_data_t *head = ctx->key_data_list;

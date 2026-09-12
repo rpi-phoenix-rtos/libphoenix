@@ -296,6 +296,9 @@ static void malloc_debugHex(const char *label, uintptr_t v)
  * an unrelated allocation -- observed as faults in malloc_cmp/lib_rbInsert and
  * as a jump to a garbage address. Checking the header first localises the
  * damage to the block that was actually smashed. */
+static int malloc_wasReleased(const chunk_t *chunk);
+
+
 static int malloc_chunkValid(chunk_t *chunk, const heap_t *heap)
 {
 	uintptr_t base = (uintptr_t)heap;
@@ -319,6 +322,24 @@ static int malloc_chunkValid(chunk_t *chunk, const heap_t *heap)
 	 * chunk, so fold those in too. */
 	if ((chunk == NULL) || ((((uintptr_t)chunk) >> 47) != 0)
 			|| ((((uintptr_t)chunk) & 7u) != 0)) {
+		return 0;
+	}
+
+	/* ...and reject a pointer into a heap we have already released. The check
+	 * above only catches a pointer that cannot be an address at all; a stale
+	 * pointer into a munmap'd heap is perfectly canonical, and the range test
+	 * below cannot reject it either, because it is measured against that same
+	 * stale heap's header -- which may still be readable even after some of the
+	 * heap's later pages have gone. Observed on hardware: a Data Abort at
+	 * malloc_chunkSize() on chunk = 0x0cdfa000, page-aligned, canonical, and
+	 * inside the range the stale header claimed.
+	 *
+	 * This is a "known bad" test, not a "known good" one: it can only miss, never
+	 * false-reject, so it is safe to act on. (The live[] ring is NOT usable for
+	 * the opposite test -- it is a 256-entry diagnostic with a documented
+	 * overflow counter, so once it wraps a "not live" answer would reject VALID
+	 * heaps and stop coalescing altogether.) */
+	if (malloc_wasReleased(chunk) != 0) {
 		return 0;
 	}
 

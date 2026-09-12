@@ -301,6 +301,27 @@ static int malloc_chunkValid(chunk_t *chunk, const heap_t *heap)
 	uintptr_t base = (uintptr_t)heap;
 	size_t size;
 
+	/* Reject a chunk pointer that cannot be a user address BEFORE anything here
+	 * dereferences it. This function's job is to decide whether `chunk` is
+	 * trustworthy, and it ends by reading chunk->size -- so a wild pointer used
+	 * to fault inside the validator itself, which is the one place that must not
+	 * happen. Observed on hardware: a Data Abort at malloc_chunkSize()
+	 * (malloc_dl.c:136) on chunk = 0x800000000ccdc000.
+	 *
+	 * The range test below cannot catch that on its own: it compares against
+	 * base + heap->size, so it only rejects the chunk if the heap's own bounds
+	 * are sound, and the window test above it is skipped entirely while
+	 * heapHi is still 0 (early in a process).
+	 *
+	 * AArch64 user addresses are canonical -- bits 63..47 zero -- and every
+	 * corrupt pointer seen in this class violates that outright (0x80000001...,
+	 * 0x80000000...). NULL and a misaligned pointer are equally impossible for a
+	 * chunk, so fold those in too. */
+	if ((chunk == NULL) || ((((uintptr_t)chunk) >> 47) != 0)
+			|| ((((uintptr_t)chunk) & 7u) != 0)) {
+		return 0;
+	}
+
 	if ((heap == NULL) || ((base & (uintptr_t)(_PAGE_SIZE - 1)) != 0)) {
 		return 0; /* heaps come from mmap(), so they are page-aligned */
 	}

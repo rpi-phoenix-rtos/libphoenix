@@ -686,7 +686,8 @@ static void _malloc_chunkSplit(chunk_t *chunk, size_t size)
  * address (0x0d12a000) reached from five different chunks in three different heaps,
  * which is what a wrong chunk->heap association looks like and is not what random
  * corruption looks like. Aim there before re-litigating the overflow theory. */
-static void malloc_reportBadNeighbour(const char *where, chunk_t *it, chunk_t *sibling)
+static void malloc_reportBadNeighbour(const char *where, chunk_t *it, chunk_t *sibling,
+	const heap_t *ref)
 {
 	debug("malloc: corrupt ");
 	debug(where);
@@ -694,6 +695,31 @@ static void malloc_reportBadNeighbour(const char *where, chunk_t *it, chunk_t *s
 	malloc_debugHex("malloc:   chunk    = ", (uintptr_t)it);
 	malloc_debugHex("malloc:   sibling  = ", (uintptr_t)sibling);
 	malloc_debugHex("malloc:   heap     = ", (uintptr_t)it->heap);
+	/* THE DISCRIMINATOR (2026-09-12). Every sibling on record is page-aligned, which
+	 * says the walk ran to a heap EDGE rather than into scribbled-over bytes. Two ways
+	 * that happens, and these fields tell them apart without another hunt:
+	 *
+	 *   refheap != heap  -> `it` is not in the heap the join started from. Validation
+	 *                       is done against the ORIGINAL chunk->heap (captured at entry)
+	 *                       while malloc_chunkIsLast() uses it->heap, so a mismatch
+	 *                       alone produces this report with NO corruption anywhere.
+	 *   refheap == heap  -> same heap, so the walk overran a real boundary: compare
+	 *                       chunk+size against heapEnd below.
+	 *
+	 * heap->size is only read when the pointer passes the same window test
+	 * malloc_chunkValid() uses, so a bogus ->heap cannot fault us here. */
+	malloc_debugHex("malloc:   refheap  = ", (uintptr_t)ref);
+	malloc_debugHex("malloc:   chunksz  = ", (uintptr_t)malloc_chunkSize(it));
+	if ((it->heap != NULL) && (((uintptr_t)it->heap & (uintptr_t)(_PAGE_SIZE - 1)) == 0)
+			&& ((malloc_common.heapHi == 0u)
+				|| (((uintptr_t)it->heap >= malloc_common.heapLo)
+					&& ((uintptr_t)it->heap < malloc_common.heapHi)))) {
+		malloc_debugHex("malloc:   heapsz   = ", (uintptr_t)it->heap->size);
+		malloc_debugHex("malloc:   heapEnd  = ", (uintptr_t)it->heap + it->heap->size);
+	}
+	else {
+		debug("malloc:   heapsz   = <heap pointer outside the mmap'd window; not read>\n");
+	}
 }
 
 
@@ -709,7 +735,7 @@ static void _malloc_chunkJoin(chunk_t *chunk)
 	while (!malloc_chunkIsFirst(it) && (it->size & CHUNK_PUSED) == 0) {
 		sibling = malloc_chunkPrev(it);
 		if ((sibling == NULL) || (malloc_chunkValid(sibling, heap) == 0)) {
-			malloc_reportBadNeighbour("prev", it, sibling);
+			malloc_reportBadNeighbour("prev", it, sibling, heap);
 			break;
 		}
 		_malloc_chunkRemove(sibling);
@@ -724,7 +750,7 @@ static void _malloc_chunkJoin(chunk_t *chunk)
 	while (malloc_chunkIsLast(it) == 0) {
 		sibling = malloc_chunkNext(it);
 		if ((sibling == NULL) || (malloc_chunkValid(sibling, heap) == 0)) {
-			malloc_reportBadNeighbour("next", it, sibling);
+			malloc_reportBadNeighbour("next", it, sibling, heap);
 			break;
 		}
 		if ((sibling->size & CHUNK_CUSED) != 0) {

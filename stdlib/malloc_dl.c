@@ -559,7 +559,18 @@ static int malloc_looksLikeHeapBase(const chunk_t *chunk)
 }
 
 
-static void _malloc_chunkRemove(chunk_t *chunk)
+/* Unlink `chunk` from its free bin. Returns 1 if it was actually removed, 0 if the
+ * bin had to be ABANDONED (a link failed validation, so walking it would hand out
+ * a corrupted chunk).
+ *
+ * The return matters at exactly one call site: the heap-release path. Releasing a
+ * heap whose chunk is still linked leaves a free-bin entry pointing into memory we
+ * just munmap'd -- and mmap reuses that region, so the entry later reads as a
+ * perfectly sane chunk header belonging to the NEXT heap. That is the dangling
+ * entry this allocator has been chasing, and it faulted on hardware inside
+ * malloc_chunkValid() on chunk = 0x0cdfa000 (canonical, page-aligned, inside the
+ * range the stale header claimed). */
+static int _malloc_chunkRemove(chunk_t *chunk)
 {
 	unsigned int idx;
 	size_t chunksz = malloc_chunkSize(chunk);
@@ -627,7 +638,7 @@ static void _malloc_chunkRemove(chunk_t *chunk)
 			malloc_common.lbins[idx].root = NULL;
 			malloc_common.lbinmap &= ~(1 << idx);
 		}
-		return;
+		return 0;
 	}
 
 	if (chunksz <= CHUNK_SMALLBIN_MAX_SIZE) {
@@ -636,7 +647,7 @@ static void _malloc_chunkRemove(chunk_t *chunk)
 		if (malloc_common.sbins[idx] == NULL)
 			malloc_common.sbinmap &= ~(1 << idx);
 
-		return;
+		return 1;
 	}
 
 	idx = malloc_getlidx(chunksz);
@@ -700,8 +711,14 @@ static void _malloc_chunkRemove(chunk_t *chunk)
 			malloc_debugHex("malloc:   chunk  = ", (uintptr_t)chunk);
 			malloc_debugHex("malloc:   parent = ", (uintptr_t)parent);
 			malloc_debugHex("malloc:   root   = ", (uintptr_t)malloc_common.lbins[idx].root);
+			/* The chunk is off the LIST but the tree still owns its node, so this
+			 * is NOT a clean removal -- say so, or the heap-release path would
+			 * unmap a heap the tree can still reach. */
+			return 0;
 		}
 	}
+
+	return 1;
 }
 
 
@@ -1341,7 +1358,20 @@ void free(void *ptr)
 			malloc_debugHex("malloc:   csize = ", (uintptr_t)malloc_chunkSize(chunk));
 		}
 		else {
-			_malloc_chunkRemove(chunk);
+			/* Only release if the chunk really left its bin. _malloc_chunkRemove()
+			 * ABANDONS the bin when a link fails validation, and unmapping anyway
+			 * leaves that bin pointing into memory we just gave back -- which mmap
+			 * then reuses, so the entry later reads as a sane header belonging to
+			 * the NEXT heap. That is the dangling entry this allocator has been
+			 * chasing; it faulted inside malloc_chunkValid() on a canonical,
+			 * page-aligned chunk that sat inside the range the stale header
+			 * claimed. Leaking one heap is strictly better, which is the same
+			 * trade the size check above already makes. */
+			if (_malloc_chunkRemove(chunk) == 0) {
+				debug("malloc: heap release ABANDONED -- chunk still binned; leaking the heap\n");
+				malloc_debugHex("malloc:   heap = ", (uintptr_t)heap);
+				return;
+			}
 			malloc_common.released[malloc_common.relIdx & 7u].base = (uintptr_t)heap;
 			malloc_common.released[malloc_common.relIdx & 7u].size = heap->size;
 			++malloc_common.relIdx;

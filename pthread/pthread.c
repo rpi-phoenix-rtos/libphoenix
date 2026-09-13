@@ -480,12 +480,9 @@ int pthread_join(pthread_t thread, void **value_ptr)
 		*value_ptr = ctx->retval;
 	}
 
+	/* Releases pthread_list_lock: _pthread_release() -> _pthread_ctx_put(),
+	 * which unlocks unconditionally. Do NOT unlock again here. */
 	_pthread_release(ctx, 0);
-
-	/* _pthread_release() runs under pthread_list_lock but does not unlock (the
-	 * detached self-exit path relies on the kernel force-unlocking on death).
-	 * A live joiner MUST release it here or it leaks the lock forever. */
-	mutexUnlock(pthread_common.pthread_list_lock);
 
 	return 0;
 }

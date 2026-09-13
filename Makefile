@@ -31,6 +31,12 @@ CFLAGS += -Iinclude -fno-builtin-malloc
 ifeq ($(LIBC_STARTUP_TRACE), y)
 CFLAGS += -DLIBC_STARTUP_TRACE
 endif
+# LIBC_STARTUP_TRACE_MIN=y prints ONLY the entry marker -- one debug() syscall
+# instead of eight, for when the full trace may be perturbing a timing-sensitive
+# race. See the comment in misc/init.c.
+ifeq ($(LIBC_STARTUP_TRACE_MIN), y)
+CFLAGS += -DLIBC_STARTUP_TRACE_MIN
+endif
 
 # FIXME: Find a proper way to provide different versions of libphoenix to projects
 ifdef LIBPHOENIX_IO_NO_FLOAT

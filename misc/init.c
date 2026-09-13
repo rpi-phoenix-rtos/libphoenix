@@ -35,8 +35,31 @@
  * Enable for a diagnostic build only; it prints per process and would be noise in
  * a shipped image.
  */
-#ifdef LIBC_STARTUP_TRACE
+/* Two levels, because the full trace may be perturbing what it measures.
+ *
+ * LIBC_STARTUP_TRACE     -- all eight markers. Names the initialiser a stall
+ *                           happens in, at the cost of 8 debug() syscalls per
+ *                           process before anything else runs.
+ * LIBC_STARTUP_TRACE_MIN -- the entry marker ONLY: one syscall.
+ *
+ * Why the minimal level exists: the fault this hunts (a launch that produces no
+ * output at all, `premain-hang`) needs a COLD boot and a HEAVY launch, and the
+ * full trace has now failed to reproduce it twice -- 0 events in 48 traced
+ * cold+heavy launches against 9 in 214 untraced. That is suggestive of the
+ * instrument masking a timing-sensitive race, though not significant on its own
+ * (p = 0.37). Since no silent run has ever reached even the first marker, seven
+ * of the eight are cost without information: the open question is only whether
+ * the process reaches _libc_init AT ALL, or dies earlier in exec/loading. One
+ * marker answers that with an eighth of the perturbation.
+ */
+#if defined(LIBC_STARTUP_TRACE) || defined(LIBC_STARTUP_TRACE_MIN)
 #include <sys/debug.h>
+#define LIBC_TRACE_ENTER() debug("libc-init: enter\n")
+#else
+#define LIBC_TRACE_ENTER() ((void)0)
+#endif
+
+#ifdef LIBC_STARTUP_TRACE
 #define LIBC_TRACE(s) debug("libc-init: " s "\n")
 #else
 #define LIBC_TRACE(s) ((void)0)
@@ -55,7 +78,7 @@ extern void _pthread_init(void);
 
 void _libc_init(void)
 {
-	LIBC_TRACE("enter");
+	LIBC_TRACE_ENTER();
 	_atexit_init();
 	LIBC_TRACE("atexit");
 	_errno_init();

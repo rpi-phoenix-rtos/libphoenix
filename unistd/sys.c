@@ -90,6 +90,25 @@ static int shebang(const char *path)
 }
 
 
+
+#ifdef EXECVE_TRACE
+#include <sys/debug.h>
+/* DIAGNOSTIC (-DEXECVE_TRACE via LIBC_DIAG): the `premain-hang` bisect ends here.
+ * A ten-tick trace through the kernel shows the vfork child completing every
+ * stage of process_vforkThread, resuming in userspace, and then never issuing
+ * the execve syscall -- and with psh's child doing nothing but execv(), the only
+ * code in that window is this function. It does SIX things that can block, all
+ * in a vfork child sharing the suspended parent's address space: fflush(NULL)
+ * (locks and flushes every FILE, i.e. tty I/O), two calloc()s on the parent's
+ * heap, shebang() (open+read over NFS), resolve_path() and stat().
+ * Marks are two bytes, '\' plus a digit: '\' occurs 0 times in a real boot log,
+ * so the count is unambiguous. debug() is a raw syscall -- no stdio, no malloc,
+ * no locking -- so it cannot itself block on what it is measuring. */
+#define EXECVE_TICK(s) debug(s)
+#else
+#define EXECVE_TICK(s) ((void)0)
+#endif
+
 int execv(const char *path, char *const argv[])
 {
 	return execve(path, argv, environ);
@@ -104,11 +123,14 @@ int execve(const char *file, char *const argv[], char *const envp[])
 	int fileNameLen = strlen(file);
 	struct stat buf;
 
+	EXECVE_TICK("\\1");
+
 	if (fileNameLen == 0) {
 		return SET_ERRNO(-ENOENT);
 	}
 
 	fflush(NULL);
+	EXECVE_TICK("\\2");
 	sys_clear();
 
 	sys_common.execBuff = calloc(PATH_MAX, sizeof(char));
@@ -118,6 +140,7 @@ int execve(const char *file, char *const argv[], char *const envp[])
 		return SET_ERRNO(-ENOMEM);
 	}
 
+	EXECVE_TICK("\\3");
 	interp = sys_common.execBuff;
 
 	if (!strchr(file, '/') && path) {
@@ -148,6 +171,7 @@ int execve(const char *file, char *const argv[], char *const envp[])
 		}
 	}
 
+	EXECVE_TICK("\\4");
 	if ((fd = shebang(file)) >= 0) {
 		if (read(fd, sys_common.execBuff, PATH_MAX) < 0) {
 			close(fd);
@@ -190,7 +214,9 @@ int execve(const char *file, char *const argv[], char *const envp[])
 		argv = sys_common.sbArgs;
 	}
 
+	EXECVE_TICK("\\5");
 	sys_common.canonicalPath = resolve_path(file, NULL, 1, 0);
+	EXECVE_TICK("\\6");
 	if (sys_common.canonicalPath == NULL) {
 		sys_clear();
 		return -1; /* errno set by resolve_path */
@@ -198,6 +224,7 @@ int execve(const char *file, char *const argv[], char *const envp[])
 
 	/* execute only if it is regular file */
 	err = stat(sys_common.canonicalPath, &buf);
+	EXECVE_TICK("\\7");
 	if (!err) {
 		/* TODO: check execution bit presence when native chmod is available */
 		err = (S_ISREG(buf.st_mode)) ? exec(sys_common.canonicalPath, argv, envp) : -EACCES;

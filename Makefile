@@ -38,6 +38,12 @@ ifeq ($(LIBC_STARTUP_TRACE_MIN), y)
 CFLAGS += -DLIBC_STARTUP_TRACE_MIN
 endif
 
+# Generic diagnostic -D hook for libphoenix only, mirroring KERNEL_DIAG in the
+# kernel. Lets a one-off probe be built without adding a named knob for each,
+# e.g. LIBC_DIAG='-DPTHREAD_UNLOCK_TRACE'. Off by default; never ship a build
+# with it set.
+CFLAGS += $(LIBC_DIAG)
+
 # FIXME: Find a proper way to provide different versions of libphoenix to projects
 ifdef LIBPHOENIX_IO_NO_FLOAT
 CFLAGS += -DIO_NO_FLOAT

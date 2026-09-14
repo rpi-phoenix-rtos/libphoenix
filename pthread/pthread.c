@@ -25,6 +25,9 @@
 #include <unistd.h>
 
 #include "../common/util.h"
+#ifdef PTHREAD_UNLOCK_TRACE
+#include <sys/debug.h>
+#endif
 
 #define ALIGN(value, size) ((((value) + (size) - 1) / (size)) * (size))
 
@@ -1108,6 +1111,34 @@ int pthread_mutex_unlock(pthread_mutex_t *mutex)
 
 	if (err == EOK) {
 		err = -mutexUnlock(mutex->mutexh);
+#ifdef PTHREAD_UNLOCK_TRACE
+		/* DIAGNOSTIC (-DPTHREAD_UNLOCK_TRACE): find who unlocks a mutex they do
+		 * not hold. The kernel reports `_proc_lockClear: unlock on not locked
+		 * lock` once per QuakeSpasm run but knows only the tid, not the
+		 * userspace PC, so the caller has stayed unidentified. mutexUnlock()
+		 * returns -EPERM for that case and every caller here discards it.
+		 * debug() is a raw syscall -- no stdio, no malloc, no locking -- so it
+		 * is safe to call from inside the mutex machinery itself.
+		 * Map the printed address with:
+		 *   aarch64-phoenix-addr2line -f -e <the binary> <addr> */
+		if (err != EOK) {
+			char buf[32];
+			unsigned long a = (unsigned long)__builtin_return_address(0);
+			int i;
+
+			/* Hand-rolled hex on the stack: snprintf() would re-enter the very
+			 * locking machinery this probe is watching. */
+			for (i = 0; i < 16; i++) {
+				buf[15 - i] = "0123456789abcdef"[a & 0xfUL];
+				a >>= 4;
+			}
+			buf[16] = '\n';
+			buf[17] = '\0';
+			debug((err == EPERM) ? "pthread_mutex_unlock EPERM caller=0x" :
+					"pthread_mutex_unlock ERR caller=0x");
+			debug(buf);
+		}
+#endif
 	}
 
 	return err;

@@ -73,24 +73,6 @@ pid_t getsid(pid_t pid)
 }
 
 
-static int shebang(const char *path)
-{
-	int fd;
-	char sb[2] = { 0, 0 };
-
-	if ((fd = open(path, O_RDONLY)) < 0)
-		return -1;
-
-	if ((read(fd, sb, 2) < 0) || sb[0] != '#' || sb[1] != '!') {
-		close(fd);
-		return -1;
-	}
-
-	return fd;
-}
-
-
-
 #ifdef EXECVE_TRACE
 #include <sys/debug.h>
 /* DIAGNOSTIC (-DEXECVE_TRACE via LIBC_DIAG): the `premain-hang` bisect ends here.
@@ -105,9 +87,45 @@ static int shebang(const char *path)
  * so the count is unambiguous. debug() is a raw syscall -- no stdio, no malloc,
  * no locking -- so it cannot itself block on what it is measuring. */
 #define EXECVE_TICK(s) debug(s)
+/* Only the ticks needed for the question in hand: each extra mark is another
+ * perturbation of a timing-sensitive race, and the denser builds have caught
+ * fewer events (11 ticks: 0/26; 7 ticks: 2/23). EXECVE_TRACE_FULL re-enables
+ * the boundaries already settled -- fflush and the callocs are CLEAR. */
+#ifdef EXECVE_TRACE_FULL
+#define EXECVE_TICK_FULL(s) debug(s)
+#else
+#define EXECVE_TICK_FULL(s) ((void)0)
+#endif
 #else
 #define EXECVE_TICK(s) ((void)0)
+#define EXECVE_TICK_FULL(s) ((void)0)
 #endif
+
+
+static int shebang(const char *path)
+{
+	int fd;
+	char sb[2] = { 0, 0 };
+
+	/* Split by EXECVE_TRACE: the premain-hang stall is inside this function (the
+	 * '\4' tick fires, '\5' never does), and these say which syscall owns it. */
+	EXECVE_TICK("\\a");
+	if ((fd = open(path, O_RDONLY)) < 0)
+		return -1;
+
+	EXECVE_TICK("\\b");
+	if ((read(fd, sb, 2) < 0) || sb[0] != '#' || sb[1] != '!') {
+		EXECVE_TICK("\\c");
+		close(fd);
+		return -1;
+	}
+
+	EXECVE_TICK_FULL("\\d");
+	return fd;
+}
+
+
+
 
 int execv(const char *path, char *const argv[])
 {
@@ -123,14 +141,14 @@ int execve(const char *file, char *const argv[], char *const envp[])
 	int fileNameLen = strlen(file);
 	struct stat buf;
 
-	EXECVE_TICK("\\1");
+	EXECVE_TICK_FULL("\\1");
 
 	if (fileNameLen == 0) {
 		return SET_ERRNO(-ENOENT);
 	}
 
 	fflush(NULL);
-	EXECVE_TICK("\\2");
+	EXECVE_TICK_FULL("\\2");
 	sys_clear();
 
 	sys_common.execBuff = calloc(PATH_MAX, sizeof(char));
@@ -140,7 +158,7 @@ int execve(const char *file, char *const argv[], char *const envp[])
 		return SET_ERRNO(-ENOMEM);
 	}
 
-	EXECVE_TICK("\\3");
+	EXECVE_TICK_FULL("\\3");
 	interp = sys_common.execBuff;
 
 	if (!strchr(file, '/') && path) {
@@ -214,9 +232,9 @@ int execve(const char *file, char *const argv[], char *const envp[])
 		argv = sys_common.sbArgs;
 	}
 
-	EXECVE_TICK("\\5");
+	EXECVE_TICK_FULL("\\5");
 	sys_common.canonicalPath = resolve_path(file, NULL, 1, 0);
-	EXECVE_TICK("\\6");
+	EXECVE_TICK_FULL("\\6");
 	if (sys_common.canonicalPath == NULL) {
 		sys_clear();
 		return -1; /* errno set by resolve_path */
@@ -224,7 +242,7 @@ int execve(const char *file, char *const argv[], char *const envp[])
 
 	/* execute only if it is regular file */
 	err = stat(sys_common.canonicalPath, &buf);
-	EXECVE_TICK("\\7");
+	EXECVE_TICK_FULL("\\7");
 	if (!err) {
 		/* TODO: check execution bit presence when native chmod is available */
 		err = (S_ISREG(buf.st_mode)) ? exec(sys_common.canonicalPath, argv, envp) : -EACCES;

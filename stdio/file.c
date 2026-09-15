@@ -1513,47 +1513,59 @@ int pclose(FILE *file)
 }
 
 
+/* Set up one of the three standard streams. Returns the stream, or NULL if it
+ * could not be allocated -- in which case the OTHER two still work, instead of
+ * this function faulting on the first `->fd` and taking the whole process with
+ * it before it has printed anything.
+ *
+ * bufsz 0 means unbuffered, which is what stderr wants. */
+static FILE *stdStream(int fd, int mode, unsigned int flags, size_t bufsz)
+{
+	FILE *f = calloc(1, sizeof(FILE));
+
+	if (f == NULL) {
+		return NULL;
+	}
+
+	f->fd = fd;
+	f->mode = mode;
+	f->flags = flags;
+
+	if (bufsz != 0) {
+		f->buffer = buffAlloc(bufsz);
+		if (f->buffer == NULL) {
+			free(f);
+			return NULL;
+		}
+		f->bufsz = bufsz;
+	}
+
+	mutexCreateWithAttr(&f->lock, &flockAttr);
+	LIST_ADD(&file_common.list, f);
+	return f;
+}
+
+
 void _file_init(void)
 {
 	mutexCreate(&file_common.lock);
 	file_common.list = NULL;
 
-	stdin = calloc(1, sizeof(FILE));
-	stdout = calloc(1, sizeof(FILE));
-	stderr = calloc(1, sizeof(FILE));
+	stdin = stdStream(0, O_RDONLY, 0, BUFSIZ);
+	stdout = stdStream(1, O_WRONLY, F_WRITING, BUFSIZ);
+	stderr = stdStream(2, O_WRONLY, F_WRITING, 0);
 
-	stdin->fd = 0;
-	stdout->fd = 1;
-	stderr->fd = 2;
-
-	stdin->buffer = buffAlloc(BUFSIZ);
-	stdout->buffer = buffAlloc(BUFSIZ);
-	stdin->bufsz = BUFSIZ;
-	stdout->bufsz = BUFSIZ;
-
-	stdin->bufeof = stdin->bufpos = BUFSIZ;
-	mutexCreateWithAttr(&stdin->lock, &flockAttr);
-
-	stdout->bufpos = 0;
-	stdout->flags = F_WRITING;
-	mutexCreateWithAttr(&stdout->lock, &flockAttr);
-
-	stderr->buffer = NULL;
-	stderr->bufsz = 0;
-	stderr->flags = F_WRITING;
-	mutexCreateWithAttr(&stderr->lock, &flockAttr);
-
-	if (isatty(stdout->fd)) {
-		stdout->flags |= F_LINE;
+	if (stdin != NULL) {
+		/* Nothing buffered yet: make the first read refill. */
+		stdin->bufeof = stdin->bufpos = BUFSIZ;
 	}
 
-	stdin->mode = O_RDONLY;
-	stdout->mode = O_WRONLY;
-	stderr->mode = O_WRONLY;
-
-	LIST_ADD(&file_common.list, stdin);
-	LIST_ADD(&file_common.list, stdout);
-	LIST_ADD(&file_common.list, stderr);
+	if (stdout != NULL) {
+		stdout->bufpos = 0;
+		if (isatty(stdout->fd)) {
+			stdout->flags |= F_LINE;
+		}
+	}
 }
 
 

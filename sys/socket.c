@@ -58,14 +58,33 @@ extern inline ssize_t send(int socket, const void *message, size_t length, int f
 extern inline ssize_t recv(int socket, void *message, size_t length, int flags);
 
 
+/* Cached /dev/netsocket. Resolving it on every call deadlocks the process that
+ * owns "/": a path lookup is answered by the root filesystem, so when that
+ * filesystem's own thread calls getaddrinfo() (or any other socksrvcall user) it
+ * sends the lookup to the port it is itself supposed to be servicing. That is
+ * what wedged the single-threaded nfs-fs on an NFS root, and behind it every
+ * process that touched the filesystem. The kernel's socket() path had the same
+ * defect (see phoenix-rtos-kernel posix/inet.c).
+ *
+ * The socket server's port does not change for the life of the system, so one
+ * resolution is enough; a race between two first callers stores the same value. */
+static oid_t socksrv_oid;
+static int socksrv_resolved;
+
+
 static int socksrvcall(msg_t *msg)
 {
 	oid_t oid;
 	int err;
 
-	if ((err = lookup(PATH_SOCKSRV, NULL, &oid)) < 0)
-		return SET_ERRNO(err);
-	if ((err = msgSend(oid.port, msg)) < 0)
+	if (__atomic_load_n(&socksrv_resolved, __ATOMIC_ACQUIRE) == 0) {
+		if ((err = lookup(PATH_SOCKSRV, NULL, &oid)) < 0)
+			return SET_ERRNO(err);
+		socksrv_oid = oid;
+		__atomic_store_n(&socksrv_resolved, 1, __ATOMIC_RELEASE);
+	}
+
+	if ((err = msgSend(socksrv_oid.port, msg)) < 0)
 		return SET_ERRNO(err);
 	return 0;
 }

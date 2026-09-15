@@ -1257,6 +1257,27 @@ static void *_malloc_allocLarge(size_t size)
 		malloc_debugHex("malloc:   chunk = ", (uintptr_t)chunk);
 		malloc_debugHex("malloc:   want  = ", (uintptr_t)size);
 		malloc_debugHex("malloc:   hbase?= ", (uintptr_t)malloc_looksLikeHeapBase(chunk));
+		/* The discriminators this path was missing. _malloc_chunkTake()'s long
+		 * report already prints them, but THIS short one is the shape that
+		 * actually fires in the field (twice in 23 SuperTuxKart runs, 2026-09-14
+		 * and 09-15), so the report we get is the one that could not name its own
+		 * mechanism.
+		 *
+		 * What each answers: `freed?=1` would prove the entry points into a heap
+		 * we already released -- note the long path has read 0 for it on every
+		 * event so far, so agreement here would confirm that rather than break new
+		 * ground, and a 1 would be news. `lheap?=` plus the two header words
+		 * separate a real heap base from a payload that merely looks like one --
+		 * the ambiguity the comment on `live[]` above exists for.
+		 *
+		 * No new fault risk: these are value tests, or reads of a pointer that
+		 * malloc_chunkValid() has already dereferenced on the line above. */
+		malloc_debugHex("malloc:   freed?= ", (uintptr_t)malloc_wasReleased(chunk));
+		malloc_debugHex("malloc:   lheap?= ", (uintptr_t)malloc_isLiveHeapBase(chunk));
+		malloc_debugHex("malloc:   size  = ", (uintptr_t)chunk->size);
+		malloc_debugHex("malloc:   heap  = ", (uintptr_t)chunk->heap);
+		malloc_debugHex("malloc:   heapLo= ", malloc_common.heapLo);
+		malloc_debugHex("malloc:   heapHi= ", malloc_common.heapHi);
 		{
 			unsigned int visited = 0u;
 			malloc_auditLargeBin(malloc_common.lbins[idx].root, 0u, &visited);

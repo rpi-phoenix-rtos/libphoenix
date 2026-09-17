@@ -26,6 +26,12 @@
 #include "posix/utils.h"
 
 
+static struct {
+	/* TODO: add umask inheritance for exec() */
+	mode_t umask;
+} stat_common;
+
+
 /* path needs to be canonical */
 static int _stat_abs(const char *path, struct stat *buf)
 {
@@ -137,31 +143,24 @@ int stat(const char *path, struct stat *buf)
 }
 
 
-/* Process-global file mode creation mask. Initialised to the POSIX-conventional
- * 022. NOTE: not thread-safe; POSIX umask() is per-process and inherently racy.
- * The stored mask is not yet consulted by mkdir()/creat()/open() here (open()'s
- * O_CREAT path lives in a separate file); umask() itself only has to store and
- * return the value. The obvious application point would be `mode & ~_umask` in
- * mkdir() above. */
-static mode_t _umask = 022;
-
-
+/* Process-global file mode creation mask. Upstream's implementation is taken
+ * over ours here (2026-09-17 sweep): it stores the mask in stat_common and uses
+ * atomics, which is strictly better than the plain static this fork carried, and
+ * it exports __getumask() so the creating calls in unistd/file.c can apply the
+ * mask without a private helper. Our _libc_applyUmask() is gone with it.
+ * ⓘ Behaviour change to know about: upstream's _stat_init() starts the mask at
+ * 0, not the POSIX-conventional 022, so a created file gets exactly the mode it
+ * asked for unless something calls umask(). The libc stat tests read the mask
+ * back rather than assuming a value, so they are unaffected. */
 mode_t umask(mode_t cmask)
 {
-	mode_t prev = _umask;
-
-	_umask = cmask & 0777;
-	return prev;
+	return __atomic_exchange_n(&stat_common.umask, cmask & ACCESSPERMS, __ATOMIC_RELAXED);
 }
 
 
-/* Apply the process file-creation mask to a mode, as POSIX requires of every
- * creating call (open O_CREAT, creat, mkdir, mkfifo, mknod). Only the permission
- * bits are affected. Shared with open()/mkfifo() in unistd/file.c, which cannot
- * see the static _umask directly. */
-mode_t _libc_applyUmask(mode_t mode)
+mode_t __getumask(void)
 {
-	return mode & (mode_t)(~_umask);
+	return __atomic_load_n(&stat_common.umask, __ATOMIC_RELAXED);
 }
 
 
@@ -227,13 +226,12 @@ int mkdir(const char *path, mode_t mode)
 		return SET_ERRNO(-ENOENT);
 	}
 
-	mode = _libc_applyUmask(mode);
-
 	msg_t msg = {
 		.type = mtCreate,
 		.oid = dir,
-		.i.create.type = otDir,
-		.i.create.mode = mode | S_IFDIR,
+		/* umask applied here only -- our fork used to do it a few lines above
+		 * via a private helper, and taking upstream's inline form left both. */
+		.i.create.mode = (mode & ~__getumask()) | S_IFDIR,
 		.i.data = name,
 		.i.size = strlen(name) + 1
 	};
@@ -316,4 +314,10 @@ int rename(const char *old, const char *new)
 int chown(const char *path, uid_t owner, gid_t group)
 {
 	return 0;
+}
+
+
+void _stat_init(void)
+{
+	__atomic_store_n(&stat_common.umask, 0, __ATOMIC_RELAXED);
 }

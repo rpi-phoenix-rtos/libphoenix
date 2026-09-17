@@ -36,7 +36,6 @@ extern ssize_t sys_read(int fildes, void *buf, size_t nbyte, off_t offset);
 extern ssize_t sys_write(int fildes, const void *buf, size_t nbyte, off_t offset);
 extern int sys_open(const char *filename, int oflag, ...);
 extern int sys_mkfifo(const char *filename, mode_t mode);
-extern mode_t _libc_applyUmask(mode_t mode); /* sys/stat.c */
 extern int sys_link(const char *path1, const char *path2);
 extern int sys_unlink(const char *path);
 extern int sys_pipe(int fildes[2]);
@@ -356,11 +355,6 @@ int open(const char *filename, int oflag, ...)
 	mode = va_arg(ap, mode_t);
 	va_end(ap);
 
-	/* POSIX: O_CREAT creates with mode & ~umask. */
-	if ((oflag & O_CREAT) != 0) {
-		mode = _libc_applyUmask(mode);
-	}
-
 	traceConsole = (filename != NULL) && (strcmp(filename, "/dev/console") == 0);
 
 	if (oflag & (O_WRONLY | O_RDWR)) {
@@ -388,6 +382,13 @@ int open(const char *filename, int oflag, ...)
 		return -1; /* errno set by resolve_path */
 	}
 
+	/* POSIX: O_CREAT creates with mode & ~umask. Applied here rather than at the
+	 * top of the function (where this fork used to do it with a private helper)
+	 * so there is exactly one application point. */
+	if ((oflag & O_CREAT) != 0) {
+		mode &= ~__getumask();
+	}
+
 	do {
 		err = sys_open(canonical, oflag, mode);
 	}
@@ -408,8 +409,8 @@ int mkfifo(const char *filename, mode_t mode)
 	if (canonical == NULL)
 		return -1; /* errno set by resolve_path */
 
-	mode = _libc_applyUmask(mode); /* POSIX: mkfifo creates with mode & ~umask */
-	while ((err = sys_mkfifo(canonical, mode)) == -EINTR)
+	/* POSIX: mkfifo creates with mode & ~umask */
+	while ((err = sys_mkfifo(canonical, ~__getumask() & mode)) == -EINTR)
 		;
 	free(canonical);
 	return SET_ERRNO(err);

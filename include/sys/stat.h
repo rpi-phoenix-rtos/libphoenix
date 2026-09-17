@@ -42,9 +42,6 @@ extern int stat(const char *path, struct stat *buf);
 extern int fstat(int fildes, struct stat *buf);
 
 
-extern mode_t umask(mode_t cmask);
-
-
 extern int mkdir(const char *pathname, mode_t mode);
 
 
@@ -67,6 +64,12 @@ extern int fstatat(int dirfd, const char *path, struct stat *buf, int flag);
 extern int fchmodat(int dirfd, const char *path, mode_t mode, int flag);
 extern int mkdirat(int dirfd, const char *path, mode_t mode);
 extern int mknodat(int dirfd, const char *path, mode_t mode, dev_t dev);
+
+
+extern mode_t umask(mode_t cmask);
+
+
+extern mode_t __getumask(void);
 
 
 #ifdef __cplusplus

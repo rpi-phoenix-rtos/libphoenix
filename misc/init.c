@@ -68,12 +68,12 @@
 
 extern void _malloc_init(void);
 extern int _env_init(void);
-extern void _signals_init(void);
 extern void _file_init(void);
 extern void _errno_init(void);
 extern void _atexit_init(void);
 extern void _init_array(void);
 extern void _pthread_init(void);
+extern void _stat_init(void);
 
 
 void _libc_init(void)
@@ -87,13 +87,14 @@ void _libc_init(void)
 	LIBC_TRACE("malloc");
 	_env_init();
 	LIBC_TRACE("env");
-	_signals_init();
-	LIBC_TRACE("signals");
 	/* The suspect: _file_init() ends in isatty(1) -> tcgetattr(), the only
-	 * blocking IPC in this function. A trace that stops after "signals" and
-	 * before "file" localises the hang to that ioctl. */
+	 * blocking IPC in this function. A trace that stops after "env" and before
+	 * "file" localises the hang to that ioctl. (It used to say "after signals";
+	 * _signals_init() is gone with the move of signal handling into the kernel.) */
 	_file_init();
 	LIBC_TRACE("file");
 	_pthread_init();
-	LIBC_TRACE("pthread -> init_array");
+	LIBC_TRACE("pthread");
+	_stat_init();
+	LIBC_TRACE("stat -> init_array");
 }

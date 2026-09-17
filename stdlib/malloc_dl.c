@@ -1506,6 +1506,15 @@ void free(void *ptr)
 		 * it means a real block's header was smashed. */
 		malloc_debugHex("malloc:   heapLo= ", malloc_common.heapLo);
 		malloc_debugHex("malloc:   heapHi= ", malloc_common.heapHi);
+		/* ...and WHAT that heap pointer is, which is what separates the three
+		 * stories the codes above cannot on their own:
+		 *   lheap?=1            -> a live heap base; the chunk or its size is wrong
+		 *   freed?=1            -> a heap we released; this block outlived its heap
+		 *   both 0              -> not a heap at all: a stale pointer whose address
+		 *                          has since been reused, or a smashed ->heap field
+		 * (freed? only remembers the last 8 releases, so 0 there is weak evidence.) */
+		malloc_debugHex("malloc:   lheap?= ", (uintptr_t)malloc_isLiveHeapBase((const chunk_t *)heap));
+		malloc_debugHex("malloc:   freed?= ", (uintptr_t)malloc_wasReleased((const chunk_t *)heap));
 		mutexUnlock(malloc_common.mutex);
 		return;
 	}

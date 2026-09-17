@@ -390,9 +390,29 @@ static void malloc_reportBadHeapSize(const char *where, const heap_t *heap)
  * as a jump to a garbage address. Checking the header first localises the
  * damage to the block that was actually smashed. */
 static int malloc_wasReleased(const chunk_t *chunk);
+static int malloc_chunkValidWhy(chunk_t *chunk, const heap_t *heap);
 
 
-static int malloc_chunkValid(chunk_t *chunk, const heap_t *heap)
+/* Why a chunk header is untrustworthy, as a CODE rather than a bare no.
+ *
+ * The report used to print the block and leave the reader to re-derive which of
+ * eight tests rejected it -- and the tests answer very different questions: a
+ * stale pointer into a RELEASED heap (2) is a use-after-free of a whole heap,
+ * while a bad size (7) is a smashed header in a live one. Three field fires in
+ * September 2026 (SuperTuxKart, contained) could not be told apart without it.
+ *
+ *   1 = chunk pointer is NULL, non-canonical or misaligned
+ *   2 = chunk lies in a heap we have already released
+ *   3 = heap pointer is NULL or not page-aligned
+ *   4 = heap lies outside the [heapLo, heapHi) window we have mmap'd
+ *   5 = heap->size is not a sane size for that base
+ *   6 = chunk lies outside its own heap's range
+ *   7 = chunk->size is below the minimum or misaligned
+ *   8 = chunk + size runs past the end of the heap
+ *
+ * 0 means valid. malloc_chunkValid() keeps the old boolean sense for the call
+ * sites that only need a yes/no. */
+static int malloc_chunkValidWhy(chunk_t *chunk, const heap_t *heap)
 {
 	uintptr_t base = (uintptr_t)heap;
 	size_t size;
@@ -415,7 +435,7 @@ static int malloc_chunkValid(chunk_t *chunk, const heap_t *heap)
 	 * chunk, so fold those in too. */
 	if ((chunk == NULL) || ((((uintptr_t)chunk) >> 47) != 0)
 			|| ((((uintptr_t)chunk) & 7u) != 0)) {
-		return 0;
+		return 1;
 	}
 
 	/* ...and reject a pointer into a heap we have already released. The check
@@ -433,18 +453,18 @@ static int malloc_chunkValid(chunk_t *chunk, const heap_t *heap)
 	 * overflow counter, so once it wraps a "not live" answer would reject VALID
 	 * heaps and stop coalescing altogether.) */
 	if (malloc_wasReleased(chunk) != 0) {
-		return 0;
+		return 2;
 	}
 
 	if ((heap == NULL) || ((base & (uintptr_t)(_PAGE_SIZE - 1)) != 0)) {
-		return 0; /* heaps come from mmap(), so they are page-aligned */
+		return 3; /* heaps come from mmap(), so they are page-aligned */
 	}
 	/* ...and they lie inside the window of heaps we have actually mmap'd. This is
 	 * what rejects a header fabricated out of unrelated memory, which the
 	 * alignment and range tests below cannot: see the note on heapLo/heapHi. */
 	if (malloc_common.heapHi != 0u) {
 		if ((base < malloc_common.heapLo) || (base >= malloc_common.heapHi)) {
-			return 0;
+			return 4;
 		}
 	}
 	/* Alignment and a lower bound are not enough on their own: the corruption on
@@ -452,21 +472,27 @@ static int malloc_chunkValid(chunk_t *chunk, const heap_t *heap)
 	 * far above sizeof(heap_t), so it passed this test and the caller then walked to
 	 * base + size. malloc_heapSizeValid() adds the upper bound that catches it. */
 	if (malloc_heapSizeValid(heap) == 0) {
-		return 0;
+		return 5;
 	}
 	if (((uintptr_t)chunk < base + sizeof(heap_t)) || ((uintptr_t)chunk >= base + heap->size)) {
-		return 0;
+		return 6;
 	}
 
 	size = malloc_chunkSize(chunk);
 	if ((size < CHUNK_MIN_SIZE) || ((size & 7u) != 0)) {
-		return 0;
+		return 7;
 	}
 	if (((uintptr_t)chunk + size) > (base + heap->size)) {
-		return 0;
+		return 8;
 	}
 
-	return 1;
+	return 0;
+}
+
+
+static int malloc_chunkValid(chunk_t *chunk, const heap_t *heap)
+{
+	return (malloc_chunkValidWhy(chunk, heap) == 0) ? 1 : 0;
 }
 
 
@@ -1433,6 +1459,7 @@ void free(void *ptr)
 {
 	chunk_t *chunk, *chunkNext;
 	heap_t *heap;
+	int why;
 	/* Who called free(). This is THE datum both reports below were missing: they
 	 * describe the block perfectly and say nothing about which code freed it, so
 	 * a "double free" has to be chased by reading every free() site that could
@@ -1462,9 +1489,14 @@ void free(void *ptr)
 	 * strictly better than letting malloc_chunkSetFooter() below write through a
 	 * corrupted size, and the report names the smashed block rather than the
 	 * unrelated allocation that would fault later. */
-	if (malloc_chunkValid(chunk, heap) == 0) {
+	why = malloc_chunkValidWhy(chunk, heap);
+	if (why != 0) {
 		debug("malloc: free() of a corrupt chunk header -- leaking the block\n");
 		malloc_debugHex("malloc:   caller= ", (uintptr_t)caller);
+		/* Which test rejected it -- see malloc_chunkValidWhy(). 2 = the block is in
+		 * a RELEASED heap (use-after-free of a whole heap), 7 = a smashed size in a
+		 * live one; those two want completely different hunts. */
+		malloc_debugHex("malloc:   why   = ", (uintptr_t)why);
 		malloc_debugHex("malloc:   ptr   = ", (uintptr_t)ptr);
 		malloc_debugHex("malloc:   size  = ", (uintptr_t)(chunk->size));
 		malloc_debugHex("malloc:   heap  = ", (uintptr_t)heap);
@@ -1610,6 +1642,7 @@ void *realloc(void *ptr, size_t size)
 	chunk_t *chunk, *sibling, *next;
 	heap_t *heap;
 	size_t chunksz;
+	int rwhy;
 
 	void *p;
 
@@ -1637,8 +1670,10 @@ void *realloc(void *ptr, size_t size)
 	 * on malloc_chunkValid); realloc() did not, so a smashed header reached the
 	 * split and the join paths unchecked. Same guard, same outcome: report and
 	 * leak the block rather than derive a write address from a corrupt size. */
-	if (malloc_chunkValid(chunk, heap) == 0) {
+	rwhy = malloc_chunkValidWhy(chunk, heap);
+	if (rwhy != 0) {
 		debug("malloc: realloc() of a corrupt chunk header -- leaking the block\n");
+		malloc_debugHex("malloc:   why    = ", (uintptr_t)rwhy);
 		malloc_debugHex("malloc:   ptr    = ", (uintptr_t)ptr);
 		malloc_debugHex("malloc:   heap   = ", (uintptr_t)heap);
 		mutexUnlock(malloc_common.mutex);

@@ -1103,6 +1103,48 @@ static heap_t *_malloc_heapAlloc(size_t size)
 		}
 	}
 
+	/* ...and it must NOT be one that is still live. Nothing checked that until now:
+	 * the released[] sweep above is the only test the returned address ever faced, so
+	 * a mapping handed back on top of a live heap went straight into malloc_heapInit()
+	 * below, which writes the NEW (smaller) size over the live heap's header. Every
+	 * chunk of the old heap above the new end stays mapped and in use, still carrying
+	 * this base in ->heap, and each of their frees then fails malloc_chunkValidWhy()
+	 * with code 6/8 -- an intact chunk grid sitting outside the extent its heap claims.
+	 * That is exactly the archive's residue signature
+	 * (docs/misc/2026-09-18-allocator-guard-residue.md), so name it at the source
+	 * instead of 70 frees later.
+	 *
+	 * Report and carry on rather than failing the allocation: if this never fires the
+	 * hypothesis is dead, and if it does, returning NULL here would turn a contained
+	 * corruption into an immediate app crash. live[] is cleared on release, so a
+	 * non-zero entry is a heap we believe is mapped and its header is safe to read;
+	 * a wrapped ring can only miss an overlap, never invent one. */
+	{
+		uintptr_t nbase = (uintptr_t)heap;
+		unsigned int li;
+
+		for (li = 0; li < 256u; li++) {
+			uintptr_t lbase = malloc_common.live[li];
+			size_t lsize;
+
+			if ((lbase == 0u) || (lbase == nbase)) {
+				continue;
+			}
+			if (malloc_heapSizeValid((const heap_t *)lbase) == 0) {
+				continue;
+			}
+			lsize = ((const heap_t *)lbase)->size;
+			if ((nbase < (lbase + lsize)) && (lbase < (nbase + heapSize))) {
+				debug("malloc: mmap returned a region OVERLAPPING a live heap\n");
+				malloc_debugHex("malloc:   new   = ", nbase);
+				malloc_debugHex("malloc:   nsize = ", (uintptr_t)heapSize);
+				malloc_debugHex("malloc:   live  = ", lbase);
+				malloc_debugHex("malloc:   lsize = ", (uintptr_t)lsize);
+				break;
+			}
+		}
+	}
+
 	if (malloc_common.live[malloc_common.liveIdx & 255u] != 0u) {
 		/* Overwriting a still-live entry: the ring is too small for this
 		 * workload and `lheap?=0` can no longer be trusted. Say so rather than
@@ -1515,6 +1557,13 @@ void free(void *ptr)
 		 * (freed? only remembers the last 8 releases, so 0 there is weak evidence.) */
 		malloc_debugHex("malloc:   lheap?= ", (uintptr_t)malloc_isLiveHeapBase((const chunk_t *)heap));
 		malloc_debugHex("malloc:   freed?= ", (uintptr_t)malloc_wasReleased((const chunk_t *)heap));
+		/* Non-zero means the 256-entry live ring wrapped over still-live entries, so
+		 * `lheap?=0` may mean "evicted" rather than "not a heap" -- and the overlap
+		 * check in _malloc_heapAlloc() was blind for however many heaps it lost. The
+		 * host harness reaches 226 live heaps on a 100k-op seed, so this is not
+		 * hypothetical. Printed here for the same reason the bin-corruption branch
+		 * prints it: without it the verdicts above cannot be read. */
+		malloc_debugHex("malloc:   lovfl = ", (uintptr_t)malloc_common.liveOverflow);
 		/* For the extent codes (5, 6, 8) the chunk sits OUTSIDE the range its own heap
 		 * claims, and the codes alone cannot say which way that happened. Print the
 		 * extent itself. Safe to dereference here: reaching code >= 5 means the heap

@@ -628,6 +628,46 @@ static int malloc_isLiveHeapBase(const chunk_t *chunk)
 }
 
 
+/* The base of a live heap whose extent overlaps [nbase, nbase + nsize), or 0 if none does.
+ *
+ * _malloc_heapAlloc() checked the address mmap returned against released[] and nothing
+ * else, so a region handed back on top of a LIVE heap went straight into malloc_heapInit(),
+ * which writes the new (smaller) size over that heap's header. Its chunks above the new end
+ * stay mapped and in use, still naming that base in ->heap, and their frees then fail
+ * malloc_chunkValidWhy() with code 6/8 -- an intact chunk grid outside the extent its heap
+ * claims, which is the archive's residue signature
+ * (docs/misc/2026-09-18-allocator-guard-residue.md).
+ *
+ * Note nbase is NOT yet in live[] when this runs -- the ring insert follows the call -- so
+ * an entry equal to nbase means a live heap ALREADY sits at that address, i.e. the total
+ * overlap, the most severe case there is. It must not be skipped.
+ *
+ * live[] is cleared on release and both release refusals keep the heap mapped, so a
+ * non-zero entry is a heap we believe is mapped and its header is safe to read. A wrapped
+ * ring (see liveOverflow) can only make this MISS an overlap, never invent one. */
+static uintptr_t malloc_liveOverlap(uintptr_t nbase, size_t nsize)
+{
+	unsigned int i;
+
+	for (i = 0; i < 256u; i++) {
+		uintptr_t lbase = malloc_common.live[i];
+		size_t lsize;
+
+		if (lbase == 0u) {
+			continue;
+		}
+		if (malloc_heapSizeValid((const heap_t *)lbase) == 0) {
+			continue;
+		}
+		lsize = ((const heap_t *)lbase)->size;
+		if ((nbase < (lbase + lsize)) && (lbase < (nbase + nsize))) {
+			return lbase;
+		}
+	}
+	return 0u;
+}
+
+
 /* Did this address belong to one of the last heaps we released? A pure value
  * test over a tiny ring, so it is safe on a pointer we will not dereference.
  * A hit PROVES the free-bin entry is a stale pointer into recycled memory. */
@@ -1120,28 +1160,14 @@ static heap_t *_malloc_heapAlloc(size_t size)
 	 * non-zero entry is a heap we believe is mapped and its header is safe to read;
 	 * a wrapped ring can only miss an overlap, never invent one. */
 	{
-		uintptr_t nbase = (uintptr_t)heap;
-		unsigned int li;
+		uintptr_t lbase = malloc_liveOverlap((uintptr_t)heap, heapSize);
 
-		for (li = 0; li < 256u; li++) {
-			uintptr_t lbase = malloc_common.live[li];
-			size_t lsize;
-
-			if ((lbase == 0u) || (lbase == nbase)) {
-				continue;
-			}
-			if (malloc_heapSizeValid((const heap_t *)lbase) == 0) {
-				continue;
-			}
-			lsize = ((const heap_t *)lbase)->size;
-			if ((nbase < (lbase + lsize)) && (lbase < (nbase + heapSize))) {
-				debug("malloc: mmap returned a region OVERLAPPING a live heap\n");
-				malloc_debugHex("malloc:   new   = ", nbase);
-				malloc_debugHex("malloc:   nsize = ", (uintptr_t)heapSize);
-				malloc_debugHex("malloc:   live  = ", lbase);
-				malloc_debugHex("malloc:   lsize = ", (uintptr_t)lsize);
-				break;
-			}
+		if (lbase != 0u) {
+			debug("malloc: mmap returned a region OVERLAPPING a live heap\n");
+			malloc_debugHex("malloc:   new   = ", (uintptr_t)heap);
+			malloc_debugHex("malloc:   nsize = ", (uintptr_t)heapSize);
+			malloc_debugHex("malloc:   live  = ", lbase);
+			malloc_debugHex("malloc:   lsize = ", (uintptr_t)((const heap_t *)lbase)->size);
 		}
 	}
 

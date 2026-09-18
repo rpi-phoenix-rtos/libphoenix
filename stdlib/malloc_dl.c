@@ -1515,6 +1515,29 @@ void free(void *ptr)
 		 * (freed? only remembers the last 8 releases, so 0 there is weak evidence.) */
 		malloc_debugHex("malloc:   lheap?= ", (uintptr_t)malloc_isLiveHeapBase((const chunk_t *)heap));
 		malloc_debugHex("malloc:   freed?= ", (uintptr_t)malloc_wasReleased((const chunk_t *)heap));
+		/* For the extent codes (5, 6, 8) the chunk sits OUTSIDE the range its own heap
+		 * claims, and the codes alone cannot say which way that happened. Print the
+		 * extent itself. Safe to dereference here: reaching code >= 5 means the heap
+		 * pointer already passed the non-NULL, page-aligned and in-window tests, and
+		 * malloc_heapSizeValid() has read ->size.
+		 *
+		 * The archive's 99 events all show a coherent, non-overlapping, mostly
+		 * exactly-adjacent chunk grid running well past the reported end, i.e. blocks
+		 * this allocator really did carve. Two stories survive that, and hend? tells
+		 * them apart without any new bookkeeping:
+		 *   hend?=1  -> the next live heap begins exactly where this one now ends, so
+		 *               a smaller heap was mapped over a released larger one and the
+		 *               old grid above it is still mapped and unzeroed
+		 *   hend?=0  -> no heap starts there; the extent shrank in place under a live
+		 *               heap, and hfree should then disagree with hsize
+		 * Read hsize against the legal sizes in lookup[] (:1235): the four residue
+		 * heaps must all have been 0xd000, and 0x8000 is not a legal size at all. */
+		if (why >= 5) {
+			malloc_debugHex("malloc:   hsize = ", (uintptr_t)heap->size);
+			malloc_debugHex("malloc:   hfree = ", (uintptr_t)heap->freesz);
+			malloc_debugHex("malloc:   hend? = ",
+				(uintptr_t)malloc_isLiveHeapBase((const chunk_t *)((uintptr_t)heap + heap->size)));
+		}
 		mutexUnlock(malloc_common.mutex);
 		return;
 	}

@@ -1710,7 +1710,17 @@ void free(void *ptr)
 					}
 				}
 			}
-			munmap(heap, heap->size);
+			/* A failed munmap leaves the region mapped while released[] already says
+			 * it is gone, so malloc_chunkValid() would reject every later block in it
+			 * and the address never comes back through mmap. The kernel's aarch64
+			 * pmap_remove() cannot fail, and _vm_munmap() leaves un-processed entries
+			 * in the tree when it gives up, so this is not expected -- but it was
+			 * discarded, which is why nobody could have known. */
+			if (munmap(heap, heap->size) < 0) {
+				debug("malloc: munmap of a released heap FAILED -- released[] now lies\n");
+				malloc_debugHex("malloc:   heap  = ", (uintptr_t)heap);
+				malloc_debugHex("malloc:   hsize = ", (uintptr_t)heap->size);
+			}
 		}
 	}
 

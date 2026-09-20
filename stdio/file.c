@@ -1257,11 +1257,6 @@ int fsetpos(FILE *stream, const fpos_t *pos)
 }
 
 
-void __fpurge(FILE *stream)
-{
-}
-
-
 ssize_t getdelim(char **lineptr, size_t *n, int delim, FILE *stream)
 {
 	int c;
@@ -1620,4 +1615,207 @@ int remove(const char *path)
 	}
 
 	return unlink(path);
+}
+
+
+/* ---------------------------------------------------------------------------
+ * <stdio_ext.h>: Solaris/glibc accessors for a FILE's buffer state.
+ *
+ * gnulib needs these, and gnulib underpins every GNU package. Without them it
+ * compiles its own copies -- per-libc `#if` ladders over private FILE internals
+ * that end in `#error Please port ... to your platform!` -- so coreutils, grep,
+ * tar and gzip each carried a patch teaching that ladder about our FILE. They
+ * live here, next to the layout they read, so that knowledge stays in one place.
+ *
+ * The layout, for the record:
+ *   writing (F_WRITING set) -- bufpos is the number of bytes staged in buffer[]
+ *                              awaiting flush; bufeof is parked at bufsz.
+ *   reading (F_WRITING clear) -- bufpos is the read cursor and bufeof the count
+ *                              of valid bytes, so bufeof - bufpos is unread.
+ * --------------------------------------------------------------------------- */
+
+
+size_t __fpending(FILE *stream)
+{
+	size_t n;
+
+	if (stream == NULL) {
+		return 0;
+	}
+
+	flockfile(stream);
+	n = ((stream->flags & F_WRITING) != 0) ? stream->bufpos : 0;
+	funlockfile(stream);
+
+	return n;
+}
+
+
+size_t __freadahead(FILE *stream)
+{
+	size_t n = 0;
+
+	if (stream == NULL) {
+		return 0;
+	}
+
+	flockfile(stream);
+	if (((stream->flags & F_WRITING) == 0) && (stream->bufeof > stream->bufpos)) {
+		n = stream->bufeof - stream->bufpos;
+	}
+	funlockfile(stream);
+
+	return n;
+}
+
+
+int __freading(FILE *stream)
+{
+	int r;
+
+	if (stream == NULL) {
+		return 0;
+	}
+
+	flockfile(stream);
+	/* Read-only streams always report reading, per glibc; otherwise it is
+	 * whichever direction the stream was last used in. */
+	r = (((stream->mode & 0x7) == O_RDONLY) || ((stream->flags & F_WRITING) == 0)) ? 1 : 0;
+	funlockfile(stream);
+
+	return r;
+}
+
+
+int __fwriting(FILE *stream)
+{
+	int r;
+
+	if (stream == NULL) {
+		return 0;
+	}
+
+	flockfile(stream);
+	r = (((stream->mode & 0x7) == O_WRONLY) || ((stream->flags & F_WRITING) != 0)) ? 1 : 0;
+	funlockfile(stream);
+
+	return r;
+}
+
+
+int __freadable(FILE *stream)
+{
+	int m;
+
+	if (stream == NULL) {
+		return 0;
+	}
+
+	m = stream->mode & 0x7;
+
+	return ((m == O_RDONLY) || (m == O_RDWR)) ? 1 : 0;
+}
+
+
+int __fwritable(FILE *stream)
+{
+	int m;
+
+	if (stream == NULL) {
+		return 0;
+	}
+
+	m = stream->mode & 0x7;
+
+	return ((m == O_WRONLY) || (m == O_RDWR)) ? 1 : 0;
+}
+
+
+void __fseterr(FILE *stream)
+{
+	if (stream == NULL) {
+		return;
+	}
+
+	flockfile(stream);
+	stream->flags |= F_ERROR;
+	funlockfile(stream);
+}
+
+
+/* Replaces an empty stub that used to sit next to getdelim(): it took a FILE*
+ * and did nothing, so a caller asking for buffered data to be discarded got
+ * silent success and kept the data. */
+void __fpurge(FILE *stream)
+{
+	if (stream == NULL) {
+		return;
+	}
+
+	flockfile(stream);
+	if ((stream->flags & F_WRITING) != 0) {
+		/* Drop what is staged for output. */
+		stream->bufpos = 0;
+	}
+	else {
+		/* Drop what has been read ahead: park the cursor at the end, which is
+		 * the same "nothing buffered" state _file_init leaves stdin in. */
+		stream->bufpos = stream->bufeof = stream->bufsz;
+	}
+	stream->flags &= ~F_EOF;
+	funlockfile(stream);
+}
+
+
+int __flbf(FILE *stream)
+{
+	if (stream == NULL) {
+		return 0;
+	}
+
+	return ((stream->flags & F_LINE) != 0) ? 1 : 0;
+}
+
+
+size_t __fbufsize(FILE *stream)
+{
+	if (stream == NULL) {
+		return 0;
+	}
+
+	return stream->bufsz;
+}
+
+
+const char *__freadptr(FILE *stream, size_t *sizep)
+{
+	const char *p = NULL;
+
+	if ((stream == NULL) || (sizep == NULL)) {
+		return NULL;
+	}
+
+	flockfile(stream);
+	if (((stream->flags & F_WRITING) == 0) && (stream->bufeof > stream->bufpos) &&
+		(stream->buffer != NULL)) {
+		*sizep = stream->bufeof - stream->bufpos;
+		p = stream->buffer + stream->bufpos;
+	}
+	funlockfile(stream);
+
+	return p;
+}
+
+
+void __freadseek(FILE *stream, size_t n)
+{
+	if ((stream == NULL) || (n == 0u)) {
+		return;
+	}
+
+	flockfile(stream);
+	if (((stream->flags & F_WRITING) == 0) && ((stream->bufeof - stream->bufpos) >= n)) {
+		stream->bufpos += n;
+	}
+	funlockfile(stream);
 }

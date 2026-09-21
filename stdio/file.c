@@ -1363,6 +1363,15 @@ int setvbuf(FILE *stream, char *buffer, int mode, size_t size)
 	size_t old_siz;
 	int old_flags;
 
+	/* C17 7.21.5.6: with a null `buf` the implementation provides the buffer and
+	 * `size` is only a hint, so a request of 0 must not fail -- it did, because
+	 * the allocation below asked for 0 bytes and got NULL. glibc defines
+	 * setlinebuf(s) as exactly setvbuf(s, NULL, _IOLBF, 0), so portable code
+	 * asking for line buffering was getting -1. */
+	if ((buffer == NULL) && (mode != _IONBF) && (size == 0)) {
+		size = BUFSIZ;
+	}
+
 	mutexLock(stream->lock);
 
 	old_buf = stream->buffer;
@@ -1371,7 +1380,12 @@ int setvbuf(FILE *stream, char *buffer, int mode, size_t size)
 
 	stream->buffer = NULL;
 	stream->bufsz = size;
-	stream->flags &= ~(F_USRBUF & F_LINE);
+	/* Clear BOTH flags. This was `&`, and since F_USRBUF (1<<4) and F_LINE
+	 * (1<<2) are distinct bits their AND is 0, so the mask was ~0 and the
+	 * statement cleared NOTHING: a stream could never be switched back out of
+	 * line buffering, and a buffer libphoenix had allocated could stay marked
+	 * F_USRBUF -- the caller's -- and so never be freed. */
+	stream->flags &= ~(F_USRBUF | F_LINE);
 
 	if (mode != _IONBF) {
 		if (buffer != NULL) {

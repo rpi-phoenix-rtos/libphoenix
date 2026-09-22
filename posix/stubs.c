@@ -25,6 +25,8 @@
 #include <sys/socket.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <sys/msg.h>
+#include <sys/file.h>
 #include <stdarg.h>
 #include <stdio.h>
 
@@ -166,6 +168,35 @@ int getrusage(int who, struct rusage *usage)
 
 void sync(void)
 {
+	/* Ask the filesystem serving "/" to flush.
+	 *
+	 * This was an empty stub, so nothing in the system could ever get data
+	 * onto storage: the SD/eMMC driver implements mtSync and calls
+	 * cache_flush(), but NOTHING in libphoenix ever sent that message. It
+	 * matters on the Pi 4, where the SD root IS "/" and therefore can never be
+	 * unmounted -- a power cut simply loses whatever libcache still holds.
+	 *
+	 * ⚠ Deliberately partial, and POSIX says "all file systems": this flushes
+	 * the ROOT filesystem only, because libphoenix has no userspace mount
+	 * table to walk. That is strictly better than doing nothing, and it covers
+	 * the case that matters. fsync()/fdatasync() remain absent -- those are
+	 * fd-based, and fd->oid lives in the kernel, so they need a syscall rather
+	 * than a libc change.
+	 *
+	 * Errors are swallowed because sync() returns void: a filesystem that does
+	 * not implement mtSync (nfs-fs, dummyfs) simply reports one. */
+	oid_t oid;
+
+	if (lookup("/", &oid, NULL) < 0) {
+		return;
+	}
+
+	msg_t msg = {
+		.type = mtSync,
+		.oid = oid
+	};
+
+	(void)msgSend(oid.port, &msg);
 }
 
 

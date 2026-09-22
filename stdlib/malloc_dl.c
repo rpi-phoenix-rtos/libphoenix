@@ -1612,6 +1612,47 @@ void free(void *ptr)
 			malloc_debugHex("malloc:   hfree = ", (uintptr_t)heap->freesz);
 			malloc_debugHex("malloc:   hend? = ",
 				(uintptr_t)malloc_isLiveHeapBase((const chunk_t *)((uintptr_t)heap + heap->size)));
+
+			/* Every code-5 event on record has the SAME shape: the low 32 bits of
+			 * heap->size are a legal size and only the high half is wrong --
+			 * 0x80000000_0000d000 and 0x80000001_0000d000, two different heaps in
+			 * one run (gate-stk, 2026-09-22). Mask the top half and the heap is
+			 * entirely self-consistent: legal size, chunk inside it, sane grid.
+			 *
+			 * So the question is no longer "is this heap corrupt" but "what wrote
+			 * FOUR BYTES at heap+4", and the two high words differ by one, which
+			 * reads like a refcount or lock word with a flag in the MSB rather
+			 * than a constant marker.
+			 *
+			 * These three fields decide it on the next occurrence:
+			 *   hlo32  -- the surviving low half, to confirm it is a legal size
+			 *   hhi32  -- the corrupting value itself, as the 32-bit word it
+			 *             probably was when it was written
+			 *   hfixed -- does the heap validate once the high half is cleared?
+			 *             1 = a single stray 4-byte write into a live, otherwise
+			 *             intact heap; 0 = something bigger is wrong and the
+			 *             single-write story is dead.
+			 * Costs nothing on a healthy run: this branch does not execute. */
+			malloc_debugHex("malloc:   hlo32 = ", (uintptr_t)(heap->size & 0xffffffffu));
+			malloc_debugHex("malloc:   hhi32 = ", (uintptr_t)(heap->size >> 32));
+			{
+				/* Apply malloc_heapSizeValid()'s own size tests to the REAL base
+				 * with the high half cleared. It cannot be reused directly on a
+				 * copy: it also tests that the address it is given is
+				 * page-aligned and inside [heapLo, heapHi), so a stack copy would
+				 * return 0 every time and this field would look like evidence
+				 * while being a constant. */
+				uintptr_t hbase = (uintptr_t)heap;
+				size_t lo = (size_t)(heap->size & 0xffffffffu);
+				int ok = (((hbase & (uintptr_t)(_PAGE_SIZE - 1)) == 0u)
+						&& (lo >= sizeof(heap_t))
+						&& ((lo & (size_t)(_PAGE_SIZE - 1)) == 0u)
+						&& ((hbase + lo) >= hbase)
+						&& ((malloc_common.heapHi == 0u) || ((hbase + lo) <= malloc_common.heapHi)))
+						? 1 : 0;
+
+				malloc_debugHex("malloc:   hfixed= ", (uintptr_t)ok);
+			}
 		}
 		mutexUnlock(malloc_common.mutex);
 		return;

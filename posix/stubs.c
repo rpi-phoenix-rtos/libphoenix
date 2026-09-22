@@ -179,9 +179,11 @@ void sync(void)
 	 * ⚠ Deliberately partial, and POSIX says "all file systems": this flushes
 	 * the ROOT filesystem only, because libphoenix has no userspace mount
 	 * table to walk. That is strictly better than doing nothing, and it covers
-	 * the case that matters. fsync()/fdatasync() remain absent -- those are
-	 * fd-based, and fd->oid lives in the kernel, so they need a syscall rather
-	 * than a libc change.
+	 * the case that matters.
+	 *
+	 * fsync() DOES exist (a syscall -- unistd/file.c WRAP_ERRNO_DEF, kernel
+	 * posix_fsync()), so use it when you have a descriptor. sync() is for the
+	 * case where you do not.
 	 *
 	 * Errors are swallowed because sync() returns void: a filesystem that does
 	 * not implement mtSync (nfs-fs, dummyfs) simply reports one. */

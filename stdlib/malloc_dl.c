@@ -347,6 +347,44 @@ static void malloc_debugHex(const char *label, uintptr_t v)
 }
 
 
+/* Report a heap's size the way C1 needs it read.
+ *
+ * Every field fire of that defect has the same shape: the LOW 32 bits of
+ * heap->size are a legal size and only the high half is wrong
+ * (0x80000000_0000d000 and 0x80000001_0000d000, two heaps in one run). Printing
+ * the raw 64-bit word alone makes every reader re-derive that, so split it here
+ * and say whether the heap would validate with the high half cleared:
+ *
+ *   hlo32  the surviving low half
+ *   hhi32  the corrupting value, as the 32-bit word it probably was when written
+ *   hfixed 1 = a single stray 4-byte write into an otherwise intact live heap,
+ *          0 = the single-write story does not hold for this one
+ *
+ * Used by every reporter that prints a heap size, so whichever guard fires
+ * first is decisive -- the corrupt-header path is not the only one that can.
+ *
+ * The hfixed test repeats malloc_heapSizeValid()'s size checks against the REAL
+ * base rather than calling it: that function also tests its argument for page
+ * alignment and window membership, so handing it a fixed-up copy would return 0
+ * every time and this field would look like evidence while being a constant. */
+static void malloc_reportHeapSize(const heap_t *heap)
+{
+	uintptr_t hbase = (uintptr_t)heap;
+	size_t lo = (size_t)(heap->size & 0xffffffffu);
+	int ok = (((hbase & (uintptr_t)(_PAGE_SIZE - 1)) == 0u)
+			&& (lo >= sizeof(heap_t))
+			&& ((lo & (size_t)(_PAGE_SIZE - 1)) == 0u)
+			&& ((hbase + lo) >= hbase)
+			&& ((malloc_common.heapHi == 0u) || ((hbase + lo) <= malloc_common.heapHi)))
+			? 1 : 0;
+
+	malloc_debugHex("malloc:   hsize = ", (uintptr_t)heap->size);
+	malloc_debugHex("malloc:   hlo32 = ", (uintptr_t)lo);
+	malloc_debugHex("malloc:   hhi32 = ", (uintptr_t)(heap->size >> 32));
+	malloc_debugHex("malloc:   hfixed= ", (uintptr_t)ok);
+}
+
+
 /* Reported once per process on purpose: a wild heap->size is a STATE, not an event.
  * Once a header carries one, every later walk over that heap would report again and
  * the flood would cost more than it tells (a previous instrument produced 163641
@@ -1029,7 +1067,7 @@ static void malloc_reportBadNeighbour(const char *where, chunk_t *it, chunk_t *s
 			&& ((malloc_common.heapHi == 0u)
 				|| (((uintptr_t)it->heap >= malloc_common.heapLo)
 					&& ((uintptr_t)it->heap < malloc_common.heapHi)))) {
-		malloc_debugHex("malloc:   heapsz   = ", (uintptr_t)it->heap->size);
+		malloc_reportHeapSize(it->heap);
 		malloc_debugHex("malloc:   heapEnd  = ", (uintptr_t)it->heap + it->heap->size);
 	}
 	else {
@@ -1231,7 +1269,7 @@ static inline void *_malloc_allocFrom(chunk_t *chunk, size_t size)
 		malloc_debugHex("malloc:   size  = ", (uintptr_t)(chunk->size));
 		malloc_debugHex("malloc:   want  = ", (uintptr_t)size);
 		malloc_debugHex("malloc:   heap  = ", (uintptr_t)chunk->heap);
-		malloc_debugHex("malloc:   hsize = ", (uintptr_t)chunk->heap->size);
+		malloc_reportHeapSize(chunk->heap);
 		malloc_debugHex("malloc:   hfree = ", (uintptr_t)chunk->heap->freesz);
 		malloc_debugHex("malloc:   heapLo= ", malloc_common.heapLo);
 		malloc_debugHex("malloc:   heapHi= ", malloc_common.heapHi);
@@ -1608,7 +1646,7 @@ void free(void *ptr)
 		 * Read hsize against the legal sizes in lookup[] (:1235): the four residue
 		 * heaps must all have been 0xd000, and 0x8000 is not a legal size at all. */
 		if (why >= 5) {
-			malloc_debugHex("malloc:   hsize = ", (uintptr_t)heap->size);
+			malloc_reportHeapSize(heap);
 			malloc_debugHex("malloc:   hfree = ", (uintptr_t)heap->freesz);
 			malloc_debugHex("malloc:   hend? = ",
 				(uintptr_t)malloc_isLiveHeapBase((const chunk_t *)((uintptr_t)heap + heap->size)));
@@ -1633,26 +1671,7 @@ void free(void *ptr)
 			 *             intact heap; 0 = something bigger is wrong and the
 			 *             single-write story is dead.
 			 * Costs nothing on a healthy run: this branch does not execute. */
-			malloc_debugHex("malloc:   hlo32 = ", (uintptr_t)(heap->size & 0xffffffffu));
-			malloc_debugHex("malloc:   hhi32 = ", (uintptr_t)(heap->size >> 32));
-			{
-				/* Apply malloc_heapSizeValid()'s own size tests to the REAL base
-				 * with the high half cleared. It cannot be reused directly on a
-				 * copy: it also tests that the address it is given is
-				 * page-aligned and inside [heapLo, heapHi), so a stack copy would
-				 * return 0 every time and this field would look like evidence
-				 * while being a constant. */
-				uintptr_t hbase = (uintptr_t)heap;
-				size_t lo = (size_t)(heap->size & 0xffffffffu);
-				int ok = (((hbase & (uintptr_t)(_PAGE_SIZE - 1)) == 0u)
-						&& (lo >= sizeof(heap_t))
-						&& ((lo & (size_t)(_PAGE_SIZE - 1)) == 0u)
-						&& ((hbase + lo) >= hbase)
-						&& ((malloc_common.heapHi == 0u) || ((hbase + lo) <= malloc_common.heapHi)))
-						? 1 : 0;
-
-				malloc_debugHex("malloc:   hfixed= ", (uintptr_t)ok);
-			}
+			malloc_reportHeapSize(heap);
 		}
 		mutexUnlock(malloc_common.mutex);
 		return;

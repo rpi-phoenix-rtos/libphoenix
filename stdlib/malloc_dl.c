@@ -617,8 +617,22 @@ static void _malloc_chunkAdd(chunk_t *chunk)
 		 * would be clobbered legitimately and report a false positive. Measured: it
 		 * fired 7 times in a clean libc run that passed 305 tests with 0 faults. */
 		if (chunksz >= 48u) {
-			*(size_t *)((uintptr_t)chunk + 32u) =
-				(size_t)(0x5ee7ee7dee7ee7d5ull ^ (unsigned long long)(uintptr_t)chunk);
+			/* TODO(C1-hunt): widened from ONE word to the whole free payload.
+			 * One word per free chunk is a tiny cross-section, and C1's stray write
+			 * has to be caught somewhere: this is the in-process counterpart to
+			 * tools/memtrip, which being a separate process can only ever see a
+			 * writer that reaches memory by physical address.
+			 *
+			 * [chunk+32, chunk+size-8) is ours for a small-bin chunk: `node` is
+			 * unused there, and the footer lives at size-8 (which is exactly why
+			 * the >= 48 floor exists -- at 40 bytes the footer IS offset 32). */
+			uintptr_t pw = (uintptr_t)chunk + 32u;
+			uintptr_t pend = (uintptr_t)chunk + chunksz - 8u;
+
+			while (pw < pend) {
+				*(size_t *)pw = (size_t)(0x5ee7ee7dee7ee7d5ull ^ (unsigned long long)pw);
+				pw += sizeof(size_t);
+			}
 		}
 		malloc_common.sbinmap |= (1 << idx);
 		return;
@@ -913,15 +927,34 @@ static int _malloc_chunkRemove(chunk_t *chunk)
 		 * _malloc_chunkAdd(). A mismatch PROVES a write into freed memory, which is
 		 * the last standing explanation for the corrupt bin entries. */
 		if (chunksz >= 48u) {
-			size_t want = (size_t)(0x5ee7ee7dee7ee7d5ull ^ (unsigned long long)(uintptr_t)chunk);
-			size_t got = *(size_t *)((uintptr_t)chunk + 32u);
+			/* TODO(C1-hunt): verify the whole poisoned payload, and report the FIRST
+			 * word that differs together with its offset -- the offset is the datum,
+			 * since a stray 4-byte store and a foreign structure look different. */
+			uintptr_t pw = (uintptr_t)chunk + 32u;
+			uintptr_t pend = (uintptr_t)chunk + chunksz - 8u;
+			size_t want = 0u;
+			size_t got = 0u;
+			uintptr_t bad = 0u;
 
-			if (got != want) {
+			while (pw < pend) {
+				want = (size_t)(0x5ee7ee7dee7ee7d5ull ^ (unsigned long long)pw);
+				got = *(size_t *)pw;
+				if (got != want) {
+					bad = pw;
+					break;
+				}
+				pw += sizeof(size_t);
+			}
+
+			if (bad != 0u) {
 				static int poisonReported = 0;
 				if (poisonReported == 0) {
 					poisonReported = 1;
 					debug("malloc: FREED BLOCK WAS WRITTEN TO while on a bin -- poison broken\n");
 					malloc_debugHex("malloc:   chunk = ", (uintptr_t)chunk);
+					malloc_debugHex("malloc:   at    = ", bad);
+					malloc_debugHex("malloc:   offs  = ", bad - (uintptr_t)chunk);
+					malloc_debugHex("malloc:   csize = ", (uintptr_t)chunksz);
 					malloc_debugHex("malloc:   want  = ", (uintptr_t)want);
 					malloc_debugHex("malloc:   got   = ", (uintptr_t)got);
 					malloc_debugHex("malloc:   next  = ", (uintptr_t)chunk->next);

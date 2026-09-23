@@ -685,9 +685,10 @@ static void malloc_c1P4Poison(chunk_t *chunk, size_t chunksz)
 	for (; (p + 8u) <= hi; p += (uintptr_t)_PAGE_SIZE) {
 		if ((p + 4u) >= lo) {
 			*(uint32_t *)(p + 4u) = malloc_c1P4Word(p);
-			if (((p + 8u) >= lo) && ((p + 12u) <= hi)) {
-				*(uint32_t *)(p + 8u) = malloc_c1PageCk(p, lo, hi);
-			}
+			/* TODO(C1-hunt): A/B ARM -- checksum store disabled. The only
+			 * instrument delta from the last firing run is this extra write at
+			 * page+8, and 23 valid runs have since produced no fire. Disabled to
+			 * test whether it suppresses the event; N = 8 declared in advance. */
 		}
 	}
 

@@ -566,6 +566,64 @@ static void malloc_chunkInit(chunk_t *chunk, heap_t *heap, size_t size)
 static int malloc_isLiveHeapBase(const chunk_t *chunk);
 
 
+/* TODO(C1-hunt): recent LARGE frees, so a page+4 break can name the block that
+ * was freed and is still being written.
+ *
+ * The page dump proved the class: a page inside a free chunk still held live
+ * vertex/material data (1.0f, 0.99999f, a white RGBA, an alpha byte) with
+ * 0x80000001 among it. What is left is to name the buffer, and the freeing call
+ * site is the direct route -- so remember where recent large blocks were freed
+ * from, and on a break print every logged block whose extent covers the page. */
+#define C1_FREELOG_N 256u   /* 6 KB; the break is detected when the chunk is REUSED, which can be many frees after the free itself, so keep the ring deep */
+
+static struct {
+	uintptr_t base;
+	size_t size;
+	uintptr_t caller;
+} c1FreeLog[C1_FREELOG_N];
+static unsigned int c1FreeLogIdx;
+
+
+static void malloc_c1FreeLog(uintptr_t base, size_t size, uintptr_t caller)
+{
+	unsigned int i;
+
+	/* Only blocks big enough to span a page boundary can contain a poisoned
+	 * page+4 word, so smaller ones would only crowd the ring out. */
+	if (size < (size_t)_PAGE_SIZE) {
+		return;
+	}
+
+	i = c1FreeLogIdx % C1_FREELOG_N;
+	c1FreeLog[i].base = base;
+	c1FreeLog[i].size = size;
+	c1FreeLog[i].caller = caller;
+	c1FreeLogIdx++;
+}
+
+
+static void malloc_c1FreeLogReport(uintptr_t addr)
+{
+	unsigned int i;
+	unsigned int hits = 0;
+
+	for (i = 0; (i < C1_FREELOG_N) && (hits < 3u); i++) {
+		if ((c1FreeLog[i].size != 0u) && (addr >= c1FreeLog[i].base)
+				&& (addr < (c1FreeLog[i].base + c1FreeLog[i].size))) {
+			hits++;
+			malloc_debugHex("malloc:   fbase = ", c1FreeLog[i].base);
+			malloc_debugHex("malloc:   fsize = ", (uintptr_t)c1FreeLog[i].size);
+			malloc_debugHex("malloc:   fcall = ", c1FreeLog[i].caller);
+			malloc_debugHex("malloc:   fcalx = ", ~c1FreeLog[i].caller);
+		}
+	}
+
+	if (hits == 0u) {
+		debug("malloc:   (no logged large free covers this page)\n");
+	}
+}
+
+
 /* TODO(C1-hunt): page+4 poison for LARGE free chunks.
  *
  * C1's write lands at PAGE + 4. Both observed victims -- a heap header and a
@@ -628,6 +686,7 @@ static void malloc_c1P4Verify(chunk_t *chunk, size_t chunksz)
 					malloc_debugHex("malloc:   p4csize= ", (uintptr_t)chunksz);
 					malloc_debugHex("malloc:   p4call = ", malloc_common.lastCaller);
 					malloc_debugHex("malloc:   p4calx = ", ~malloc_common.lastCaller);
+					malloc_c1FreeLogReport(p + 4u);
 
 					/* Whoever keeps writing here very likely writes more than one
 					 * field, so the page should still hold their live structure.
@@ -1957,6 +2016,8 @@ void free(void *ptr)
 		malloc_debugHex("malloc:   pfoot = ", (uintptr_t) * ((size_t *)chunk - 1));
 		_exit(EX_SOFTWARE);
 	}
+
+	malloc_c1FreeLog((uintptr_t)ptr, malloc_chunkSize(chunk), (uintptr_t)caller); /* TODO(C1-hunt) */
 
 	chunk->size &= ~CHUNK_CUSED;
 	malloc_chunkSetFooter(chunk);

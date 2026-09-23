@@ -1203,6 +1203,21 @@ static void malloc_c1Scan(void)
 			malloc_debugHex("malloc:   c1stick= ", (uintptr_t)malloc_common.scanTick);
 			malloc_debugHex("malloc:   c1scall= ", malloc_common.lastCaller);
 			malloc_debugHex("malloc:   c1scalx= ", ~malloc_common.lastCaller);
+
+			/* The branch point for the whole hunt: is heap+4 an ISOLATED 4-byte
+			 * store, or did something write a foreign structure over the header?
+			 * Every reading so far is consistent with the former -- low half of
+			 * ->size intact, ->freesz plausible -- but that was inferred from two
+			 * fields. Dump the first 64 bytes and settle it. If only w1 is wrong
+			 * the writer stores one 32-bit word at a page+4; if the tail carries
+			 * recognisable foreign data, it names the writer outright. */
+			{
+				unsigned int w;
+
+				for (w = 0; w < 8u; w++) {
+					malloc_debugHex("malloc:   c1sw= ", (uintptr_t)((const uint64_t *)base)[w]);
+				}
+			}
 			return;
 		}
 	}

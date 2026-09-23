@@ -628,6 +628,19 @@ static void malloc_c1P4Verify(chunk_t *chunk, size_t chunksz)
 					malloc_debugHex("malloc:   p4csize= ", (uintptr_t)chunksz);
 					malloc_debugHex("malloc:   p4call = ", malloc_common.lastCaller);
 					malloc_debugHex("malloc:   p4calx = ", ~malloc_common.lastCaller);
+
+					/* Whoever keeps writing here very likely writes more than one
+					 * field, so the page should still hold their live structure.
+					 * Dump its head: recognisable contents name the owner outright,
+					 * and an otherwise-pristine page says the write really is a
+					 * single isolated word. */
+					{
+						unsigned int w;
+
+						for (w = 0; w < 16u; w++) {
+							malloc_debugHex("malloc:   p4w= ", (uintptr_t)((const uint32_t *)p)[w]);
+						}
+					}
 				}
 				return;
 			}

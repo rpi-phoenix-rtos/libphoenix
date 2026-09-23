@@ -139,6 +139,12 @@ struct {
 	uintptr_t lastCaller;
 	unsigned int bigHeapReports;
 
+	/* TODO(C1-hunt): remove with the rest of the C1 instrument. Sweep state for
+	 * malloc_c1Scan() -- see it for why WHEN is worth more than WHO here. */
+	unsigned int scanTick;
+	unsigned int scanReports;
+	uintptr_t scanLastBase;
+
 	handle_t mutex;
 } malloc_common;
 
@@ -1152,6 +1158,57 @@ static void malloc_heapInit(heap_t *heap, size_t size)
 }
 
 
+/* TODO(C1-hunt): remove with the rest of the C1 instrument.
+ *
+ * Every C1 fire reads the SAME corrupt high half -- 0x80000001, 154 of 154
+ * readings in one run -- in the size field of a page-aligned heap, with the low
+ * half intact, on three heaps of different sizes scattered megabytes apart.
+ * Guessing the writer from that constant has now failed four times (libstdc++'s
+ * emergency pool, a Mesa gc_block_header, an allocator flag bit, a V3D PTE), so
+ * stop guessing WHO and bound WHEN: sweep the live heaps every C1_SCAN_EVERY
+ * allocator operations and report the first header that has gone bad.
+ *
+ * That is strictly more than the existing reports give. They fire whenever some
+ * later free() happens to validate a chunk in an already-broken heap -- 79 times
+ * in one run, all long after the fact. This bounds the corrupting write to the
+ * preceding C1_SCAN_EVERY operations and stamps it with a tick, so it can be
+ * placed against the run (startup? shader compile? mid-render?).
+ *
+ * live[] is cleared on release, so every non-zero entry is a heap we still have
+ * mapped and its header is safe to read. */
+#define C1_SCAN_EVERY 64u
+
+static void malloc_c1Scan(void)
+{
+	unsigned int i;
+
+	malloc_common.scanTick++;
+	if (((malloc_common.scanTick % C1_SCAN_EVERY) != 0u) || (malloc_common.scanReports >= 4u)) {
+		return;
+	}
+
+	for (i = 0; i < 256u; i++) {
+		uintptr_t base = malloc_common.live[i];
+
+		if ((base == 0u) || (base == malloc_common.scanLastBase)) {
+			continue; /* already reported: spend the four slots on distinct heaps */
+		}
+
+		if ((((const heap_t *)base)->size >> 32) != 0u) {
+			malloc_common.scanReports++;
+			malloc_common.scanLastBase = base;
+			debug("malloc: C1-hunt: a live heap header has gone bad\n");
+			malloc_debugHex("malloc:   c1sbase= ", base);
+			malloc_debugHex("malloc:   c1ssize= ", (uintptr_t)((const heap_t *)base)->size);
+			malloc_debugHex("malloc:   c1stick= ", (uintptr_t)malloc_common.scanTick);
+			malloc_debugHex("malloc:   c1scall= ", malloc_common.lastCaller);
+			malloc_debugHex("malloc:   c1scalx= ", ~malloc_common.lastCaller);
+			return;
+		}
+	}
+}
+
+
 static heap_t *_malloc_heapAlloc(size_t size)
 {
 	chunk_t *chunk;
@@ -1552,6 +1609,7 @@ void *malloc(size_t size)
 	malloc_common.lastCaller = (uintptr_t)__builtin_return_address(0);
 
 	mutexLock(malloc_common.mutex);
+	malloc_c1Scan(); /* TODO(C1-hunt) */
 	if (size <= CHUNK_SMALLBIN_MAX_SIZE) {
 		ptr = _malloc_allocSmall(size);
 	}

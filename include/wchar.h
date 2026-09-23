@@ -17,6 +17,7 @@
 #define _LIBPHOENIX_WCHAR_H_
 
 
+#include <stdarg.h>
 #include <stddef.h>
 
 
@@ -97,6 +98,12 @@ extern wchar_t *wmemchr(const wchar_t *s, wchar_t c, size_t n);
 
 
 extern wchar_t *wcsdup(const wchar_t *s);
+
+
+extern int swprintf(wchar_t *__restrict ws, size_t n, const wchar_t *__restrict format, ...);
+
+
+extern int vswprintf(wchar_t *__restrict ws, size_t n, const wchar_t *__restrict format, va_list arg);
 
 
 extern wchar_t *wcspbrk(const wchar_t *s, const wchar_t *set);

@@ -127,6 +127,18 @@ struct {
 	uintptr_t heapLo;
 	uintptr_t heapHi;
 
+	/* TODO(C1-hunt): remove with the rest of the C1 instrument once the stray
+	 * write is named. Every archived C1 fire smashes a heap whose size is
+	 * 0xd000, while the ordinary heap here is 0x2000 -- so the victim is always
+	 * whatever single large request created that heap, and naming the request
+	 * names the code that owns the memory on either side of the smashed header.
+	 * lastCaller is set by malloc() alone, from __builtin_return_address(0),
+	 * which is the only level this build can trust (-fomit-frame-pointer). An
+	 * allocation arriving through calloc()/realloc() therefore names THEM, not
+	 * the application -- which is still a useful answer, just read it as one. */
+	uintptr_t lastCaller;
+	unsigned int bigHeapReports;
+
 	handle_t mutex;
 } malloc_common;
 
@@ -1227,6 +1239,17 @@ static heap_t *_malloc_heapAlloc(size_t size)
 
 	chunk = (chunk_t*) heap->space;
 
+	/* TODO(C1-hunt): temporary, bounded to 16 reports. Only 0xd000 -- the size
+	 * every archived fire's victim heap has -- so this stays silent on the many
+	 * other large heaps STK creates rather than burying the log. */
+	if ((heapSize == 0xd000u) && (malloc_common.bigHeapReports < 16u)) {
+		++malloc_common.bigHeapReports;
+		debug("malloc: C1-hunt: created a 0xd000 heap\n");
+		malloc_debugHex("malloc:   c1base = ", (uintptr_t)heap);
+		malloc_debugHex("malloc:   c1req  = ", (uintptr_t)size);
+		malloc_debugHex("malloc:   c1call = ", malloc_common.lastCaller);
+	}
+
 	malloc_heapInit(heap, heapSize);
 	malloc_chunkInit(chunk, heap, FLOOR(heap->size - sizeof(heap_t), 8));
 	chunk->size |= CHUNK_PUSED;
@@ -1524,6 +1547,9 @@ void *malloc(size_t size)
 	}
 
 	size = CEIL(max(size + CHUNK_OVERHEAD, CHUNK_MIN_SIZE), 8);
+
+	/* TODO(C1-hunt): see malloc_common.lastCaller. */
+	malloc_common.lastCaller = (uintptr_t)__builtin_return_address(0);
 
 	mutexLock(malloc_common.mutex);
 	if (size <= CHUNK_SMALLBIN_MAX_SIZE) {

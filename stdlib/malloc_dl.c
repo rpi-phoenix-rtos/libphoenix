@@ -648,6 +648,34 @@ static uint32_t malloc_c1P4Word(uintptr_t p)
 }
 
 
+/* TODO(C1-hunt): a checksum over the head of each poisoned page.
+ *
+ * The open question is whether the vertex-shaped data around the corrupted word
+ * is LIVE or merely stale contents of a previously-freed block. Poisoning the
+ * whole body answered it in principle but appeared to suppress the event -- it
+ * bulk-wrote the very pages the corruption lands in, on every free. This is the
+ * cheap version: 13 reads and ONE extra word written per page, so the pages are
+ * barely disturbed, and a mismatch still proves the page head changed while the
+ * chunk was free.
+ *
+ * Words 3..15 only: word 0 may be a chunk's own size field, whose flag bits
+ * legitimately change; word 1 is the page+4 poison; word 2 holds this checksum. */
+static uint32_t malloc_c1PageCk(uintptr_t p, uintptr_t lo, uintptr_t hi)
+{
+	uint32_t ck = 0x9e3779b9u;
+	uintptr_t q;
+
+	for (q = p + 12u; (q + 4u) <= (p + 64u); q += 4u) {
+		if ((q >= lo) && ((q + 4u) <= hi)) {
+			ck ^= *(uint32_t *)q;
+			ck = (ck << 1) | (ck >> 31);
+		}
+	}
+
+	return ck;
+}
+
+
 static void malloc_c1P4Poison(chunk_t *chunk, size_t chunksz)
 {
 	uintptr_t lo = (uintptr_t)chunk + sizeof(chunk_t);
@@ -657,6 +685,9 @@ static void malloc_c1P4Poison(chunk_t *chunk, size_t chunksz)
 	for (; (p + 8u) <= hi; p += (uintptr_t)_PAGE_SIZE) {
 		if ((p + 4u) >= lo) {
 			*(uint32_t *)(p + 4u) = malloc_c1P4Word(p);
+			if (((p + 8u) >= lo) && ((p + 12u) <= hi)) {
+				*(uint32_t *)(p + 8u) = malloc_c1PageCk(p, lo, hi);
+			}
 		}
 	}
 
@@ -688,6 +719,20 @@ static void malloc_c1P4Verify(chunk_t *chunk, size_t chunksz)
 					malloc_debugHex("malloc:   p4call = ", malloc_common.lastCaller);
 					malloc_debugHex("malloc:   p4calx = ", ~malloc_common.lastCaller);
 					malloc_c1FreeLogReport(p + 4u);
+
+					/* Did anything ELSE in this page head change while the chunk was
+					 * free? p4ckOK=1 means only page+4 moved -- an isolated stray
+					 * store into otherwise stale memory. p4ckOK=0 means the page was
+					 * still being written, i.e. a live buffer the allocator believes
+					 * is free. That is the live-vs-stale answer. */
+					if (((p + 8u) >= lo) && ((p + 12u) <= hi)) {
+						uint32_t ckNow = malloc_c1PageCk(p, lo, hi);
+						uint32_t ckThen = *(uint32_t *)(p + 8u);
+
+						malloc_debugHex("malloc:   p4ckOK = ", (uintptr_t)((ckNow == ckThen) ? 1u : 0u));
+						malloc_debugHex("malloc:   p4ckNow= ", (uintptr_t)ckNow);
+						malloc_debugHex("malloc:   p4ckThn= ", (uintptr_t)ckThen);
+					}
 
 
 					/* Whoever keeps writing here very likely writes more than one

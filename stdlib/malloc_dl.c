@@ -1625,6 +1625,15 @@ void free(void *ptr)
 	if (why != 0) {
 		debug("malloc: free() of a corrupt chunk header -- leaking the block\n");
 		malloc_debugHex("malloc:   caller= ", (uintptr_t)caller);
+		/* ...and its complement, so the reader can tell a real address from a
+		 * mangled one. The UART capture corrupts characters under load -- 4 of 202
+		 * hex literals in one 2026-09-23 log were visibly malformed, and a digit
+		 * swapped for another DIGIT leaves no trace at all. This field has twice
+		 * resolved to an address with no call before it and twice nearly produced a
+		 * false attribution; one of those was a single hex digit away from a real
+		 * return site. caller ^ callerx must be all ones -- if it is not, the log
+		 * is damaged and the address must be thrown away, not symbolized. */
+		malloc_debugHex("malloc:   callerx= ", ~(uintptr_t)caller);
 		/* Which test rejected it -- see malloc_chunkValidWhy(). 2 = the block is in
 		 * a RELEASED heap (use-after-free of a whole heap), 7 = a smashed size in a
 		 * live one; those two want completely different hunts. */
@@ -1718,6 +1727,15 @@ void free(void *ptr)
 		 * first question to ask. */
 		debug("malloc: double free() -- block already on the free list\n");
 		malloc_debugHex("malloc:   caller= ", (uintptr_t)caller);
+		/* ...and its complement, so the reader can tell a real address from a
+		 * mangled one. The UART capture corrupts characters under load -- 4 of 202
+		 * hex literals in one 2026-09-23 log were visibly malformed, and a digit
+		 * swapped for another DIGIT leaves no trace at all. This field has twice
+		 * resolved to an address with no call before it and twice nearly produced a
+		 * false attribution; one of those was a single hex digit away from a real
+		 * return site. caller ^ callerx must be all ones -- if it is not, the log
+		 * is damaged and the address must be thrown away, not symbolized. */
+		malloc_debugHex("malloc:   callerx= ", ~(uintptr_t)caller);
 		malloc_debugHex("malloc:   ptr   = ", (uintptr_t)ptr);
 		malloc_debugHex("malloc:   size  = ", (uintptr_t)(chunk->size));
 		malloc_debugHex("malloc:   heap  = ", (uintptr_t)heap);

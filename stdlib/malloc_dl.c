@@ -566,6 +566,76 @@ static void malloc_chunkInit(chunk_t *chunk, heap_t *heap, size_t size)
 static int malloc_isLiveHeapBase(const chunk_t *chunk);
 
 
+/* TODO(C1-hunt): page+4 poison for LARGE free chunks.
+ *
+ * C1's write lands at PAGE + 4. Both observed victims -- a heap header and a
+ * page-aligned chunk header -- carry `size` at offset 0, so the corrupted word is
+ * its high half at +4. tools/memtrip covers page+4 across 64 MiB of anonymous
+ * pages and has never seen it, so the writer is not scattering at random: it hits
+ * pages the system already knows about. These are those pages.
+ *
+ * One 32-bit word per 4 KiB, so the cost is negligible even for a 50 KiB chunk,
+ * and the coverage is exactly the offset the defect uses. Large chunks only -- a
+ * small-bin chunk is <= 240 bytes and rarely spans a page boundary at all.
+ *
+ * [chunk + sizeof(chunk_t), chunk + size - 8) is ours for a large chunk:
+ * size/heap/next/prev/node all live inside the first sizeof(chunk_t), and the
+ * footer is at size-8. ⚠ A page-aligned chunk's OWN +4 is the live size field and
+ * is deliberately NOT poisoned -- malloc_chunkValidWhy() already judges that. */
+#define C1_P4_MAGIC 0x7e57ed00u
+
+static uint32_t malloc_c1P4Word(uintptr_t p)
+{
+	return C1_P4_MAGIC ^ (uint32_t)(p >> 12);
+}
+
+
+static void malloc_c1P4Poison(chunk_t *chunk, size_t chunksz)
+{
+	uintptr_t lo = (uintptr_t)chunk + sizeof(chunk_t);
+	uintptr_t hi = (uintptr_t)chunk + chunksz - 8u;
+	uintptr_t p = ((uintptr_t)chunk + (uintptr_t)_PAGE_SIZE - 1u) & ~((uintptr_t)_PAGE_SIZE - 1u);
+
+	for (; (p + 8u) <= hi; p += (uintptr_t)_PAGE_SIZE) {
+		if ((p + 4u) >= lo) {
+			*(uint32_t *)(p + 4u) = malloc_c1P4Word(p);
+		}
+	}
+}
+
+
+static void malloc_c1P4Verify(chunk_t *chunk, size_t chunksz)
+{
+	uintptr_t lo = (uintptr_t)chunk + sizeof(chunk_t);
+	uintptr_t hi = (uintptr_t)chunk + chunksz - 8u;
+	uintptr_t p = ((uintptr_t)chunk + (uintptr_t)_PAGE_SIZE - 1u) & ~((uintptr_t)_PAGE_SIZE - 1u);
+
+	for (; (p + 8u) <= hi; p += (uintptr_t)_PAGE_SIZE) {
+		if ((p + 4u) >= lo) {
+			uint32_t want = malloc_c1P4Word(p);
+			uint32_t got = *(uint32_t *)(p + 4u);
+
+			if (got != want) {
+				static int p4Reported = 0;
+
+				if (p4Reported < 4) {
+					p4Reported++;
+					debug("malloc: C1-hunt: PAGE+4 POISON BROKEN in a free chunk\n");
+					malloc_debugHex("malloc:   p4page = ", p);
+					malloc_debugHex("malloc:   p4want = ", (uintptr_t)want);
+					malloc_debugHex("malloc:   p4got  = ", (uintptr_t)got);
+					malloc_debugHex("malloc:   p4chunk= ", (uintptr_t)chunk);
+					malloc_debugHex("malloc:   p4csize= ", (uintptr_t)chunksz);
+					malloc_debugHex("malloc:   p4call = ", malloc_common.lastCaller);
+					malloc_debugHex("malloc:   p4calx = ", ~malloc_common.lastCaller);
+				}
+				return;
+			}
+		}
+	}
+}
+
+
 static void _malloc_chunkAdd(chunk_t *chunk)
 {
 	/* Catch a HEAP BASE being put into a free bin -- the first cause we have not
@@ -637,6 +707,8 @@ static void _malloc_chunkAdd(chunk_t *chunk)
 		malloc_common.sbinmap |= (1 << idx);
 		return;
 	}
+
+	malloc_c1P4Poison(chunk, chunksz); /* TODO(C1-hunt) */
 
 	idx = malloc_getlidx(chunksz);
 	exist = lib_treeof(chunk_t, node, lib_rbInsert(&malloc_common.lbins[idx], &chunk->node));
@@ -969,6 +1041,8 @@ static int _malloc_chunkRemove(chunk_t *chunk)
 
 		return 1;
 	}
+
+	malloc_c1P4Verify(chunk, chunksz); /* TODO(C1-hunt) */
 
 	idx = malloc_getlidx(chunksz);
 	LIST_REMOVE(&next, chunk);

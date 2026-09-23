@@ -660,7 +660,14 @@ static void malloc_c1P4Poison(chunk_t *chunk, size_t chunksz)
 		}
 	}
 
-	{
+	/* ⚠ Size-gated, and the gate is not cosmetic. This lives in libphoenix, so it
+	 * costs EVERY process -- and an unrestricted version memset the whole body on
+	 * every large free, which slowed the lwip daemon enough that its DHCP could no
+	 * longer complete inside nfs-fs's 30 s window. Seven netboot runs came up on
+	 * the RAM root with no /bin at all before I noticed. The victim chunk has been
+	 * 0x4ff0 in every fire, so poison only that size class: lwip's buffers fall
+	 * outside it and pay nothing. */
+	if ((chunksz >= 0x4000u) && (chunksz <= 0x6000u)) {
 		uintptr_t q;
 
 		for (q = lo; (q + 4u) <= hi; q += 4u) {
@@ -710,7 +717,8 @@ static void malloc_c1P4Verify(chunk_t *chunk, size_t chunksz)
 						unsigned int broken = 0u;
 						unsigned int total = 0u;
 
-						for (q = lo; (q + 4u) <= hi; q += 4u) {
+						for (q = ((chunksz >= 0x4000u) && (chunksz <= 0x6000u)) ? lo : hi;
+								(q + 4u) <= hi; q += 4u) {
 							if ((q & ((uintptr_t)_PAGE_SIZE - 1u)) != 4u) {
 								total++;
 								if (*(uint32_t *)q != (malloc_c1P4Word(q) ^ 0x5a5a5a5au)) {

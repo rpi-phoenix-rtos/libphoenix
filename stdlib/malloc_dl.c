@@ -659,6 +659,16 @@ static void malloc_c1P4Poison(chunk_t *chunk, size_t chunksz)
 			*(uint32_t *)(p + 4u) = malloc_c1P4Word(p);
 		}
 	}
+
+	{
+		uintptr_t q;
+
+		for (q = lo; (q + 4u) <= hi; q += 4u) {
+			if ((q & ((uintptr_t)_PAGE_SIZE - 1u)) != 4u) {
+				*(uint32_t *)q = malloc_c1P4Word(q) ^ 0x5a5a5a5au;
+			}
+		}
+	}
 }
 
 
@@ -687,6 +697,30 @@ static void malloc_c1P4Verify(chunk_t *chunk, size_t chunksz)
 					malloc_debugHex("malloc:   p4call = ", malloc_common.lastCaller);
 					malloc_debugHex("malloc:   p4calx = ", ~malloc_common.lastCaller);
 					malloc_c1FreeLogReport(p + 4u);
+
+					/* THE measurement that separates an isolated stray store from a
+					 * writer still using this buffer. page+4 alone cannot: it is the
+					 * only word poisoned, and a report only happens when it differs,
+					 * so "page+4 is always the corrupted one" is selection bias, not
+					 * evidence. Poisoning the whole body and counting makes it real --
+					 * 1 broken word means one stray store, many mean somebody is
+					 * still writing the block. */
+					{
+						uintptr_t q;
+						unsigned int broken = 0u;
+						unsigned int total = 0u;
+
+						for (q = lo; (q + 4u) <= hi; q += 4u) {
+							if ((q & ((uintptr_t)_PAGE_SIZE - 1u)) != 4u) {
+								total++;
+								if (*(uint32_t *)q != (malloc_c1P4Word(q) ^ 0x5a5a5a5au)) {
+									broken++;
+								}
+							}
+						}
+						malloc_debugHex("malloc:   p4bodyN= ", (uintptr_t)total);
+						malloc_debugHex("malloc:   p4bodyB= ", (uintptr_t)broken);
+					}
 
 					/* Whoever keeps writing here very likely writes more than one
 					 * field, so the page should still hold their live structure.

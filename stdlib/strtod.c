@@ -342,6 +342,19 @@ static const char *floatparse_number(const char *str, bool hex, uint8_t type, ch
 	int32_t exp_max;
 	int32_t exp_min;
 
+	/* The exp_min guards below reject a number as underflow BEFORE scaling, by
+	 * looking at the exponent alone. They allow for the mantissa's own digits
+	 * (a longer mantissa carries a more negative exponent for the same value)
+	 * but NOT for the subnormal range, which reaches well below *_MIN_10_EXP --
+	 * the exponent of the smallest NORMAL value. So a subnormal written with
+	 * enough significant digits was flushed to zero even though it is exactly
+	 * representable: strtod("4.94e-324") was correct while
+	 * strtod("4.9407e-324") returned 0.0, and the 17-digit form produced by
+	 * "%.17g" -- i.e. anything round-tripped through printf -- always did.
+	 * The hex branches already subtract the mantissa width for this reason;
+	 * the decimal ones now do too. Being over-generous here is harmless: a
+	 * value that really is too small still scales to zero and reports ERANGE
+	 * below, it just costs one multiply to find out. */
 	switch (type) {
 		case TYPE_ID_FLT:
 			if (hex) {
@@ -349,7 +362,7 @@ static const char *floatparse_number(const char *str, bool hex, uint8_t type, ch
 				exp_max = FLT_MAX_EXP + 64;
 			}
 			else {
-				exp_min = FLT_MIN_10_EXP - UINT64_MAX_DEC_DIGITS;
+				exp_min = FLT_MIN_10_EXP - UINT64_MAX_DEC_DIGITS - FLT_MANT_DIG;
 				exp_max = FLT_MAX_10_EXP + UINT64_MAX_DEC_DIGITS;
 			}
 			break;
@@ -360,7 +373,7 @@ static const char *floatparse_number(const char *str, bool hex, uint8_t type, ch
 				exp_max = DBL_MAX_EXP + 64;
 			}
 			else {
-				exp_min = DBL_MIN_10_EXP - UINT64_MAX_DEC_DIGITS;
+				exp_min = DBL_MIN_10_EXP - UINT64_MAX_DEC_DIGITS - DBL_MANT_DIG;
 				exp_max = DBL_MAX_10_EXP + UINT64_MAX_DEC_DIGITS;
 			}
 			break;
@@ -371,7 +384,7 @@ static const char *floatparse_number(const char *str, bool hex, uint8_t type, ch
 				exp_max = LDBL_MAX_EXP + LDBL_MANT_DIG;
 			}
 			else {
-				exp_min = LDBL_MIN_10_EXP - LDBL_MANT_10_DIG;
+				exp_min = LDBL_MIN_10_EXP - LDBL_MANT_10_DIG - LDBL_MANT_DIG;
 				exp_max = LDBL_MAX_10_EXP + LDBL_MANT_10_DIG;
 			}
 			break;

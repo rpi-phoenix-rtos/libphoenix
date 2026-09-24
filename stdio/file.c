@@ -1362,6 +1362,7 @@ int setvbuf(FILE *stream, char *buffer, int mode, size_t size)
 	char *old_buf;
 	size_t old_siz;
 	int old_flags;
+	int reuse;
 
 	/* C17 7.21.5.6: with a null `buf` the implementation provides the buffer and
 	 * `size` is only a hint, so a request of 0 must not fail -- it did, because
@@ -1378,6 +1379,22 @@ int setvbuf(FILE *stream, char *buffer, int mode, size_t size)
 	old_flags = stream->flags;
 	old_siz = stream->bufsz;
 
+	/* A request for the size the stream already has can keep the existing
+	 * buffer. This used to be `else if (old_siz != size)` with no matching
+	 * `else`, so the equal-size case fell through with `stream->buffer` already
+	 * cleared below: the stream was left with a non-zero `bufsz` but NO buffer,
+	 * which `fwrite_unlocked` reads as "unbuffered" and turns into one write()
+	 * syscall per call -- per *character* for `putchar`. setlinebuf() is exactly
+	 * this case (size 0 becomes BUFSIZ above, which always equals the default),
+	 * so every user of the common `setvbuf(stdout, NULL, _IOLBF, BUFSIZ)` idiom
+	 * silently lost buffering: bash spent 12.5 ms of ext2 appending write per
+	 * byte of `echo` output. A caller-owned buffer is never reused -- the caller
+	 * passed NULL asking us to provide one, and it stays theirs to free. */
+	reuse = ((mode != _IONBF) && (buffer == NULL) && (old_buf != NULL) &&
+					(old_siz == size) && ((old_flags & F_USRBUF) == 0)) ?
+			1 :
+			0;
+
 	stream->buffer = NULL;
 	stream->bufsz = size;
 	/* Clear BOTH flags. This was `&`, and since F_USRBUF (1<<4) and F_LINE
@@ -1392,7 +1409,10 @@ int setvbuf(FILE *stream, char *buffer, int mode, size_t size)
 			stream->buffer = buffer;
 			stream->flags |= F_USRBUF;
 		}
-		else if (old_siz != size) {
+		else if (reuse != 0) {
+			stream->buffer = old_buf;
+		}
+		else {
 			stream->buffer = buffAlloc(size);
 			if (stream->buffer == NULL) {
 				stream->buffer = old_buf;
@@ -1408,8 +1428,18 @@ int setvbuf(FILE *stream, char *buffer, int mode, size_t size)
 		}
 	}
 
-	if (!(old_flags & F_USRBUF) && old_siz != size) {
+	/* Free the old buffer whenever it was ours and we did not keep it. The
+	 * guard was `old_siz != size`, which leaked it in every equal-size case
+	 * that did not reuse it -- setbuf(stream, NULL) on a default stream. */
+	if ((reuse == 0) && ((old_flags & F_USRBUF) == 0) && (old_buf != NULL)) {
 		buffFree(old_buf, old_siz);
+	}
+
+	/* Buffered content belongs to the buffer that held it; a replacement
+	 * buffer starts empty, so stale offsets into it must not survive. */
+	if (reuse == 0) {
+		stream->bufpos = 0;
+		stream->bufeof = 0;
 	}
 
 	mutexUnlock(stream->lock);

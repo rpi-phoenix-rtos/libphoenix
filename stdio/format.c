@@ -22,6 +22,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <errno.h>
+#include <wchar.h>
 
 
 #define FLAG_SIGNED                    0x1
@@ -42,6 +43,7 @@
 #define FLAG_8BIT                      0x8000
 #define FLAG_16BIT                     0x10000
 #define FLAG_LONG_DOUBLE               0x20000
+#define FLAG_WIDE                      0x40000   /* %ls / %lc / %S / %C: the argument is wide */
 
 #define GET_UNSIGNED(number, flags, args) \
 	do { \
@@ -88,6 +90,80 @@
 
 static const char smallDigits[] = "0123456789abcdef";
 static const char largeDigits[] = "0123456789ABCDEF";
+
+
+
+/* Emit a wide string as multibyte, honouring field width and precision.
+ *
+ * Two passes, because the padding has to be known before the first byte goes
+ * out and a wide string cannot be staged in one contiguous buffer the way
+ * format_printBuffer() requires.
+ *
+ * Precision is a count of BYTES of converted output, and a partial multibyte
+ * character must never be emitted (C17 7.21.6.1 p8), so pass 1 stops at the
+ * last character that fits whole.
+ *
+ * An encoding error (a wchar_t the current locale cannot represent -- in the
+ * C locale anything above 0xff) is reported as -1 rather than silently
+ * truncated: printf's contract is that a conversion error fails the call.
+ */
+static int format_printWide(void *ctx, feedfunc feed, uint32_t flags, int minFieldWidth,
+	const wchar_t *ws, int precision)
+{
+	char mb[MB_LEN_MAX];
+	mbstate_t st;
+	size_t n;
+	int ret = 0;
+	int bytes = 0;
+	int pad;
+	size_t i;
+
+	/* pass 1: how many bytes will this produce? */
+	(void)memset(&st, 0, sizeof(st));
+	for (i = 0; ws[i] != L'\0'; i++) {
+		n = wcrtomb(mb, ws[i], &st);
+		if (n == (size_t)-1) {
+			return -1;
+		}
+		if ((precision >= 0) && ((bytes + (int)n) > precision)) {
+			break;
+		}
+		bytes += (int)n;
+	}
+
+	pad = minFieldWidth - bytes;
+
+	if ((pad > 0) && ((flags & FLAG_MINUS) == 0)) {
+		while (pad-- > 0) {
+			CHECK_FAIL(ret, feed(ctx, ' '));
+		}
+	}
+
+	/* pass 2: convert again and emit exactly `bytes` of it. FLAG_ZERO is not
+	 * applied: zero padding is undefined for %s-family conversions. */
+	(void)memset(&st, 0, sizeof(st));
+	for (i = 0; (ws[i] != L'\0') && (bytes > 0); i++) {
+		size_t k;
+
+		n = wcrtomb(mb, ws[i], &st);
+		if (n == (size_t)-1) {
+			return -1;
+		}
+		if ((int)n > bytes) {
+			break;
+		}
+		for (k = 0; k < n; k++) {
+			CHECK_FAIL(ret, feed(ctx, mb[k]));
+		}
+		bytes -= (int)n;
+	}
+
+	while (pad-- > 0) {
+		CHECK_FAIL(ret, feed(ctx, ' '));
+	}
+
+	return ret;
+}
 
 
 static int format_printBuffer(void *ctx, feedfunc feed, uint32_t flags, int minFieldWidth, const char *start, const char *end, char sign)
@@ -1062,6 +1138,9 @@ int format_parse(void *ctx, feedfunc feed, const char *format, va_list args)
 			if (sizeof(long int) == sizeof(int64_t)) {
 				flags |= FLAG_64BIT;
 			}
+			/* `l` also selects the WIDE form of %s and %c. Harmless on the integer
+			 * conversions, which never look at this flag. */
+			flags |= FLAG_WIDE;
 
 			if (fmt == 'l') {
 				flags |= FLAG_64BIT;
@@ -1094,8 +1173,26 @@ int format_parse(void *ctx, feedfunc feed, const char *format, va_list args)
 		/* conversion specifiers */
 		number = 0;
 		switch (fmt) {
+			case 'S':
+				/* The legacy spelling of %ls (SUSv2, still emitted by a lot of
+				 * code); XSI marks it obsolescent but every libc still takes it. */
+				flags |= FLAG_WIDE;
+				/* fall through */
 			case 's':
 				flags &= ~(FLAG_ZERO | FLAG_ALTERNATE | FLAG_PLUS | FLAG_SPACE);
+				if ((flags & FLAG_WIDE) != 0) {
+					const wchar_t *ws = va_arg(args, wchar_t *);
+
+					if (ws == NULL) {
+						/* Match the narrow path's "(null)" rather than faulting. */
+						s = "(null)";
+						length = (precision >= 0) ? ((precision < 6) ? precision : 6) : 6;
+						CHECK_FAIL(ret, format_printBuffer(ctx, feed, flags, minFieldWidth, s, s + length, 0));
+						break;
+					}
+					CHECK_FAIL(ret, format_printWide(ctx, feed, flags, minFieldWidth, ws, precision));
+					break;
+				}
 				s = va_arg(args, char *);
 				if (s == NULL) {
 					s = "(null)";
@@ -1116,7 +1213,22 @@ int format_parse(void *ctx, feedfunc feed, const char *format, va_list args)
 
 				CHECK_FAIL(ret, format_printBuffer(ctx, feed, flags, minFieldWidth, s, s + length, 0));
 				break;
+			case 'C':
+				/* Legacy spelling of %lc, as %S is of %ls. */
+				flags |= FLAG_WIDE;
+				/* fall through */
 			case 'c':
+				if ((flags & FLAG_WIDE) != 0) {
+					/* A wide character is promoted to wint_t, and is emitted as the
+					 * multibyte sequence for that one character -- so reuse the
+					 * string path with a two-element array. */
+					wchar_t wc[2];
+
+					wc[0] = (wchar_t)va_arg(args, wint_t);
+					wc[1] = L'\0';
+					CHECK_FAIL(ret, format_printWide(ctx, feed, flags, minFieldWidth, wc, -1));
+					break;
+				}
 				c = (char)va_arg(args, int);
 				CHECK_FAIL(ret, format_printBuffer(ctx, feed, flags, minFieldWidth, &c, &c + 1, 0));
 				break;

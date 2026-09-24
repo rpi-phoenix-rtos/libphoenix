@@ -658,9 +658,30 @@ extern int v3d_c1_lookup_page(unsigned long page, unsigned int *handle, unsigned
 #endif /* V3D_C1_HUNT */
 
 
-static uint32_t malloc_c1P4Word(uintptr_t p)
+/* Probe offsets within each poisoned page.
+ *
+ * ⛔ THE REASON THIS IS NO LONGER A SINGLE OFFSET. Until now exactly ONE word per
+ * 4 KiB page was poisoned, at +4 -- so the instrument was blind to 1023/1024 of
+ * every page, and "the corruption always lands at page+4" was unfalsifiable: +4 is
+ * simply where we looked. That unexamined premise is what made a device writing a
+ * FIXED offset look compelling, and it is the argument that ruled out genet, xHCI
+ * and the SD ADMA2 descriptors on the grounds that "their writes vary in offset" --
+ * a property we had no way to observe.
+ *
+ * Three of the four probes are deliberately NOT at page+4, so the question becomes
+ * answerable: if only the +4 probe ever fires, the writer really is offset-specific;
+ * if all four fire at comparable rates, the writer scribbles broadly and the whole
+ * fixed-offset framing (and the exclusions built on it) is wrong. */
+#define C1_P4_NPROBE 4u
+
+static const uint32_t c1P4Off[C1_P4_NPROBE] = { 4u, 0x404u, 0x804u, 0xc04u };
+
+
+/* Keyed on the PROBE address, not the page, so the four probes in a page hold
+ * different values and a block copy cannot alias one onto another. */
+static uint32_t malloc_c1P4Word(uintptr_t q)
 {
-	return C1_P4_MAGIC ^ (uint32_t)(p >> 12);
+	return C1_P4_MAGIC ^ (uint32_t)(q >> 2);
 }
 
 
@@ -699,13 +720,18 @@ static void malloc_c1P4Poison(chunk_t *chunk, size_t chunksz)
 	uintptr_t p = ((uintptr_t)chunk + (uintptr_t)_PAGE_SIZE - 1u) & ~((uintptr_t)_PAGE_SIZE - 1u);
 
 	for (; (p + 8u) <= hi; p += (uintptr_t)_PAGE_SIZE) {
-		if ((p + 4u) >= lo) {
-			*(uint32_t *)(p + 4u) = malloc_c1P4Word(p);
-			/* TODO(C1-hunt): A/B ARM -- checksum store disabled. The only
-			 * instrument delta from the last firing run is this extra write at
-			 * page+8, and 23 valid runs have since produced no fire. Disabled to
-			 * test whether it suppresses the event; N = 8 declared in advance. */
+		unsigned int k;
+
+		for (k = 0u; k < C1_P4_NPROBE; k++) {
+			uintptr_t q = p + (uintptr_t)c1P4Off[k];
+
+			if ((q >= lo) && ((q + 4u) <= hi)) {
+				*(uint32_t *)q = malloc_c1P4Word(q);
+			}
 		}
+		/* TODO(C1-hunt): A/B ARM -- checksum store still disabled; see the note on
+		 * malloc_c1PageCk. Four probe words per 4 KiB page is still a very light
+		 * touch compared with the body poison that suppressed the event. */
 	}
 
 }
@@ -718,16 +744,28 @@ static void malloc_c1P4Verify(chunk_t *chunk, size_t chunksz)
 	uintptr_t p = ((uintptr_t)chunk + (uintptr_t)_PAGE_SIZE - 1u) & ~((uintptr_t)_PAGE_SIZE - 1u);
 
 	for (; (p + 8u) <= hi; p += (uintptr_t)_PAGE_SIZE) {
-		if ((p + 4u) >= lo) {
-			uint32_t want = malloc_c1P4Word(p);
-			uint32_t got = *(uint32_t *)(p + 4u);
+		unsigned int k;
+
+		for (k = 0u; k < C1_P4_NPROBE; k++) {
+			uintptr_t q = p + (uintptr_t)c1P4Off[k];
+			uint32_t want, got;
+
+			if ((q < lo) || ((q + 4u) > hi)) {
+				continue;
+			}
+			want = malloc_c1P4Word(q);
+			got = *(uint32_t *)q;
 
 			if (got != want) {
 				static int p4Reported = 0;
 
 				if (p4Reported < 4) {
 					p4Reported++;
-					debug("malloc: C1-hunt: PAGE+4 POISON BROKEN in a free chunk\n");
+					debug("malloc: C1-hunt: PAGE POISON BROKEN in a free chunk\n");
+					/* Which probe: 4 means the historical page+4, anything else
+					 * means the write was NOT offset-specific after all. */
+					malloc_debugHex("malloc:   p4off  = ", (uintptr_t)c1P4Off[k]);
+					malloc_debugHex("malloc:   p4addr = ", q);
 					malloc_debugHex("malloc:   p4page = ", p);
 					malloc_debugHex("malloc:   p4want = ", (uintptr_t)want);
 					malloc_debugHex("malloc:   p4got  = ", (uintptr_t)got);
@@ -765,14 +803,16 @@ static void malloc_c1P4Verify(chunk_t *chunk, size_t chunksz)
 					}
 #endif /* V3D_C1_HUNT */
 
-					malloc_c1FreeLogReport(p + 4u);
+					malloc_c1FreeLogReport(q);
 
 					/* Did anything ELSE in this page head change while the chunk was
 					 * free? p4ckOK=1 means only page+4 moved -- an isolated stray
 					 * store into otherwise stale memory. p4ckOK=0 means the page was
 					 * still being written, i.e. a live buffer the allocator believes
 					 * is free. That is the live-vs-stale answer. */
-					if (((p + 8u) >= lo) && ((p + 12u) <= hi)) {
+					/* Only meaningful for the +4 probe: this checksums the PAGE
+					 * HEAD, which has nothing to do with a fire further in. */
+					if ((c1P4Off[k] == 4u) && ((p + 8u) >= lo) && ((p + 12u) <= hi)) {
 						uint32_t ckNow = malloc_c1PageCk(p, lo, hi);
 						uint32_t ckThen = *(uint32_t *)(p + 8u);
 
@@ -790,8 +830,10 @@ static void malloc_c1P4Verify(chunk_t *chunk, size_t chunksz)
 					{
 						unsigned int w;
 
+						const uint32_t *base = (const uint32_t *)(q - 4u);
+
 						for (w = 0; w < 16u; w++) {
-							malloc_debugHex("malloc:   p4w= ", (uintptr_t)((const uint32_t *)p)[w]);
+							malloc_debugHex("malloc:   p4w= ", (uintptr_t)base[w]);
 						}
 					}
 				}

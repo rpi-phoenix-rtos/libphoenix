@@ -672,9 +672,24 @@ extern int v3d_c1_lookup_page(unsigned long page, unsigned int *handle, unsigned
  * answerable: if only the +4 probe ever fires, the writer really is offset-specific;
  * if all four fire at comparable rates, the writer scribbles broadly and the whole
  * fixed-offset framing (and the exclusions built on it) is wrong. */
+/* ⚠ OPT-IN, and this default is a measured requirement, not caution. Arming all
+ * four probes SUPPRESSED the event: 0 fires in 6 runs where one probe reproduces
+ * it about 1 run in 3. That is the fifth instrument change in a row to do this
+ * (V3D_KEEP_CLOSED_BO, the closed-BO quarantine, the BO trace, the passive
+ * attribution table, and now this), and it is the single most important fact
+ * about C1 -- it cannot currently be studied by ADDING instrumentation, because
+ * any change to the binary's write pattern or layout stops it happening.
+ *
+ * So the default stays at the single historical probe, which keeps master
+ * reproducing the bug. -DC1_P4_WIDE arms all four to ask where the writes land,
+ * accepting that the answer may simply be "nothing fires". */
+#ifdef C1_P4_WIDE
 #define C1_P4_NPROBE 4u
-
 static const uint32_t c1P4Off[C1_P4_NPROBE] = { 4u, 0x404u, 0x804u, 0xc04u };
+#else
+#define C1_P4_NPROBE 1u
+static const uint32_t c1P4Off[C1_P4_NPROBE] = { 4u };
+#endif
 
 
 /* Keyed on the PROBE address, not the page, so the four probes in a page hold

@@ -535,7 +535,7 @@ size_t strftime(char *__restrict s, size_t maxsize, const char *__restrict forma
 				defPad = ' ';
 				break;
 			case 'C':
-				snprintf(buf, sizeof(buf), "%u", (1900 + timeptr->tm_year) / 100);
+				snprintf(buf, sizeof(buf), "%d", (1900 + timeptr->tm_year) / 100);
 				defMinWidth = 2;
 				break;
 			case 'd':
@@ -550,11 +550,12 @@ size_t strftime(char *__restrict s, size_t maxsize, const char *__restrict forma
 			case 'D':
 			case 'x':
 				snprintf(buf, sizeof(buf), "%02u/%02u/%02u",
-						timeptr->tm_mon < 12 ? timeptr->tm_mon + 1 : 13, timeptr->tm_mday, timeptr->tm_year % 100);
+						timeptr->tm_mon < 12 ? timeptr->tm_mon + 1 : 13, timeptr->tm_mday,
+						(unsigned)(((timeptr->tm_year % 100) + 100) % 100));
 				defPad = ' ';
 				break;
 			case 'F':
-				snprintf(buf, sizeof(buf), "%u-%02u-%02u", 1900 + timeptr->tm_year,
+				snprintf(buf, sizeof(buf), "%d-%02u-%02u", 1900 + timeptr->tm_year,
 						timeptr->tm_mon < 12 ? timeptr->tm_mon + 1 : 13, timeptr->tm_mday);
 				defPad = ' ';
 				break;
@@ -598,7 +599,15 @@ size_t strftime(char *__restrict s, size_t maxsize, const char *__restrict forma
 				break;
 			case 's':
 				memcpy(&time, timeptr, sizeof(struct tm));
-				snprintf(buf, sizeof(buf), "%llu", mktime(&time));
+				/* time_t is SIGNED and %s must print seconds since the Epoch,
+				 * which is negative before 1970. Printing it through "%llu"
+				 * reinterpreted the sign bit, so strftime("%s") of 1969-12-31
+				 * 23:59:59 produced "18446744073709551615" instead of "-1" --
+				 * every pre-1970 timestamp came out as a 20-digit number. The
+				 * cast also makes the argument's type match the conversion
+				 * rather than relying on time_t and long long happening to be
+				 * the same width on this target. */
+				snprintf(buf, sizeof(buf), "%lld", (long long)mktime(&time));
 				defMinWidth = 1;
 				break;
 			case 'T':
@@ -629,20 +638,20 @@ size_t strftime(char *__restrict s, size_t maxsize, const char *__restrict forma
 				break;
 			case 'g':
 				(void)strftime_isoWeek(timeptr, &isoYear);
-				snprintf(buf, sizeof(buf), "%u", (unsigned)(isoYear % 100));
+				snprintf(buf, sizeof(buf), "%u", (unsigned)(((isoYear % 100) + 100) % 100));
 				defMinWidth = 2;
 				break;
 			case 'G':
 				(void)strftime_isoWeek(timeptr, &isoYear);
-				snprintf(buf, sizeof(buf), "%u", (unsigned)isoYear);
+				snprintf(buf, sizeof(buf), "%d", (int)isoYear);
 				defMinWidth = 1;
 				break;
 			case 'Y':
-				snprintf(buf, sizeof(buf), "%u", 1900 + timeptr->tm_year);
+				snprintf(buf, sizeof(buf), "%d", 1900 + timeptr->tm_year);
 				defMinWidth = 1;
 				break;
 			case 'y':
-				snprintf(buf, sizeof(buf), "%u", timeptr->tm_year % 100);
+				snprintf(buf, sizeof(buf), "%u", (unsigned)(((timeptr->tm_year % 100) + 100) % 100));
 				defMinWidth = 2;
 				break;
 			case 'z':

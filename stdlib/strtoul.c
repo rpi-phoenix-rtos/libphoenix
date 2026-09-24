@@ -22,7 +22,7 @@
 static unsigned long int strtoul_common(const char *nptr, char **endptr, int base, int isUnsigned)
 {
 	unsigned long int cutoff, result = 0;
-	int cutlim, t, width = 0, negative = 0;
+	int cutlim, t, width = 0, negative = 0, overflow = 0;
 	const char *sptr = nptr;
 
 	while (isspace(*sptr) != 0) {
@@ -58,7 +58,11 @@ static unsigned long int strtoul_common(const char *nptr, char **endptr, int bas
 		cutoff = ULONG_MAX;
 	}
 	else {
-		cutoff = (negative != 0) ? -LONG_MIN : LONG_MAX;
+		/* `-LONG_MIN` overflows a signed long, which is undefined behaviour --
+		 * it happens to wrap to the right magnitude on two's complement, but the
+		 * compiler is entitled to assume it cannot happen. Compute |LONG_MIN| in
+		 * the unsigned type the value is used in. */
+		cutoff = (negative != 0) ? ((unsigned long int)LONG_MAX + 1UL) : (unsigned long int)LONG_MAX;
 	}
 
 	cutlim = (int)(cutoff % base);
@@ -74,17 +78,24 @@ static unsigned long int strtoul_common(const char *nptr, char **endptr, int bas
 			break;
 		}
 
-		if (result > cutoff || (result == cutoff && t > cutlim)) {
-			width = -1;
-			break;
+		/* C17 7.22.1.4: the subject sequence is the LONGEST initial subsequence
+		 * of the expected form -- overflow does not shorten it. Keep consuming
+		 * digits (without accumulating) so `sptr`, and therefore *endptr, ends
+		 * up past the whole number. Breaking out here left *endptr at `nptr`
+		 * below, which means "no conversion performed": a caller walking a list
+		 * of numbers with endptr could not advance past an out-of-range one. */
+		if (overflow == 0 && (result > cutoff || (result == cutoff && t > cutlim))) {
+			overflow = 1;
 		}
 
-		result = result * (unsigned long int)base + t;
+		if (overflow == 0) {
+			result = result * (unsigned long int)base + t;
+		}
 		width++;
 		sptr++;
 	}
 
-	if (width < 0) {
+	if (overflow != 0) {
 		errno = ERANGE;
 		if (isUnsigned != 0) {
 			result = ULONG_MAX;

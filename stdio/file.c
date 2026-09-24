@@ -372,6 +372,18 @@ FILE *freopen(const char *pathname, const char *mode, FILE *stream)
 		/* TODO: change mode */
 	}
 
+	/* C17 7.21.5.4: "The error and end-of-file indicators for the stream are
+	 * cleared." They were not, and F_EOF is checked at the TOP of
+	 * fgetc_unlocked(), so a stream that had already hit EOF kept returning EOF
+	 * after being pointed at a different file -- the new file read as empty
+	 * while its data sat there unreachable. F_WRITING goes too: it records which
+	 * direction the buffer currently holds, and the fflush() above left it
+	 * empty. Park the offsets at the same "nothing buffered" state a fresh
+	 * fopen() starts from (bufpos == bufeof makes the next read refill). */
+	stream->flags &= ~(F_EOF | F_ERROR | F_WRITING);
+	stream->bufpos = 0;
+	stream->bufeof = 0;
+
 	return stream;
 }
 

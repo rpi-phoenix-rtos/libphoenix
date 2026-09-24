@@ -642,6 +642,11 @@ static void malloc_c1FreeLogReport(uintptr_t addr)
  * is deliberately NOT poisoned -- malloc_chunkValidWhy() already judges that. */
 #define C1_P4_MAGIC 0x7e57ed00u
 
+/* Compiled out unless the C1 hunt build defines V3D_C1_HUNT: C1 is sensitive to
+ * binary layout, and the driver-side table this talks to costs 96 KB of BSS,
+ * which alone was enough to stop the bug reproducing. See docs/KNOWN-ISSUES.md.
+ */
+#ifdef V3D_C1_HUNT
 /* Defined by the V3D winsys when this binary contains the GPU driver, so a page
  * that the allocator finds corrupted can be attributed: was it ever a buffer
  * object, and had that BO been closed? Weak, because most binaries have no driver
@@ -650,6 +655,7 @@ static void malloc_c1FreeLogReport(uintptr_t addr)
  * dependency on the driver. */
 extern int v3d_c1_lookup_page(unsigned long page, unsigned int *handle, unsigned long *off,
 	int *closed, unsigned int *total) __attribute__((weak));
+#endif /* V3D_C1_HUNT */
 
 
 static uint32_t malloc_c1P4Word(uintptr_t p)
@@ -739,6 +745,7 @@ static void malloc_c1P4Verify(chunk_t *chunk, size_t chunksz)
 					 * ordinal (0 = it was still open), and p4bon = 0 with a
 					 * non-zero p4botot means the driver was loaded and this page
 					 * was simply never a BO. */
+#ifdef V3D_C1_HUNT
 					if (v3d_c1_lookup_page != NULL) {
 						unsigned int h = 0u, tot = 0u;
 						unsigned long off = 0u;
@@ -756,6 +763,7 @@ static void malloc_c1P4Verify(chunk_t *chunk, size_t chunksz)
 					else {
 						debug("malloc:   p4bo   = no v3d driver in this binary\n");
 					}
+#endif /* V3D_C1_HUNT */
 
 					malloc_c1FreeLogReport(p + 4u);
 

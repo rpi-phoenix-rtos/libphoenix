@@ -642,6 +642,16 @@ static void malloc_c1FreeLogReport(uintptr_t addr)
  * is deliberately NOT poisoned -- malloc_chunkValidWhy() already judges that. */
 #define C1_P4_MAGIC 0x7e57ed00u
 
+/* Defined by the V3D winsys when this binary contains the GPU driver, so a page
+ * that the allocator finds corrupted can be attributed: was it ever a buffer
+ * object, and had that BO been closed? Weak, because most binaries have no driver
+ * and must still link -- the call site reports the absence rather than assuming.
+ * Declared here rather than in a header to keep libphoenix free of any build-time
+ * dependency on the driver. */
+extern int v3d_c1_lookup_page(unsigned long page, unsigned int *handle, unsigned long *off,
+	int *closed, unsigned int *total) __attribute__((weak));
+
+
 static uint32_t malloc_c1P4Word(uintptr_t p)
 {
 	return C1_P4_MAGIC ^ (uint32_t)(p >> 12);
@@ -719,6 +729,34 @@ static void malloc_c1P4Verify(chunk_t *chunk, size_t chunksz)
 					malloc_debugHex("malloc:   p4csize= ", (uintptr_t)chunksz);
 					malloc_debugHex("malloc:   p4call = ", malloc_common.lastCaller);
 					malloc_debugHex("malloc:   p4calx = ", ~malloc_common.lastCaller);
+
+					/* Was this page ever a V3D buffer object? The winsys runs in
+					 * this same process, so ask it rather than reconstructing the
+					 * answer from a UART trace -- tracing perturbs this bug badly
+					 * enough to hide it. p4bon is the number of BOs whose mapping
+					 * covered the page (>1 means the address was recycled between
+					 * BOs), p4boh the most recent one's handle, p4bocl its close
+					 * ordinal (0 = it was still open), and p4bon = 0 with a
+					 * non-zero p4botot means the driver was loaded and this page
+					 * was simply never a BO. */
+					if (v3d_c1_lookup_page != NULL) {
+						unsigned int h = 0u, tot = 0u;
+						unsigned long off = 0u;
+						int closed = 0, n;
+
+						n = v3d_c1_lookup_page((unsigned long)p, &h, &off, &closed, &tot);
+						malloc_debugHex("malloc:   p4bon  = ", (uintptr_t)(unsigned)n);
+						malloc_debugHex("malloc:   p4botot= ", (uintptr_t)tot);
+						if (n > 0) {
+							malloc_debugHex("malloc:   p4boh  = ", (uintptr_t)h);
+							malloc_debugHex("malloc:   p4booff= ", (uintptr_t)off);
+							malloc_debugHex("malloc:   p4bocl = ", (uintptr_t)(unsigned)closed);
+						}
+					}
+					else {
+						debug("malloc:   p4bo   = no v3d driver in this binary\n");
+					}
+
 					malloc_c1FreeLogReport(p + 4u);
 
 					/* Did anything ELSE in this page head change while the chunk was

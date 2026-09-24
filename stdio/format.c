@@ -23,6 +23,7 @@
 #include <string.h>
 #include <errno.h>
 #include <wchar.h>
+#include <limits.h> /* MB_LEN_MAX, used by format_printWide() */
 
 
 #define FLAG_SIGNED                    0x1
@@ -446,8 +447,37 @@ static int format_sprintfDecimalForm(struct buffer *buff, struct bigdouble *bd, 
 	CHECK_FAIL(ret, format_bigdoubleIntegerPart(bd, &bd->helper1));
 
 	format_bigdoubleCutIntegerPart(bd);
-	if (bd->helper1.data[0] % 10 >= 5) {
+
+	/* Round to nearest, ties to EVEN -- what IEEE-754 default rounding means,
+	 * what C's "correctly rounded" recommended practice asks for, and what every
+	 * mainstream libc does. This was an unconditional `>= 5`, i.e. round half
+	 * AWAY FROM ZERO, so printf("%.0f", 0.5) printed "1" where glibc prints "0",
+	 * and printf("%.2f", 0.125) printed "0.13" against glibc's "0.12".
+	 * Only EXACT ties differ: once anything remains beyond the rounding digit
+	 * the value is strictly past halfway and always rounds up. After the cut
+	 * above, `bd->num` holds exactly that remainder. */
+	if ((bd->helper1.data[0] % 10) > 5) {
 		carry = 1;
+	}
+	else if ((bd->helper1.data[0] % 10) == 5) {
+		if (__bignum_cmp(&bd->num, 0) != 0) {
+			carry = 1;
+		}
+		else {
+			/* Exact tie: round up only from an odd digit. Scan back past a '.'
+			 * (which "%#.0f" leaves as the final character) to the real digit. */
+			size_t k = buff->len;
+			while (k > 0) {
+				char last = buff->data[k - 1];
+				if ((last >= '0') && (last <= '9')) {
+					if (((last - '0') % 2) != 0) {
+						carry = 1;
+					}
+					break;
+				}
+				k--;
+			}
+		}
 	}
 
 	carrier = buff->data + buff->len - 1;
@@ -625,7 +655,21 @@ static int format_sprintfScientificForm(struct buffer *buff, struct bigdouble *b
 	/* Remove garbage digits */
 	buff->len = *startOffset + precision + 2;
 
-	/* Rounding */
+	/* Rounding. NOTE this is round-half-AWAY-FROM-ZERO, unlike
+	 * format_sprintfDecimalForm() above, which rounds ties to even. The
+	 * difference is visible as printf("%.0e", 2.5) == "3e+00" where glibc
+	 * prints "2e+00".
+	 *
+	 * ⛔ Do not "fix" it by copying the decimal form's test. That was tried
+	 * (2026-09-25) and it BROKE round-tripping: `bd->num` is not the remainder
+	 * beyond the rounding digit on this path, so exact ties were declared where
+	 * there were none, values rounded down, and %g then stripped the resulting
+	 * trailing zeros -- printf("%.17g", 1.0000000000000001e+300) collapsed to
+	 * "1e+300", and 3 in 400000 random doubles stopped surviving a
+	 * format/parse round-trip. Losing a round-trip is far worse than a
+	 * last-digit tie, so the naive change was reverted. Fixing this properly
+	 * means finding where this path keeps the residue; tools/libfmt-hosttest/
+	 * reproduces both symptoms in about a second. */
 	if (buff->data[*startOffset + precision + 1] - '0' >= 5) {
 		carry = 1;
 	}

@@ -1708,13 +1708,22 @@ static heap_t *_malloc_heapAlloc(size_t size)
 		 * was widened for is worse than no experiment. */
 		static unsigned int c1seen[3];
 		unsigned int c1i = (heapSize == 0xd000u) ? 0u : ((heapSize == 0x2000u) ? 1u : 2u);
+		/* 0xd000 gets a much larger budget than the rest: it is the size of every
+		 * archived hsize victim, and a budget of 8 demonstrably stops too early.
+		 * Measured 2026-09-25 on an armed run that DID reproduce the corruption:
+		 * the victim heap was 0x0b59a000 while the 8 traced 0xd000 heaps stopped
+		 * at 0x082b7000, so the heap that actually got corrupted was never traced.
+		 * The same run proves the cost is affordable -- it emitted 21 reports and
+		 * still fired 52 signature hits, so this trace does not suppress the
+		 * event. */
+		const unsigned int c1cap = (c1i == 0u) ? 48u : 8u;
 
 		if (c1trace < 0) {
 			const char *e = getenv("C1_HEAP_TRACE");
 			c1trace = ((e != NULL) && (*e == '1')) ? 1 : 0;
 		}
 
-		if ((c1trace != 0) && (c1seen[c1i] < 8u)) {
+		if ((c1trace != 0) && (c1seen[c1i] < c1cap)) {
 			c1seen[c1i]++;
 			++malloc_common.bigHeapReports;
 			debug("malloc: C1-hunt: created a victim-size heap\n");

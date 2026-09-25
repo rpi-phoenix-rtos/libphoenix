@@ -1641,9 +1641,16 @@ static heap_t *_malloc_heapAlloc(size_t size)
 
 	chunk = (chunk_t*) heap->space;
 
-	/* TODO(C1-hunt): temporary, bounded to 16 reports. Only 0xd000 -- the size
-	 * every archived fire's victim heap has -- so this stays silent on the many
-	 * other large heaps STK creates rather than burying the log.
+	/* TODO(C1-hunt): temporary, bounded to 16 reports.
+	 *
+	 * ⚠ CORRECTED 2026-09-25: this used to match ONLY 0xd000, on the belief that
+	 * "every archived fire's victim heap is 0xd000". Re-reading the archived fires
+	 * disproves it -- c1audit-t1 (2026-09-23) reports hsize=0x8000000100002000,
+	 * hlo32=0x2000, hfixed=1, i.e. a 0x2000 victim. A counter filtered to 0xd000
+	 * could never have seen it, which is exactly the kind of too-narrow selector
+	 * that has cost this hunt time before. Match both observed victim sizes and
+	 * print which one, so the log says what was counted instead of leaving the
+	 * reader to assume.
 	 *
 	 * ⚠ OFF BY DEFAULT since 2026-09-25 -- arm it with C1_HEAP_TRACE=1.
 	 *
@@ -1685,7 +1692,7 @@ static heap_t *_malloc_heapAlloc(size_t size)
 	 * default side. Measured 2026-09-25 on SuperTuxKart f2efc4b0: armed gives
 	 * created=14, default 0, both 1772 frames, so today it latches late enough.
 	 * Always assert created >= 1 on the armed arm before believing an A/B. */
-	if (heapSize == 0xd000u) {
+	if ((heapSize == 0xd000u) || (heapSize == 0x2000u)) {
 		static int c1trace = -1;
 
 		if (c1trace < 0) {
@@ -1695,7 +1702,8 @@ static heap_t *_malloc_heapAlloc(size_t size)
 
 		if ((c1trace != 0) && (malloc_common.bigHeapReports < 16u)) {
 			++malloc_common.bigHeapReports;
-			debug("malloc: C1-hunt: created a 0xd000 heap\n");
+			debug("malloc: C1-hunt: created a victim-size heap\n");
+			malloc_debugHex("malloc:   c1size = ", (uintptr_t)heapSize);
 			malloc_debugHex("malloc:   c1base = ", (uintptr_t)heap);
 			malloc_debugHex("malloc:   c1req  = ", (uintptr_t)size);
 			malloc_debugHex("malloc:   c1call = ", malloc_common.lastCaller);

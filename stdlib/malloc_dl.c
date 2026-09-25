@@ -101,6 +101,13 @@ struct {
 	 * read lheap?=0 while hbase?=1, with no way to tell the readings apart.
 	 * 2 KiB of BSS is a fair price for a verdict that discriminates. */
 	uintptr_t live[256];
+	/* The size each entry was created with, recorded at insert. Two jobs:
+	 * malloc_liveOverlap() can then do a PURE VALUE test with no dereference at
+	 * all (the strongest form of the 2026-09-25 fix -- it removes the unsafe read
+	 * rather than guarding it), and an entry that turns out to name an unmapped
+	 * page can report the size it was born with, which says whether the slot was
+	 * ever an honest heap or is simply corrupt. */
+	size_t liveSize[256];
 	unsigned int liveIdx;
 	unsigned int liveOverflow;
 
@@ -408,18 +415,30 @@ static void malloc_debugHex(const char *label, uintptr_t v)
 static unsigned int malloc_liveUnmappedReports = 0u;
 
 
-static int malloc_liveEntryReadable(uintptr_t base)
+static int malloc_liveEntryReadable(uintptr_t base, size_t recorded)
 {
-	if (malloc_heapSizeValid((const heap_t *)base) == 0) {
+	/* ⚠ THE ORDER OF THESE TESTS IS LOAD-BEARING. malloc_heapSizeValid() reads
+	 * heap->size -- it IS the instruction that faulted in c1hpa01 -- so it must not
+	 * run until the mapping is established. The first draft of this function called
+	 * it first and would have reproduced the exact crash it exists to prevent, while
+	 * looking like a fix. Only the non-dereferencing checks may precede the probe. */
+	if ((base == 0u) || ((base & (uintptr_t)(_PAGE_SIZE - 1)) != 0u)) {
 		return 0;
 	}
 	if (malloc_heapMapped(base) != 0) {
-		return 1;
+		/* Mapped: now the header is safe to read, so apply the full test. */
+		return (malloc_heapSizeValid((const heap_t *)base) != 0) ? 1 : 0;
 	}
 	if (malloc_liveUnmappedReports < 8u) {
 		++malloc_liveUnmappedReports;
 		debug("malloc: C1-hunt: live[] entry is NOT MAPPED -- ring says live, pmap says gone\n");
 		malloc_debugHex("malloc:   lubase = ", base);
+		/* THE discriminating field. A legal page-multiple size means the slot was
+		 * once an honest heap and its mapping has gone away underneath us; a zero
+		 * or nonsense one means the slot itself is corrupt. Those are different
+		 * defects with different owners, and the base alone cannot tell them
+		 * apart -- which is why the first version of this report was not enough. */
+		malloc_debugHex("malloc:   lusize = ", (uintptr_t)recorded);
 		malloc_debugHex("malloc:   luhlo  = ", malloc_common.heapLo);
 		malloc_debugHex("malloc:   luhhi  = ", malloc_common.heapHi);
 		malloc_debugHex("malloc:   luovfl = ", (uintptr_t)malloc_common.liveOverflow);
@@ -1108,13 +1127,23 @@ static int malloc_isLiveHeapBase(const chunk_t *chunk)
  * an entry equal to nbase means a live heap ALREADY sits at that address, i.e. the total
  * overlap, the most severe case there is. It must not be skipped.
  *
- * live[] is cleared on release and both release refusals keep the heap mapped, so a
- * non-zero entry is a heap we believe is mapped and its header is safe to read. A wrapped
- * ring (see liveOverflow) can only make this MISS an overlap, never invent one. */
-static uintptr_t malloc_liveOverlap(uintptr_t nbase, size_t nsize)
+ * ↩ **The claim this loop used to rest on is RETRACTED** (2026-09-25). It read: "live[] is
+ * cleared on release and both release refusals keep the heap mapped, so a non-zero entry is
+ * a heap we believe is mapped and its header is safe to read." The reasoning is sound --
+ * munmap() at the end of malloc_heapRelease() is the only return-to-OS in the file, and the
+ * clear loop is unconditional, exhaustive over all 256 slots and runs BEFORE it -- yet the
+ * conclusion is false in practice: /bin/ntpclient faulted reading exactly such an entry
+ * (base 0x5000, run c1hpa01). Whether the slot was corrupted or the mapping vanished under
+ * an honest entry is still open, which is why the entry's recorded size is now reported.
+ *
+ * So this loop no longer dereferences anything: lsize comes from liveSize[], recorded at
+ * insert. A wrapped ring (see liveOverflow) can only make this MISS an overlap, never
+ * invent one. */
+static uintptr_t malloc_liveOverlap(uintptr_t nbase, size_t nsize, size_t *lsizeOut)
 {
 	unsigned int i;
 
+	*lsizeOut = 0u;
 	for (i = 0; i < 256u; i++) {
 		uintptr_t lbase = malloc_common.live[i];
 		size_t lsize;
@@ -1122,11 +1151,14 @@ static uintptr_t malloc_liveOverlap(uintptr_t nbase, size_t nsize)
 		if (lbase == 0u) {
 			continue;
 		}
-		if (malloc_liveEntryReadable(lbase) == 0) {
+		/* No dereference: the size comes from what we recorded at insert, so an
+		 * entry naming an unmapped page can no longer fault this loop. */
+		lsize = malloc_common.liveSize[i];
+		if (lsize == 0u) {
 			continue;
 		}
-		lsize = ((const heap_t *)lbase)->size;
 		if ((nbase < (lbase + lsize)) && (lbase < (nbase + nsize))) {
+			*lsizeOut = lsize;
 			return lbase;
 		}
 	}
@@ -1605,8 +1637,12 @@ static void malloc_heapInit(heap_t *heap, size_t size)
  * preceding C1_SCAN_EVERY operations and stamps it with a tick, so it can be
  * placed against the run (startup? shader compile? mid-render?).
  *
- * live[] is cleared on release, so every non-zero entry is a heap we still have
- * mapped and its header is safe to read. */
+ * ↩ RETRACTED 2026-09-25: "live[] is cleared on release, so every non-zero entry is a
+ * heap we still have mapped and its header is safe to read." Disproved -- see
+ * malloc_liveOverlap(). This scan reads headers by design, so unlike that function it
+ * cannot drop the dereference; it goes through malloc_liveEntryReadable() instead, which
+ * adds a real mapping test. It is also the more dangerous of the two callers: it walks
+ * all 256 slots on a timer rather than only at heap creation. */
 #define C1_SCAN_EVERY 64u
 
 static void malloc_c1Scan(void)
@@ -1630,7 +1666,7 @@ static void malloc_c1Scan(void)
 		 * that malloc_liveOverlap() relied on and that c1hpa01 disproved. It is the
 		 * more dangerous of the two, because the scan walks all 256 slots on a timer
 		 * rather than only at heap creation. */
-		if (malloc_liveEntryReadable(base) == 0) {
+		if (malloc_liveEntryReadable(base, malloc_common.liveSize[i]) == 0) {
 			continue;
 		}
 
@@ -1718,18 +1754,24 @@ static heap_t *_malloc_heapAlloc(size_t size)
 	 *
 	 * Report and carry on rather than failing the allocation: if this never fires the
 	 * hypothesis is dead, and if it does, returning NULL here would turn a contained
-	 * corruption into an immediate app crash. live[] is cleared on release, so a
-	 * non-zero entry is a heap we believe is mapped and its header is safe to read;
-	 * a wrapped ring can only miss an overlap, never invent one. */
+	 * corruption into an immediate app crash. A wrapped ring can only miss an overlap,
+	 * never invent one.
+	 *
+	 * ↩ This comment also used to assert "live[] is cleared on release, so a non-zero
+	 * entry is a heap we believe is mapped and its header is safe to read" -- retracted
+	 * 2026-09-25, see malloc_liveOverlap(). The reported size now comes from liveSize[]
+	 * via the out-param rather than from a dereference of lbase, which was the last
+	 * read of a live[] entry's header on this path. */
 	{
-		uintptr_t lbase = malloc_liveOverlap((uintptr_t)heap, heapSize);
+		size_t lsize = 0u;
+		uintptr_t lbase = malloc_liveOverlap((uintptr_t)heap, heapSize, &lsize);
 
 		if (lbase != 0u) {
 			debug("malloc: mmap returned a region OVERLAPPING a live heap\n");
 			malloc_debugHex("malloc:   new   = ", (uintptr_t)heap);
 			malloc_debugHex("malloc:   nsize = ", (uintptr_t)heapSize);
 			malloc_debugHex("malloc:   live  = ", lbase);
-			malloc_debugHex("malloc:   lsize = ", (uintptr_t)((const heap_t *)lbase)->size);
+			malloc_debugHex("malloc:   lsize = ", (uintptr_t)lsize);
 		}
 	}
 
@@ -1740,6 +1782,7 @@ static heap_t *_malloc_heapAlloc(size_t size)
 		++malloc_common.liveOverflow;
 	}
 	malloc_common.live[malloc_common.liveIdx & 255u] = (uintptr_t)heap;
+	malloc_common.liveSize[malloc_common.liveIdx & 255u] = heapSize;
 	++malloc_common.liveIdx;
 
 	if ((malloc_common.heapLo == 0u) || ((uintptr_t)heap < malloc_common.heapLo)) {
@@ -2461,6 +2504,10 @@ void free(void *ptr)
 				for (i = 0; i < 256u; i++) {
 					if (malloc_common.live[i] == (uintptr_t)heap) {
 						malloc_common.live[i] = 0u;
+						/* Must clear in lockstep: malloc_liveOverlap() now
+						 * skips on liveSize==0, so a stale size would keep a
+						 * released heap in the overlap test. */
+						malloc_common.liveSize[i] = 0u;
 					}
 				}
 			}

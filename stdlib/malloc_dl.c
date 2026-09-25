@@ -1648,9 +1648,15 @@ static heap_t *_malloc_heapAlloc(size_t size)
 	 * disproves it -- c1audit-t1 (2026-09-23) reports hsize=0x8000000100002000,
 	 * hlo32=0x2000, hfixed=1, i.e. a 0x2000 victim. A counter filtered to 0xd000
 	 * could never have seen it, which is exactly the kind of too-narrow selector
-	 * that has cost this hunt time before. Match both observed victim sizes and
+	 * that has cost this hunt time before. Match every observed victim size and
 	 * print which one, so the log says what was counted instead of leaving the
 	 * reader to assume.
+	 *
+	 * 0x5000 is the third, and it is the one to watch: all 61 page-poison breaks
+	 * in the log archive report p4csize=0x4ff0 with p4chunk page-aligned+0x10 --
+	 * i.e. the whole free space of a 0x5000 heap (0x4ff0 + sizeof(heap_t)). The
+	 * address varies across 24 pages and 21 chunks, so the writer targets an
+	 * allocation SHAPE, not an address. c1call below names who asks for it.
 	 *
 	 * ⚠ OFF BY DEFAULT since 2026-09-25 -- arm it with C1_HEAP_TRACE=1.
 	 *
@@ -1692,7 +1698,7 @@ static heap_t *_malloc_heapAlloc(size_t size)
 	 * default side. Measured 2026-09-25 on SuperTuxKart f2efc4b0: armed gives
 	 * created=14, default 0, both 1772 frames, so today it latches late enough.
 	 * Always assert created >= 1 on the armed arm before believing an A/B. */
-	if ((heapSize == 0xd000u) || (heapSize == 0x2000u)) {
+	if ((heapSize == 0xd000u) || (heapSize == 0x2000u) || (heapSize == 0x5000u)) {
 		static int c1trace = -1;
 
 		if (c1trace < 0) {

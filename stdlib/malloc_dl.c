@@ -782,6 +782,20 @@ static void malloc_c1P4Verify(chunk_t *chunk, size_t chunksz)
 					malloc_debugHex("malloc:   p4off  = ", (uintptr_t)c1P4Off[k]);
 					malloc_debugHex("malloc:   p4addr = ", q);
 					malloc_debugHex("malloc:   p4page = ", p);
+					/* The PHYSICAL address of the broken page.
+					 *
+					 * This is the sharpest test of the standing model. The
+					 * signature says a DEVICE writes a physical address: the
+					 * corrupting word is the VideoCore property-mailbox response
+					 * code, and one recorded victim was a kernel zone-list link,
+					 * which no userspace use-after-free can reach. If that is
+					 * right, the writer keeps hitting ONE physical page and the 25
+					 * different virtual addresses in the archive are just that page
+					 * being recycled -- so p4pa should repeat while p4page does not.
+					 * If p4pa is as scattered as p4page, the device-write reading is
+					 * wrong and the hunt goes back to a virtual-address writer.
+					 * Either answer is worth more than another rare-event run. */
+					malloc_debugHex("malloc:   p4pa   = ", (uintptr_t)va2pa((void *)p));
 					malloc_debugHex("malloc:   p4want = ", (uintptr_t)want);
 					malloc_debugHex("malloc:   p4got  = ", (uintptr_t)got);
 					malloc_debugHex("malloc:   p4chunk= ", (uintptr_t)chunk);

@@ -1665,7 +1665,15 @@ static heap_t *_malloc_heapAlloc(size_t size)
 	 * that is the only measurement shape that has worked here: a compiled arm
 	 * makes the two sides different binaries and the comparison worthless.
 	 * getenv is safe from inside malloc -- _env_find is NULL-safe and never
-	 * allocates -- and it does not take the allocator lock. psh has `export`. */
+	 * allocates -- and it does not take the allocator lock. psh has `export`.
+	 *
+	 * ⚠ The arm latches at the FIRST 0xd000 creation. If a future change moves
+	 * that allocation before environ is populated (a C++ static constructor, say),
+	 * getenv returns NULL and the trace latches OFF for the process's lifetime --
+	 * silently, so the armed side of an A/B would just be a second copy of the
+	 * default side. Measured 2026-09-25 on SuperTuxKart f2efc4b0: armed gives
+	 * created=14, default 0, both 1772 frames, so today it latches late enough.
+	 * Always assert created >= 1 on the armed arm before believing an A/B. */
 	if (heapSize == 0xd000u) {
 		static int c1trace = -1;
 

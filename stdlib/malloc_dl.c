@@ -414,6 +414,13 @@ static void malloc_debugHex(const char *label, uintptr_t v)
  * Placed below malloc_debugHex() because it uses it; C has no forward use of a static. */
 static unsigned int malloc_liveUnmappedReports = 0u;
 
+/* Line budgets for the C1_HEAP_TRACE_ALL physical-page trace. It emits one line
+ * per PAGE of every heap (see the note at the emit site), so a 13-page heap costs
+ * 13 blocking UART writes -- bounded here rather than per-heap, because it is the
+ * total UART cost that matters, not how it is distributed across heaps. */
+static unsigned int caPaLines = 0u;
+static unsigned int caRelLines = 0u;
+
 
 static int malloc_liveEntryReadable(uintptr_t base, size_t recorded)
 {
@@ -1974,9 +1981,24 @@ static heap_t *_malloc_heapAlloc(size_t size)
 			 * run, which removes suppression from the critical path entirely.
 			 *
 			 * Deliberately confined to this opt-in trace, never the default
-			 * build, so it cannot perturb the rate of the event it is studying. */
-			malloc_debugHex("malloc:   capa   = ",
-					(uintptr_t)va2pa((void *)((uintptr_t)heap & ~(uintptr_t)(_PAGE_SIZE - 1))));
+			 * build, so it cannot perturb the rate of the event it is studying.
+			 *
+			 * ⚠ EVERY page, not just the first. A heap's pages are separate
+			 * physical frames -- mmap makes no contiguity promise -- and C1
+			 * lands at page+4 of a CHUNK, which can sit in any page of the heap.
+			 * A 0xd000 heap is 13 pages, so logging only page 0 would give the
+			 * coincidence test ~1/13 of the coverage it claims and turn a
+			 * "no coincidence" into a statement about almost nothing. */
+			{
+				uintptr_t pg;
+
+				for (pg = (uintptr_t)heap & ~(uintptr_t)(_PAGE_SIZE - 1);
+						(pg < ((uintptr_t)heap + heapSize)) && (caPaLines < 512u);
+						pg += (uintptr_t)_PAGE_SIZE) {
+					caPaLines++;
+					malloc_debugHex("malloc:   capa   = ", (uintptr_t)va2pa((void *)pg));
+				}
+			}
 		}
 	}
 
@@ -2583,6 +2605,32 @@ void free(void *ptr)
 			 * pmap_remove() cannot fail, and _vm_munmap() leaves un-processed entries
 			 * in the tree when it gives up, so this is not expected -- but it was
 			 * discarded, which is why nobody could have known. */
+			/* Record the physical pages we are about to hand back, while they
+			 * are still mapped and va2pa() can still answer.
+			 *
+			 * Without this the coincidence test in c1-report is unsound. Phoenix
+			 * reuses physical frames across mmap/munmap constantly, so a heap
+			 * released and its frame later handed to the v3d driver for a mailbox
+			 * buffer yields capa == mbox_pa while the two NEVER coexisted -- a
+			 * perfectly benign reuse that would print as the strongest-worded
+			 * line in the report. A match only means anything if the heap was
+			 * still LIVE when the mailbox took the page, and these lines are what
+			 * let the report tell those apart. */
+			if (caRelLines < 256u) {
+				const char *e = getenv("C1_HEAP_TRACE_ALL");
+
+				if ((e != NULL) && (*e == '1')) {
+					uintptr_t pg;
+
+					for (pg = (uintptr_t)heap;
+							(pg < ((uintptr_t)heap + heap->size)) && (caRelLines < 256u);
+							pg += (uintptr_t)_PAGE_SIZE) {
+						caRelLines++;
+						malloc_debugHex("malloc:   carel  = ", (uintptr_t)va2pa((void *)pg));
+					}
+				}
+			}
+
 			if (munmap(heap, heap->size) < 0) {
 				debug("malloc: munmap of a released heap FAILED -- released[] now lies\n");
 				malloc_debugHex("malloc:   heap  = ", (uintptr_t)heap);

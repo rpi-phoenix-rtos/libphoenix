@@ -1643,13 +1643,44 @@ static heap_t *_malloc_heapAlloc(size_t size)
 
 	/* TODO(C1-hunt): temporary, bounded to 16 reports. Only 0xd000 -- the size
 	 * every archived fire's victim heap has -- so this stays silent on the many
-	 * other large heaps STK creates rather than burying the log. */
-	if ((heapSize == 0xd000u) && (malloc_common.bigHeapReports < 16u)) {
-		++malloc_common.bigHeapReports;
-		debug("malloc: C1-hunt: created a 0xd000 heap\n");
-		malloc_debugHex("malloc:   c1base = ", (uintptr_t)heap);
-		malloc_debugHex("malloc:   c1req  = ", (uintptr_t)size);
-		malloc_debugHex("malloc:   c1call = ", malloc_common.lastCaller);
+	 * other large heaps STK creates rather than burying the log.
+	 *
+	 * ⚠ OFF BY DEFAULT since 2026-09-25 -- arm it with C1_HEAP_TRACE=1.
+	 *
+	 * This is FOUR blocking debug() writes per creation, up to 16 times. At
+	 * 115200 baud that is on the order of 200 ms of UART inside heap creation,
+	 * for exactly the victim size, in every process. It was added AFTER the last
+	 * observed fire: the 2026-09-22 gate-stk log that fired 5 times contains 0 of
+	 * these lines, and every run since carries them -- 0 fires across 21 runs,
+	 * against 1 fire in the 15 runs that do not.
+	 *
+	 * That contrast ALONE is Fisher p~0.42, i.e. not significant; it only reaches
+	 * significance against the historical 7/19 baseline, which is a different
+	 * binary and must not be pooled. So this is not proof that the trace
+	 * suppresses C1 -- it is simply not defensible to leave a ~200 ms hot-path
+	 * perturbation in the build used to measure a timing- and layout-sensitive
+	 * event.
+	 *
+	 * Env-selected rather than deleted, and read inside the one binary, because
+	 * that is the only measurement shape that has worked here: a compiled arm
+	 * makes the two sides different binaries and the comparison worthless.
+	 * getenv is safe from inside malloc -- _env_find is NULL-safe and never
+	 * allocates -- and it does not take the allocator lock. psh has `export`. */
+	if (heapSize == 0xd000u) {
+		static int c1trace = -1;
+
+		if (c1trace < 0) {
+			const char *e = getenv("C1_HEAP_TRACE");
+			c1trace = ((e != NULL) && (*e == '1')) ? 1 : 0;
+		}
+
+		if ((c1trace != 0) && (malloc_common.bigHeapReports < 16u)) {
+			++malloc_common.bigHeapReports;
+			debug("malloc: C1-hunt: created a 0xd000 heap\n");
+			malloc_debugHex("malloc:   c1base = ", (uintptr_t)heap);
+			malloc_debugHex("malloc:   c1req  = ", (uintptr_t)size);
+			malloc_debugHex("malloc:   c1call = ", malloc_common.lastCaller);
+		}
 	}
 
 	malloc_heapInit(heap, heapSize);

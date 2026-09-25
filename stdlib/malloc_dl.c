@@ -433,11 +433,18 @@ static int malloc_liveEntryReadable(uintptr_t base, size_t recorded)
 		++malloc_liveUnmappedReports;
 		debug("malloc: C1-hunt: live[] entry is NOT MAPPED -- ring says live, pmap says gone\n");
 		malloc_debugHex("malloc:   lubase = ", base);
-		/* THE discriminating field. A legal page-multiple size means the slot was
-		 * once an honest heap and its mapping has gone away underneath us; a zero
-		 * or nonsense one means the slot itself is corrupt. Those are different
-		 * defects with different owners, and the base alone cannot tell them
-		 * apart -- which is why the first version of this report was not enough. */
+		/* Evidence, but NOT a decisive discriminator -- do not over-read it.
+		 * A zero or nonsense size does point at a corrupt slot. The converse does
+		 * NOT hold: if something overwrote the base of an entry that was still
+		 * OCCUPIED, liveSize[] still holds the previous honest occupant's size, so
+		 * a legal page-multiple here is consistent with BOTH "an honest heap whose
+		 * mapping vanished" and "a corrupted base in a live slot". Only an
+		 * overwrite of an empty slot yields lusize=0.
+		 *
+		 * The test that would actually settle it is whether `base` was ever an
+		 * mmap() return in this process, which needs the heap trace armed for THIS
+		 * binary (it is env-gated per process, so another process's trace says
+		 * nothing) and its size filter widened to cover small heaps. */
 		malloc_debugHex("malloc:   lusize = ", (uintptr_t)recorded);
 		malloc_debugHex("malloc:   luhlo  = ", malloc_common.heapLo);
 		malloc_debugHex("malloc:   luhhi  = ", malloc_common.heapHi);

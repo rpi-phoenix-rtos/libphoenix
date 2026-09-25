@@ -1712,7 +1712,20 @@ static heap_t *_malloc_heapAlloc(size_t size)
 	 * while the victim was at 0x0b588000. Affordable: more of this trace has
 	 * consistently meant MORE events, not fewer (21 reports -> 52 signature hits,
 	 * 59 reports -> 308), so it is not perturbing the thing it measures. */
-	if (heapSize >= 0x5000u) {
+	/* ADDRESS WINDOW, not a count budget.
+	 *
+	 * Measured 2026-09-25: all 25 distinct victim pages in the whole log archive
+	 * -- 19 logs, several days, two applications -- lie in 0x09a86000..0x0f9e8000.
+	 * A count budget cannot reach them: tracing every heap >= 0x5000 with budget
+	 * 192 covered only 0x0002b000..0x08a3f000, stopping just BELOW that window and
+	 * 43 MB short of a known victim, while costing a 16% UART corruption rate.
+	 *
+	 * So report only heaps that actually overlap the window where victims appear.
+	 * That is where the interesting creation happens, it is a small fraction of
+	 * the output, and the budget then lasts the whole run. */
+	if ((heapSize >= 0x5000u)
+			&& (((uintptr_t)heap + heapSize) > (uintptr_t)0x09000000u)
+			&& ((uintptr_t)heap < (uintptr_t)0x11000000u)) {
 		static int c1trace = -1;
 		/* Budget PER SIZE, not one shared pool. With a single 16-report cap the
 		 * first size to be created would consume the whole budget -- historical
@@ -1730,7 +1743,7 @@ static heap_t *_malloc_heapAlloc(size_t size)
 		 * The same run proves the cost is affordable -- it emitted 21 reports and
 		 * still fired 52 signature hits, so this trace does not suppress the
 		 * event. */
-		const unsigned int c1cap = 192u;
+		const unsigned int c1cap = 96u;
 
 		if (c1trace < 0) {
 			const char *e = getenv("C1_HEAP_TRACE");

@@ -799,6 +799,20 @@ static void malloc_c1P4Verify(chunk_t *chunk, size_t chunksz)
 					malloc_debugHex("malloc:   p4want = ", (uintptr_t)want);
 					malloc_debugHex("malloc:   p4got  = ", (uintptr_t)got);
 					malloc_debugHex("malloc:   p4chunk= ", (uintptr_t)chunk);
+					/* Identify the victim HEAP directly instead of hoping the
+					 * creation trace happened to cover it. The break path already
+					 * holds the chunk, and chunk->heap is right there -- two lines
+					 * here beat any amount of speculative creation tracing, which
+					 * covered only 1 heap in the victim window under a count budget
+					 * and 5 under an address window.
+					 *
+					 * ⚠ chunk->heap is itself one of C1's victims (a corrupted
+					 * heap POINTER with 0x80000001 in the high half is on record),
+					 * so read these two as evidence, not as ground truth: if
+					 * p4heap has a garbage high half that is itself a finding. */
+					malloc_debugHex("malloc:   p4heap = ", (uintptr_t)chunk->heap);
+					malloc_debugHex("malloc:   p4hsize= ",
+						(chunk->heap != NULL) ? (uintptr_t)chunk->heap->size : (uintptr_t)0);
 					malloc_debugHex("malloc:   p4csize= ", (uintptr_t)chunksz);
 					malloc_debugHex("malloc:   p4call = ", malloc_common.lastCaller);
 					malloc_debugHex("malloc:   p4calx = ", ~malloc_common.lastCaller);

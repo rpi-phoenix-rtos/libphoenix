@@ -1650,16 +1650,27 @@ static heap_t *_malloc_heapAlloc(size_t size)
 	 * This is FOUR blocking debug() writes per creation, up to 16 times. At
 	 * 115200 baud that is on the order of 200 ms of UART inside heap creation,
 	 * for exactly the victim size, in every process. It was added AFTER the last
-	 * observed fire: the 2026-09-22 gate-stk log that fired 5 times contains 0 of
-	 * these lines, and every run since carries them -- 0 fires across 21 runs,
-	 * against 1 fire in the 15 runs that do not.
+	 * ⚠ CORRECTED 2026-09-25. An earlier version of this comment claimed the
+	 * trace was added AFTER the last observed fire and that no run carrying it
+	 * had ever fired. That was wrong: it came from globbing only *stk*.log, and
+	 * every firing run of the 2026-09-23/24 hunt is labelled c1audit/c1cx/c1armA/
+	 * c1master/c1off/c1smoke, so the glob silently skipped them all. Measured
+	 * properly across all 852 GPU-bearing logs (control: the log contains
+	 * "flipstat", i.e. a GPU run really happened):
 	 *
-	 * That contrast ALONE is Fisher p~0.42, i.e. not significant; it only reaches
-	 * significance against the historical 7/19 baseline, which is a different
-	 * binary and must not be pooled. So this is not proof that the trace
-	 * suppresses C1 -- it is simply not defensible to leave a ~200 ms hot-path
-	 * perturbation in the build used to measure a timing- and layout-sensitive
-	 * event.
+	 *     trace PRESENT: 195 runs,  7 fired
+	 *     trace ABSENT : 657 runs,  1 fired
+	 *
+	 * C1 fired SEVEN times with this trace compiled in, most recently
+	 * 2026-09-24 16:00. So the trace is not shown to suppress anything -- the raw
+	 * association points the other way, and is itself confounded, since the trace
+	 * was enabled precisely during the hunt sessions whose workloads were chosen
+	 * to provoke the event.
+	 *
+	 * The gate therefore rests on its own merit, not on that claim: four blocking
+	 * debug() writes per creation, up to 16 times, is on the order of 200 ms of
+	 * UART inside heap creation in every process, which has no place in a default
+	 * build regardless of what it does or does not suppress.
 	 *
 	 * Env-selected rather than deleted, and read inside the one binary, because
 	 * that is the only measurement shape that has worked here: a compiled arm

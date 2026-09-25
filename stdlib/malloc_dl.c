@@ -237,8 +237,19 @@ static void malloc_reportBadHeapSize(const char *where, const heap_t *heap);
  * it exactly. Wrap is tested separately: base + size overflowing would otherwise make
  * the range test below pass by accident.
  *
- * Safe to call on the paths where ->heap may itself be wrong -- it vets the pointer
- * before dereferencing it, which is the whole reason it exists. */
+ * ⚠ CORRECTED 2026-09-25: this comment used to end "Safe to call on the paths where
+ * ->heap may itself be wrong -- it vets the pointer before dereferencing it, which is
+ * the whole reason it exists." That is FALSE, and it contradicted the note on the
+ * heapLo/heapHi fields themselves, which states plainly that the window is "only ever
+ * widened", that a munmap'd heap therefore "leaves its range inside the window", and is
+ * "a plausibility filter, not exact membership". A released heap leaves a hole inside
+ * the window, so a page-aligned value sitting in one passes every test here and then
+ * FAULTS at the read below. Measured: /bin/ntpclient died at this line with
+ * far=0x5000 while the window ran [0x2000, ~0x43c000) (run c1hpa01, 2026-09-25) --
+ * the guard meant to make a bad pointer safe was itself the faulting instruction.
+ *
+ * So this returns "plausible", NOT "safe to dereference". A caller that may hold an
+ * unmapped address must establish mapping separately -- see malloc_heapMapped(). */
 static int malloc_heapSizeValid(const heap_t *heap)
 {
 	uintptr_t base = (uintptr_t)heap;
@@ -265,6 +276,23 @@ static int malloc_heapSizeValid(const heap_t *heap)
 	}
 
 	return 1;
+}
+
+
+/* Is this page actually mapped right now? The only test in reach that answers the
+ * question malloc_heapSizeValid() cannot: va2pa() is pmap_resolve(), which returns 0
+ * for an invalid descriptor, so 0 means "no translation" rather than "physical page
+ * zero". Kept OUT of malloc_heapSizeValid() deliberately -- that runs on the coalesce
+ * path for every free, and a syscall there would trade a rare fault for a permanent
+ * slowdown on the hottest path in the allocator.
+ *
+ * ⚠ It reports the PAGE TABLE, not the VMA, so a reserved-but-never-touched page reads
+ * as unmapped. That is not a concern for the live[] ring: _malloc_heapAlloc() writes
+ * heap->size immediately after mmap(), so a live heap's header page is always resident.
+ * Do not reuse this as a general "is this address legal" test. */
+static int malloc_heapMapped(uintptr_t base)
+{
+	return (va2pa((void *)base) != 0u) ? 1 : 0;
 }
 
 
@@ -362,6 +390,41 @@ static void malloc_debugHex(const char *label, uintptr_t v)
 	buf[n++] = '\n';
 	buf[n] = '\0';
 	debug(buf);
+}
+
+
+/* The live[] ring carries a stated invariant -- "a non-zero entry is a heap we believe
+ * is mapped and its header is safe to read" -- and on 2026-09-25 that invariant was
+ * observed to be false. Report a violation rather than skipping it silently: the whole
+ * point of the ring is to know which heaps are live, so an entry naming an unmapped
+ * page is a bookkeeping defect worth a tagged line, not noise to swallow. A silent skip
+ * would also have hidden the very crash that motivated this function.
+ *
+ * Bounded so a wrong entry cannot storm the UART and drown the C1 signature it sits
+ * next to -- malloc_c1Scan() walks all 256 slots on a timer, so an unbounded report
+ * here would repeat every scan tick.
+ *
+ * Placed below malloc_debugHex() because it uses it; C has no forward use of a static. */
+static unsigned int malloc_liveUnmappedReports = 0u;
+
+
+static int malloc_liveEntryReadable(uintptr_t base)
+{
+	if (malloc_heapSizeValid((const heap_t *)base) == 0) {
+		return 0;
+	}
+	if (malloc_heapMapped(base) != 0) {
+		return 1;
+	}
+	if (malloc_liveUnmappedReports < 8u) {
+		++malloc_liveUnmappedReports;
+		debug("malloc: C1-hunt: live[] entry is NOT MAPPED -- ring says live, pmap says gone\n");
+		malloc_debugHex("malloc:   lubase = ", base);
+		malloc_debugHex("malloc:   luhlo  = ", malloc_common.heapLo);
+		malloc_debugHex("malloc:   luhhi  = ", malloc_common.heapHi);
+		malloc_debugHex("malloc:   luovfl = ", (uintptr_t)malloc_common.liveOverflow);
+	}
+	return 0;
 }
 
 
@@ -1059,7 +1122,7 @@ static uintptr_t malloc_liveOverlap(uintptr_t nbase, size_t nsize)
 		if (lbase == 0u) {
 			continue;
 		}
-		if (malloc_heapSizeValid((const heap_t *)lbase) == 0) {
+		if (malloc_liveEntryReadable(lbase) == 0) {
 			continue;
 		}
 		lsize = ((const heap_t *)lbase)->size;
@@ -1560,6 +1623,15 @@ static void malloc_c1Scan(void)
 
 		if ((base == 0u) || (base == malloc_common.scanLastBase)) {
 			continue; /* already reported: spend the four slots on distinct heaps */
+		}
+
+		/* This read used to be COMPLETELY unguarded -- not even the page-alignment
+		 * test -- on the strength of the same "live[] is cleared on release" claim
+		 * that malloc_liveOverlap() relied on and that c1hpa01 disproved. It is the
+		 * more dangerous of the two, because the scan walks all 256 slots on a timer
+		 * rather than only at heap creation. */
+		if (malloc_liveEntryReadable(base) == 0) {
+			continue;
 		}
 
 		if ((((const heap_t *)base)->size >> 32) != 0u) {

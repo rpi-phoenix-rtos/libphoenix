@@ -422,6 +422,29 @@ static unsigned int caPaLines = 0u;
 static unsigned int caRelLines = 0u;
 
 
+/* Is the all-heap physical-page trace armed? Cached, and deliberately shared by
+ * both call sites.
+ *
+ * getenv() is a linear scan of environ (libphoenix stdlib/env.c: _env_find), so
+ * it allocates nothing and cannot deadlock against the lock this runs under --
+ * checked, because a probe that allocated inside the allocator would be a hang,
+ * and a fix that turns a fast failure into a hang is worse than the bug. It is
+ * still a scan per call, so calling it on every heap release (up to 256 times)
+ * would be pure waste; the rest of this file caches such lookups in a static and
+ * this now does the same, once per process. */
+static int malloc_caTraceOn(void)
+{
+	static int caTrace = -1;
+
+	if (caTrace < 0) {
+		const char *e = getenv("C1_HEAP_TRACE_ALL");
+
+		caTrace = ((e != NULL) && (*e == '1')) ? 1 : 0;
+	}
+	return caTrace;
+}
+
+
 static int malloc_liveEntryReadable(uintptr_t base, size_t recorded)
 {
 	/* ⚠ THE ORDER OF THESE TESTS IS LOAD-BEARING. malloc_heapSizeValid() reads
@@ -1947,16 +1970,10 @@ static heap_t *_malloc_heapAlloc(size_t size)
 	 * whose mapping vanished. Note the trace is per-process env-gated, so it must
 	 * be armed on the command that actually allocates. */
 	{
-		static int caTrace = -1;
 		static unsigned int caSeen = 0u;
 		const unsigned int caCap = 64u;
 
-		if (caTrace < 0) {
-			const char *e = getenv("C1_HEAP_TRACE_ALL");
-			caTrace = ((e != NULL) && (*e == '1')) ? 1 : 0;
-		}
-
-		if ((caTrace != 0) && (caSeen < caCap)) {
+		if ((malloc_caTraceOn() != 0) && (caSeen < caCap)) {
 			caSeen++;
 			debug("malloc: C1-hunt: heap created (all-trace)\n");
 			malloc_debugHex("malloc:   casize = ", (uintptr_t)heapSize);
@@ -2616,10 +2633,8 @@ void free(void *ptr)
 			 * line in the report. A match only means anything if the heap was
 			 * still LIVE when the mailbox took the page, and these lines are what
 			 * let the report tell those apart. */
-			if (caRelLines < 256u) {
-				const char *e = getenv("C1_HEAP_TRACE_ALL");
-
-				if ((e != NULL) && (*e == '1')) {
+			if ((caRelLines < 256u) && (malloc_caTraceOn() != 0)) {
+				{
 					uintptr_t pg;
 
 					for (pg = (uintptr_t)heap;

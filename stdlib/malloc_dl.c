@@ -513,6 +513,17 @@ static int malloc_liveEntryReadable(uintptr_t base, size_t recorded)
  * base rather than calling it: that function also tests its argument for page
  * alignment and window membership, so handing it a fixed-up copy would return 0
  * every time and this field would look like evidence while being a constant. */
+#ifdef V3D_C1_HUNT
+/* Declared HERE, ahead of both call sites. It used to sit further down, next to the
+ * poison-break path that was its only user -- so wiring it into the corrupt-header
+ * reporter above broke the -DV3D_C1_HUNT build with an implicit declaration, which
+ * the default build could not see because the whole block compiles out. Check a
+ * compile-guarded change with the guard BOTH ways. */
+extern int v3d_c1_lookup_page(unsigned long page, unsigned int *handle, unsigned long *off,
+	int *closed, unsigned int *total) __attribute__((weak));
+#endif /* V3D_C1_HUNT */
+
+
 static void malloc_reportHeapSize(const heap_t *heap)
 {
 	uintptr_t hbase = (uintptr_t)heap;
@@ -538,6 +549,43 @@ static void malloc_reportHeapSize(const heap_t *heap)
 	malloc_debugHex("malloc:   hlo32 = ", (uintptr_t)lo);
 	malloc_debugHex("malloc:   hhi32 = ", (uintptr_t)(heap->size >> 32));
 	malloc_debugHex("malloc:   hfixed= ", (uintptr_t)ok);
+
+	/* TODO(C1-hunt): was this page a BUFFER OBJECT, and had it been closed?
+	 *
+	 * This is the question the strongest evidence in the whole hunt points at:
+	 * V3D_KEEP_CLOSED_BO=1 (never return a closed BO's pages to the kernel) gives
+	 * 0 fires in 12 runs against 7 in 19, Fisher one-tailed p = 0.019, all 31 runs
+	 * in one byte-identical binary. The lever is measured; what lands on those
+	 * pages after recycling is what is unidentified.
+	 *
+	 * The attribution table already exists (v3d_c1_lookup_page, answered in-process
+	 * from c1_seen[] with NO UART output, built precisely because every noisy
+	 * instrument suppressed the event). It was only ever wired to the POISON-BREAK
+	 * path -- which is the same mistake hpa fixed twenty lines up: the header path
+	 * carries substantially all the events, and run c1coin produced 107 header
+	 * fires against 4 breaks. Asking it here is free and fire-only.
+	 *
+	 * Reading: hbon>0 means this page WAS inside a BO; hbocl is that BO's close
+	 * ordinal (0 = still open at the time). hbon=0 with hbotot>0 means the driver
+	 * was present and this page was simply never a BO -- which is a real answer,
+	 * not a missing one. */
+#ifdef V3D_C1_HUNT
+	if (v3d_c1_lookup_page != NULL) {
+		unsigned int h = 0u, tot = 0u;
+		unsigned long off = 0u;
+		int closed = 0, n;
+
+		n = v3d_c1_lookup_page((unsigned long)heap & ~(unsigned long)(_PAGE_SIZE - 1),
+			&h, &off, &closed, &tot);
+		malloc_debugHex("malloc:   hbon   = ", (uintptr_t)(unsigned)n);
+		malloc_debugHex("malloc:   hbotot = ", (uintptr_t)tot);
+		if (n > 0) {
+			malloc_debugHex("malloc:   hboh   = ", (uintptr_t)h);
+			malloc_debugHex("malloc:   hbooff = ", (uintptr_t)off);
+			malloc_debugHex("malloc:   hbocl  = ", (uintptr_t)(unsigned)closed);
+		}
+	}
+#endif /* V3D_C1_HUNT */
 }
 
 
@@ -791,8 +839,6 @@ static void malloc_c1FreeLogReport(uintptr_t addr)
  * and must still link -- the call site reports the absence rather than assuming.
  * Declared here rather than in a header to keep libphoenix free of any build-time
  * dependency on the driver. */
-extern int v3d_c1_lookup_page(unsigned long page, unsigned int *handle, unsigned long *off,
-	int *closed, unsigned int *total) __attribute__((weak));
 #endif /* V3D_C1_HUNT */
 
 

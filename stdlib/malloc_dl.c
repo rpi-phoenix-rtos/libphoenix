@@ -296,7 +296,16 @@ static int malloc_heapSizeValid(const heap_t *heap)
  * ⚠ It reports the PAGE TABLE, not the VMA, so a reserved-but-never-touched page reads
  * as unmapped. That is not a concern for the live[] ring: _malloc_heapAlloc() writes
  * heap->size immediately after mmap(), so a live heap's header page is always resident.
- * Do not reuse this as a general "is this address legal" test. */
+ * Do not reuse this as a general "is this address legal" test.
+ *
+ * ⚠ PRECONDITION: `base` MUST be page-aligned. va2pa() is
+ * (pmap_resolve(va & ~0xfff) & ~0xfff) + (va & 0xfff), so on an unmapped page it
+ * returns the in-page OFFSET -- non-zero for any unaligned address. Probing with
+ * an unaligned pointer therefore answers "mapped" for memory that is not mapped
+ * at all, which is the exact failure this function exists to prevent, inverted.
+ * The only caller checks alignment first; the target test
+ * (libc/misc/va2pa.c, unmapped_unaligned_returns_the_offset_not_zero) pins the
+ * behaviour down so this cannot regress silently. */
 static int malloc_heapMapped(uintptr_t base)
 {
 	return (va2pa((void *)base) != 0u) ? 1 : 0;

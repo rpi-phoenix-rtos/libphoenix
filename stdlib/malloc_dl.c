@@ -1955,6 +1955,28 @@ static heap_t *_malloc_heapAlloc(size_t size)
 			malloc_debugHex("malloc:   casize = ", (uintptr_t)heapSize);
 			malloc_debugHex("malloc:   cabase = ", (uintptr_t)heap);
 			malloc_debugHex("malloc:   careq  = ", (uintptr_t)size);
+			/* The PHYSICAL page, which is the whole point of this trace being
+			 * unconditional.
+			 *
+			 * The standing C1 hypothesis is that a VideoCore mailbox response
+			 * lands at page+4 of a live heap, and the correlation that would
+			 * show it (heap PA vs the v3d driver's logged mailbox request-buffer
+			 * PA) has so far been FIRE-GATED: hpa/p4pa print only when a guard
+			 * trips, so five clean trials of series #3 produced 24 mailbox PAs
+			 * each and not one heap PA to compare them against.
+			 *
+			 * ⚠ This matters more than it looks. The archive says instruments
+			 * SUPPRESS C1 (five in a row drove the rate to 0), so an experiment
+			 * that needs the event to fire is fighting its own instrumentation.
+			 * Logging the PA on every heap creation turns the question into one
+			 * that needs no fire at all: does a mailbox buffer's physical page
+			 * EVER coincide with a live heap's? That is answerable on a clean
+			 * run, which removes suppression from the critical path entirely.
+			 *
+			 * Deliberately confined to this opt-in trace, never the default
+			 * build, so it cannot perturb the rate of the event it is studying. */
+			malloc_debugHex("malloc:   capa   = ",
+					(uintptr_t)va2pa((void *)((uintptr_t)heap & ~(uintptr_t)(_PAGE_SIZE - 1))));
 		}
 	}
 

@@ -1700,13 +1700,22 @@ static heap_t *_malloc_heapAlloc(size_t size)
 	 * Always assert created >= 1 on the armed arm before believing an A/B. */
 	if ((heapSize == 0xd000u) || (heapSize == 0x2000u) || (heapSize == 0x5000u)) {
 		static int c1trace = -1;
+		/* Budget PER SIZE, not one shared pool. With a single 16-report cap the
+		 * first size to be created would consume the whole budget -- historical
+		 * runs already reported 13-16 creations with the 0xd000-only filter -- and
+		 * the size actually under investigation (0x5000) could go unreported in
+		 * every run. An experiment whose instrument can silently omit the thing it
+		 * was widened for is worse than no experiment. */
+		static unsigned int c1seen[3];
+		unsigned int c1i = (heapSize == 0xd000u) ? 0u : ((heapSize == 0x2000u) ? 1u : 2u);
 
 		if (c1trace < 0) {
 			const char *e = getenv("C1_HEAP_TRACE");
 			c1trace = ((e != NULL) && (*e == '1')) ? 1 : 0;
 		}
 
-		if ((c1trace != 0) && (malloc_common.bigHeapReports < 16u)) {
+		if ((c1trace != 0) && (c1seen[c1i] < 8u)) {
+			c1seen[c1i]++;
 			++malloc_common.bigHeapReports;
 			debug("malloc: C1-hunt: created a victim-size heap\n");
 			malloc_debugHex("malloc:   c1size = ", (uintptr_t)heapSize);

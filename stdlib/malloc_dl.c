@@ -2634,15 +2634,13 @@ void free(void *ptr)
 			 * still LIVE when the mailbox took the page, and these lines are what
 			 * let the report tell those apart. */
 			if ((caRelLines < 256u) && (malloc_caTraceOn() != 0)) {
-				{
-					uintptr_t pg;
+				uintptr_t pg;
 
-					for (pg = (uintptr_t)heap;
-							(pg < ((uintptr_t)heap + heap->size)) && (caRelLines < 256u);
-							pg += (uintptr_t)_PAGE_SIZE) {
-						caRelLines++;
-						malloc_debugHex("malloc:   carel  = ", (uintptr_t)va2pa((void *)pg));
-					}
+				for (pg = (uintptr_t)heap;
+						(pg < ((uintptr_t)heap + heap->size)) && (caRelLines < 256u);
+						pg += (uintptr_t)_PAGE_SIZE) {
+					caRelLines++;
+					malloc_debugHex("malloc:   carel  = ", (uintptr_t)va2pa((void *)pg));
 				}
 			}
 

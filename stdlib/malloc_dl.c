@@ -1921,6 +1921,43 @@ static heap_t *_malloc_heapAlloc(size_t size)
 		}
 	}
 
+	/* A SECOND, independently armed trace: every heap, no size floor and no
+	 * address window. C1_HEAP_TRACE above is tuned for STK -- it reports only
+	 * heaps >= 0x5000 inside [0x09000000, 0x11000000), which is where that
+	 * workload's victims appear -- and those two filters make it blind to exactly
+	 * the question a small process raises. /bin/ntpclient faulted on a live[]
+	 * entry naming base 0x5000 (run c1hpa01): the STK trace could never report a
+	 * heap at that address, so arming it for ntpclient would print nothing at all
+	 * and the silence would look like an answer.
+	 *
+	 * Kept separate rather than widening the other filter, so the STK experiment
+	 * kept running under the conditions it was calibrated for. Distinct labels
+	 * (ca*) so the two traces can never be confused in a log. The cap is small
+	 * because the processes this is for are small -- it is not for STK.
+	 *
+	 * Purpose: answer "was this base EVER an mmap() return in THIS process?",
+	 * which is the test that separates a corrupt live[] slot from an honest heap
+	 * whose mapping vanished. Note the trace is per-process env-gated, so it must
+	 * be armed on the command that actually allocates. */
+	{
+		static int caTrace = -1;
+		static unsigned int caSeen = 0u;
+		const unsigned int caCap = 64u;
+
+		if (caTrace < 0) {
+			const char *e = getenv("C1_HEAP_TRACE_ALL");
+			caTrace = ((e != NULL) && (*e == '1')) ? 1 : 0;
+		}
+
+		if ((caTrace != 0) && (caSeen < caCap)) {
+			caSeen++;
+			debug("malloc: C1-hunt: heap created (all-trace)\n");
+			malloc_debugHex("malloc:   casize = ", (uintptr_t)heapSize);
+			malloc_debugHex("malloc:   cabase = ", (uintptr_t)heap);
+			malloc_debugHex("malloc:   careq  = ", (uintptr_t)size);
+		}
+	}
+
 	malloc_heapInit(heap, heapSize);
 	malloc_chunkInit(chunk, heap, FLOOR(heap->size - sizeof(heap_t), 8));
 	chunk->size |= CHUNK_PUSED;

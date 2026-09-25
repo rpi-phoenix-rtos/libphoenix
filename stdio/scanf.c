@@ -23,6 +23,7 @@
 #include <string.h>
 #include <limits.h>
 #include <stdarg.h>
+#include <stddef.h> /* ptrdiff_t, used by the %t conversion */
 
 
 #define LONG       0x01   /* l: long or double */
@@ -111,6 +112,7 @@ static int scanf_parse(char *ccltab, const char *inp, int *inr, char const *fmt0
 {
 	const unsigned char *fmt = (const unsigned char *)fmt0;
 	int c, n, flags, nassigned, nconversions, nread, base;
+	int nconsumed, lastc;
 	size_t width;
 	char *p, *p0;
 	char buf[32];
@@ -542,6 +544,17 @@ static int scanf_parse(char *ccltab, const char *inp, int *inr, char const *fmt0
 					width = ~0;
 				}
 
+				/* `buf` records only the characters we intend to CONVERT, and a
+				 * suppressed conversion copies nothing (which is what lets width
+				 * go unbounded above). So `p - buf` is not the number of
+				 * characters consumed, and three things downstream were reading
+				 * it as though it were: %n came out short by the suppressed
+				 * digits, the "0x" prefix test (p == buf + 1) could never fire
+				 * for %*i/%*x, and `p[-1]` read one byte BEFORE buf whenever
+				 * nothing had been copied -- which under SUPPRESS is always.
+				 * Track consumption separately instead. */
+				nconsumed = 0;
+				lastc = 0;
 				flags |= SIGNOK | NDIGITS | NZDIGITS;
 				for (p = buf; width; width--) {
 					int ok = 0;
@@ -612,7 +625,7 @@ static int scanf_parse(char *ccltab, const char *inp, int *inr, char const *fmt0
 
 						case 'x':
 						case 'X':
-							if (((flags & PFXOK) != 0) && (p == buf + 1)) {
+							if (((flags & PFXOK) != 0) && (nconsumed == 1)) {
 								base = 16; /* if %i */
 								flags &= ~PFXOK;
 								ok = 1;
@@ -625,6 +638,8 @@ static int scanf_parse(char *ccltab, const char *inp, int *inr, char const *fmt0
 					if ((flags & SUPPRESS) == 0) {
 						*p++ = c;
 					}
+					nconsumed++;
+					lastc = c;
 					if (--(*inr) > 0) {
 						inp++;
 					}
@@ -644,9 +659,12 @@ static int scanf_parse(char *ccltab, const char *inp, int *inr, char const *fmt0
 					return (nconversions != 0 ? nassigned : -1);
 				}
 
-				c = ((unsigned char *)p)[-1];
+				c = lastc;
 				if ((c == 'x') || (c == 'X')) {
-					--p;
+					if ((flags & SUPPRESS) == 0) {
+						--p;
+					}
+					nconsumed--;
 					inp--;
 					(*inr)++;
 				}
@@ -685,7 +703,7 @@ static int scanf_parse(char *ccltab, const char *inp, int *inr, char const *fmt0
 					nassigned++;
 				}
 
-				nread += p - buf;
+				nread += nconsumed;
 				nconversions++;
 				break;
 

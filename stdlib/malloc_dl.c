@@ -396,6 +396,16 @@ static void malloc_reportHeapSize(const heap_t *heap)
 			&& ((malloc_common.heapHi == 0u) || ((hbase + lo) <= malloc_common.heapHi)))
 			? 1 : 0;
 
+	/* The heap's PHYSICAL page. Measured 2026-09-25 (run c1pa1 @22:22): a heavily
+	 * firing run gave 139 corrupt-header fires and 273 hfixed=1 readings but ZERO
+	 * poison breaks -- so p4pa, which only prints on a break, never ran and the
+	 * mailbox-PA comparison had nothing to work with. The header path is where
+	 * the events actually are, so it has to carry the physical address too, or
+	 * the decisive comparison depends on the rarer signature.
+	 *
+	 * Free on a healthy run: this whole reporter is fire-only. */
+	malloc_debugHex("malloc:   hpa   = ",
+		(uintptr_t)va2pa((void *)((uintptr_t)heap & ~(uintptr_t)(_PAGE_SIZE - 1))));
 	malloc_debugHex("malloc:   hsize = ", (uintptr_t)heap->size);
 	malloc_debugHex("malloc:   hlo32 = ", (uintptr_t)lo);
 	malloc_debugHex("malloc:   hhi32 = ", (uintptr_t)(heap->size >> 32));

@@ -1698,7 +1698,21 @@ static heap_t *_malloc_heapAlloc(size_t size)
 	 * default side. Measured 2026-09-25 on SuperTuxKart f2efc4b0: armed gives
 	 * created=14, default 0, both 1772 frames, so today it latches late enough.
 	 * Always assert created >= 1 on the armed arm before believing an A/B. */
-	if ((heapSize == 0xd000u) || (heapSize == 0x2000u) || (heapSize == 0x5000u)) {
+	/* Trace EVERY heap big enough to hold the 0x4ff0 chunk the page-poison guard
+	 * keeps finding broken, not a hand-picked list of sizes.
+	 *
+	 * Measured 2026-09-25 (run c1gc): tracing 0xd000/0x5000/0x2000 exhaustively
+	 * -- budgets NOT exhausted -- still put 0 of the breaks inside a traced heap,
+	 * so the victim is a FRAGMENT of some larger heap whose size was never on the
+	 * list. The legal large sizes are 0x1000 0x2000 0x3000 0x4000 0x5000 0x7000
+	 * 0x9000 0xd000 0x11000 0x19000 0x21000; anything below 0x5000 cannot hold a
+	 * 0x4ff0 chunk, so >= 0x5000 is the exact filter.
+	 *
+	 * Budget 192, because 42 traced heaps of that class reached only 0x0847e000
+	 * while the victim was at 0x0b588000. Affordable: more of this trace has
+	 * consistently meant MORE events, not fewer (21 reports -> 52 signature hits,
+	 * 59 reports -> 308), so it is not perturbing the thing it measures. */
+	if (heapSize >= 0x5000u) {
 		static int c1trace = -1;
 		/* Budget PER SIZE, not one shared pool. With a single 16-report cap the
 		 * first size to be created would consume the whole budget -- historical
@@ -1706,8 +1720,8 @@ static heap_t *_malloc_heapAlloc(size_t size)
 		 * the size actually under investigation (0x5000) could go unreported in
 		 * every run. An experiment whose instrument can silently omit the thing it
 		 * was widened for is worse than no experiment. */
-		static unsigned int c1seen[3];
-		unsigned int c1i = (heapSize == 0xd000u) ? 0u : ((heapSize == 0x2000u) ? 1u : 2u);
+		static unsigned int c1seen[1];
+		const unsigned int c1i = 0u;
 		/* 0xd000 gets a much larger budget than the rest: it is the size of every
 		 * archived hsize victim, and a budget of 8 demonstrably stops too early.
 		 * Measured 2026-09-25 on an armed run that DID reproduce the corruption:
@@ -1716,7 +1730,7 @@ static heap_t *_malloc_heapAlloc(size_t size)
 		 * The same run proves the cost is affordable -- it emitted 21 reports and
 		 * still fired 52 signature hits, so this trace does not suppress the
 		 * event. */
-		const unsigned int c1cap = (c1i == 0u) ? 48u : 8u;
+		const unsigned int c1cap = 192u;
 
 		if (c1trace < 0) {
 			const char *e = getenv("C1_HEAP_TRACE");

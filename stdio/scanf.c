@@ -752,6 +752,40 @@ static int scanf_parse(char *ccltab, const char *inp, int *inr, char const *fmt0
 				}
 
 				int consumed = p - srcbuf;
+
+				/* C17 7.21.6.2p12-13: the input item is the longest sequence
+				 * that IS, OR IS A PREFIX OF, a matching sequence -- and if that
+				 * item is not itself a matching sequence, the directive FAILS.
+				 * strtod instead stops at the longest VALID prefix, so "1e" came
+				 * back as 1.0 with the 'e' left unread and scanf reported
+				 * success on input glibc (correctly) rejects.
+				 *
+				 * The item demonstrably continues past what strtod took, and
+				 * cannot be completed, in exactly two shapes: an exponent marker
+				 * with no exponent digits after it, and an "0x" with no hex
+				 * digits. `hasExp` matters because a second 'e' does NOT extend
+				 * an item that already has an exponent ("1e5e" is a valid item
+				 * followed by junk), and 'e' is itself a hex digit, so "0x1e"
+				 * is consumed whole and never reaches here. */
+				if ((consumed > 0) && (consumed < *inr)) {
+					char nx = srcbuf[consumed];
+					int hasExp = (memchr(srcbuf, 'e', consumed) != NULL) ||
+							(memchr(srcbuf, 'E', consumed) != NULL) ||
+							(memchr(srcbuf, 'p', consumed) != NULL) ||
+							(memchr(srcbuf, 'P', consumed) != NULL);
+					int expMarker = ((nx == 'e') || (nx == 'E') ||
+							(nx == 'p') || (nx == 'P')) && (hasExp == 0);
+					int hexMarker = ((nx == 'x') || (nx == 'X')) &&
+							(consumed == 1) && (srcbuf[0] == '0');
+
+					if ((expMarker != 0) || (hexMarker != 0)) {
+						/* A matching failure, not EOF: input still remains (the
+						 * guard above required it), so return the count already
+						 * assigned, as the integer path does. */
+						return nassigned;
+					}
+				}
+
 				*inr -= consumed;
 				inp += consumed;
 				nread += consumed;

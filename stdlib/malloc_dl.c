@@ -900,12 +900,27 @@ static void malloc_c1FreeLogReport(uintptr_t addr)
  * if all four fire at comparable rates, the writer scribbles broadly and the whole
  * fixed-offset framing (and the exclusions built on it) is wrong. */
 /* ⚠ OPT-IN, and this default is a measured requirement, not caution. Arming all
- * four probes SUPPRESSED the event: 0 fires in 6 runs where one probe reproduces
- * it about 1 run in 3. That is the fifth instrument change in a row to do this
- * (V3D_KEEP_CLOSED_BO, the closed-BO quarantine, the BO trace, the passive
- * attribution table, and now this), and it is the single most important fact
- * about C1 -- it cannot currently be studied by ADDING instrumentation, because
- * any change to the binary's write pattern or layout stops it happening.
+ * four probes appeared to SUPPRESS the event: 0 fires in 6 runs where one probe
+ * was believed to reproduce it about 1 run in 3.
+ *
+ * ↩ RETRACTED 2026-09-26, and the retraction matters more than the claim did.
+ * That "1 run in 3" baseline is not in the archive: counting every STK-class run
+ * by day gives 30 fires / 276 runs = 10.9 % (range 0-22 %). At the real rate,
+ * "0 fires in 6" has probability 0.50 -- a coin flip, not suppression. The same
+ * arithmetic dissolves the other four arms this claim was built on (0 in 5, 7, 8
+ * and 12 give p = 0.56, 0.45, 0.40, 0.25).
+ *
+ * This comment used to conclude that C1 "cannot currently be studied by ADDING
+ * instrumentation, because any change to the binary's write pattern or layout
+ * stops it happening". That is DISPROVED by a positive result: a build carrying
+ * capa, carel, hbopa, p4bopa and a 4 KiB closed-BO table -- changing both write
+ * pattern and layout -- fired 2 times in 11 runs (18 %) on 2026-09-26, one of
+ * them halting the kernel. Instruments can be added.
+ *
+ * What survives: V3D_KEEP_CLOSED_BO, whose arm is PAIRED (0/12 vs 7/19, Fisher
+ * p = 0.019) and therefore assumes no baseline. And the narrower possibility
+ * that some SPECIFIC heavy instrument suppresses -- tonight's is mostly
+ * fire-only, so it does not test a 96 KiB table.
  *
  * So the default stays at the single historical probe, which keeps master
  * reproducing the bug. -DC1_P4_WIDE arms all four to ask where the writes land,

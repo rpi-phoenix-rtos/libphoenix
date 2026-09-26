@@ -513,6 +513,26 @@ static int malloc_liveEntryReadable(uintptr_t base, size_t recorded)
  * base rather than calling it: that function also tests its argument for page
  * alignment and window membership, so handing it a fixed-up copy would return 0
  * every time and this field would look like evidence while being a constant. */
+/* Was this PHYSICAL frame inside a buffer object the v3d driver CLOSED?
+ *
+ * Separate from v3d_c1_lookup_page() above, and deliberately keyed on the PHYSICAL
+ * address, because the two answer different questions. A recycled frame reaches
+ * malloc at a DIFFERENT virtual address, so a VA-keyed lookup cannot see the
+ * recycling case at all -- it matches only when the VA itself is reused. What
+ * survives a trip through the kernel's free pool is the frame, and the frame is
+ * what this reporter already prints as hpa.
+ *
+ * Not behind V3D_C1_HUNT: its table is ~4 KiB (closed BOs only, {frame, count,
+ * ordinal}), where the hunt build's is 96 KiB -- and a passive 96 KiB table is on
+ * record in this project as SUPPRESSING C1. An instrument that silences the event
+ * cannot measure it, so this one is sized to stay out of the way.
+ *
+ * Weak: a binary with no v3d driver links fine and reports the page as
+ * unattributable rather than assuming either answer. */
+extern int v3d_c1_lookup_pa(unsigned long pa, unsigned int *npages, unsigned int *ord,
+	unsigned int *total) __attribute__((weak));
+
+
 #ifdef V3D_C1_HUNT
 /* Declared HERE, ahead of both call sites. It used to sit further down, next to the
  * poison-break path that was its only user -- so wiring it into the corrupt-header
@@ -549,6 +569,29 @@ static void malloc_reportHeapSize(const heap_t *heap)
 	malloc_debugHex("malloc:   hlo32 = ", (uintptr_t)lo);
 	malloc_debugHex("malloc:   hhi32 = ", (uintptr_t)(heap->size >> 32));
 	malloc_debugHex("malloc:   hfixed= ", (uintptr_t)ok);
+
+	/* TODO(C1-hunt): was this FRAME a closed buffer object?
+	 *
+	 * This is the measurement that separates the two live readings of the
+	 * KEEP_CLOSED_BO result. Under "recycling is merely necessary" the victim
+	 * frame is ordinary pool churn and was never a BO; under "recycling is the
+	 * TRIGGER" it was one. hbopa > 0 says it was, and hboord says how many closes
+	 * ago -- which also bounds the close-to-fire latency that nothing currently
+	 * measures. hbopa == 0 with hbotot > 0 is a real answer, not a missing
+	 * instrument: the driver was present, it had closed hbotot BOs, and this frame
+	 * was not among them. */
+	if (v3d_c1_lookup_pa != NULL) {
+		unsigned int np = 0u, ord = 0u, tot = 0u;
+		uintptr_t pa = (uintptr_t)va2pa((void *)((uintptr_t)heap & ~(uintptr_t)(_PAGE_SIZE - 1)));
+		int n = v3d_c1_lookup_pa((unsigned long)pa, &np, &ord, &tot);
+
+		malloc_debugHex("malloc:   hbopa = ", (uintptr_t)(unsigned)n);
+		malloc_debugHex("malloc:   hbotot= ", (uintptr_t)tot);
+		if (n > 0) {
+			malloc_debugHex("malloc:   hbonpg= ", (uintptr_t)np);
+			malloc_debugHex("malloc:   hboord= ", (uintptr_t)ord);
+		}
+	}
 
 	/* TODO(C1-hunt): was this page a BUFFER OBJECT, and had it been closed?
 	 *

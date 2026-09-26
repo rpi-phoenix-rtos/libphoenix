@@ -90,6 +90,21 @@ typedef struct pthread_condattr_t {
 	clockid_t clock_id;
 } pthread_condattr_t;
 
+typedef struct {
+	pthread_mutex_t mutex;
+	pthread_cond_t cond;
+	unsigned int count;
+	unsigned int waiting;
+	unsigned int inside;
+	unsigned int generation;
+} pthread_barrier_t;
+
+
+typedef struct {
+	int pshared;
+} pthread_barrierattr_t;
+
+
 typedef struct __pthread_key_t *pthread_key_t;
 
 typedef uint32_t pthread_once_t;

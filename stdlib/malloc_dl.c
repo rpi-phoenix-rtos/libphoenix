@@ -30,6 +30,8 @@
 #include <sysexits.h>
 #include <unistd.h>
 
+#include "malloc-internal.h"
+
 #define CEIL(value, size)          ((((value) + (size) - 1) / (size)) * (size))
 #define FLOOR(value, size)         (((value) / (size)) * (size))
 
@@ -3135,6 +3137,87 @@ void *reallocf(void *ptr, size_t size)
 		free(ptr);
 
 	return p;
+}
+
+
+/* The aligned-allocation core (dlmalloc's internal_memalign technique).
+ *
+ * A payload here is only 8-aligned: chunks sit at 8-byte multiples from a
+ * page-aligned heap, and CHUNK_OVERHEAD is 16. For anything stricter, allocate
+ * enough slack to find an aligned payload that leaves at least CHUNK_MIN_SIZE
+ * in front of it, turn that leading piece into an ordinary free chunk, and
+ * hand out the remainder as an ordinary used chunk. Both headers are the same
+ * shapes every other path produces, so free(), realloc(), malloc_usable_size()
+ * and the coalescing code need no special case -- nothing else in this file
+ * changes behaviour. The tail slack is returned by realloc()'s in-place
+ * shrink-split.
+ *
+ *   chunk                       aligned              payload % alignment == 0
+ *   | lead (>= CHUNK_MIN_SIZE)  | size ... | slack -> split off by realloc()
+ *   ^ becomes a FREE chunk      ^ CUSED, PUSED clear (its predecessor is free) */
+void *_malloc_aligned(size_t alignment, size_t size)
+{
+	chunk_t *chunk, *aligned;
+	heap_t *heap;
+	uintptr_t addr, payload;
+	size_t need, lead, chunksz;
+	void *p;
+
+	if (size == 0) {
+		size = 1; /* like malloc(0): a unique, freeable pointer */
+	}
+
+	if (alignment <= 8u) {
+		return malloc(size);
+	}
+
+	/* The chunk size malloc() would use for `size`, plus room to slide the
+	 * payload up to the next aligned address with a whole chunk in front. */
+	if ((size > SIZE_MAX - CHUNK_OVERHEAD - 8u) ||
+			(CEIL(max(size + CHUNK_OVERHEAD, CHUNK_MIN_SIZE), 8) > SIZE_MAX - alignment - CHUNK_MIN_SIZE)) {
+		errno = ENOMEM;
+		return NULL;
+	}
+	need = CEIL(max(size + CHUNK_OVERHEAD, CHUNK_MIN_SIZE), 8);
+
+	p = malloc(need + alignment + CHUNK_MIN_SIZE);
+	if (p == NULL) {
+		return NULL;
+	}
+
+	addr = (uintptr_t)p;
+	if ((addr & (alignment - 1u)) != 0u) {
+		mutexLock(malloc_common.mutex);
+
+		chunk = (chunk_t *)(addr - CHUNK_OVERHEAD);
+		heap = chunk->heap;
+		chunksz = malloc_chunkSize(chunk);
+
+		/* First aligned payload at least CHUNK_MIN_SIZE past the current one.
+		 * Both addresses are multiples of 8, so `lead` is a valid chunk size,
+		 * and the slack above guarantees `need` bytes remain after it. */
+		payload = (addr + CHUNK_MIN_SIZE + alignment - 1u) & ~((uintptr_t)alignment - 1u);
+		lead = payload - addr;
+		aligned = (chunk_t *)(payload - CHUNK_OVERHEAD);
+
+		aligned->heap = heap;
+		aligned->size = (chunksz - lead) | CHUNK_CUSED;
+
+		/* The leading piece keeps the original PUSED bit (it describes the
+		 * chunk before it) and is released exactly as free() would release it. */
+		chunk->size = lead | (chunk->size & CHUNK_PUSED);
+		malloc_chunkSetFooter(chunk);
+		heap->freesz += lead;
+		_malloc_chunkAdd(chunk);
+		_malloc_chunkJoin(chunk);
+
+		mutexUnlock(malloc_common.mutex);
+
+		p = (void *)payload;
+	}
+
+	/* Shrinking never moves a block, so this only splits the tail slack off. */
+	return realloc(p, size);
 }
 
 

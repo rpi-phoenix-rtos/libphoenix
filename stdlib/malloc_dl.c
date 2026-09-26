@@ -446,6 +446,20 @@ static unsigned long malloc_c1HeapBytes = 0u;
 static unsigned long malloc_c1HeapProbes = 0u;
 static unsigned long malloc_c1HeapFromBo = 0u;
 
+/* Where heaps are landing PHYSICALLY, which the `capa` trace cannot say: it is
+ * capped at 64 heaps and therefore only ever samples process startup. Every C1
+ * victim so far sits in a ~5 MiB physical band, but every victim is also a LATE
+ * heap -- and if physical allocation advances roughly monotonically as a process
+ * runs, every late heap would be in a narrow band and the clustering would mean
+ * nothing. lo/hi/last make a fire's neighbouring pace lines answer that directly.
+ *
+ * Three values rather than just `last`, because `last` alone cannot distinguish
+ * "heaps march upward" from "heaps are scattered and this one happened to be
+ * here": the SPAN is the discriminator. */
+static unsigned long malloc_c1HeapPaLo = 0u;
+static unsigned long malloc_c1HeapPaHi = 0u;
+static unsigned long malloc_c1HeapPaLast = 0u;
+
 
 /* Read the pacing counters. Either pointer may be NULL.
  *
@@ -469,6 +483,24 @@ void malloc_c1Pacing(unsigned long *heaps, unsigned long *bytes)
 /* How many heaps landed on a page the v3d driver had closed, and how many were
  * checked at all. Separate from malloc_c1Pacing() so the older two-value call
  * keeps working; both are weak-linked by the winsys. */
+/* Physical span of every heap this process has created, plus the most recent.
+ * Separate function so the existing weak pair keeps its signature: a weak extern
+ * declared with the wrong prototype is undefined behaviour, not a link error. */
+void malloc_c1HeapPaRange(unsigned long *lo, unsigned long *hi, unsigned long *last);
+void malloc_c1HeapPaRange(unsigned long *lo, unsigned long *hi, unsigned long *last)
+{
+	if (lo != NULL) {
+		*lo = malloc_c1HeapPaLo;
+	}
+	if (hi != NULL) {
+		*hi = malloc_c1HeapPaHi;
+	}
+	if (last != NULL) {
+		*last = malloc_c1HeapPaLast;
+	}
+}
+
+
 void malloc_c1HeapBoHits(unsigned long *hits, unsigned long *probes);
 void malloc_c1HeapBoHits(unsigned long *hits, unsigned long *probes)
 {
@@ -2160,6 +2192,13 @@ static heap_t *_malloc_heapAlloc(size_t size)
 
 		if (hpa != 0u) {
 			malloc_c1HeapProbes++;
+			malloc_c1HeapPaLast = (unsigned long)hpa;
+			if ((malloc_c1HeapPaLo == 0u) || ((unsigned long)hpa < malloc_c1HeapPaLo)) {
+				malloc_c1HeapPaLo = (unsigned long)hpa;
+			}
+			if ((unsigned long)hpa > malloc_c1HeapPaHi) {
+				malloc_c1HeapPaHi = (unsigned long)hpa;
+			}
 			if (v3d_c1_lookup_pa((unsigned long)hpa, NULL, NULL, NULL) > 0) {
 				malloc_c1HeapFromBo++;
 			}

@@ -33,6 +33,7 @@
 #include <limits.h>
 
 #include "../unistd/file-internal.h"
+#include "stdio-internal.h"
 
 
 #define F_EOF     (1 << 0)
@@ -40,11 +41,18 @@
 #define F_LINE    (1 << 2)
 #define F_ERROR   (1 << 3)
 #define F_USRBUF  (1 << 4)
+#define F_OPS     (1 << 5) /* no descriptor: I/O goes through ops_FILE hooks */
 
 typedef struct {
 	FILE file; /* Must be the first member */
 	pid_t pid;
 } popen_FILE;
+
+typedef struct {
+	FILE file; /* Must be the first member; valid while F_OPS is set */
+	const file_ops_t *ops;
+	void *cookie;
+} ops_FILE;
 
 
 static const struct lockAttr flockAttr = {
@@ -142,6 +150,70 @@ static void buffFree(void *ptr, size_t size)
 }
 
 
+/* The descriptor primitives every buffered path below is built on. A FILE
+ * with F_OPS set has no descriptor (fd == -1) and routes them to its hooks;
+ * any other FILE takes exactly the system calls it always did. */
+static ssize_t file_rawRead(FILE *stream, void *buf, size_t size)
+{
+	if ((stream->flags & F_OPS) != 0) {
+		ops_FILE *of = (ops_FILE *)stream;
+
+		if (of->ops->read == NULL) {
+			errno = EBADF;
+			return -1;
+		}
+		return of->ops->read(of->cookie, buf, size);
+	}
+
+	return __safe_read_nb(stream->fd, buf, size);
+}
+
+
+static ssize_t file_rawWrite(FILE *stream, const void *buf, size_t size)
+{
+	if ((stream->flags & F_OPS) != 0) {
+		ops_FILE *of = (ops_FILE *)stream;
+
+		if (of->ops->write == NULL) {
+			errno = EBADF;
+			return -1;
+		}
+		return of->ops->write(of->cookie, buf, size);
+	}
+
+	return __safe_write_nb(stream->fd, buf, size);
+}
+
+
+static off_t file_rawSeek(FILE *stream, off_t offset, int whence)
+{
+	if ((stream->flags & F_OPS) != 0) {
+		ops_FILE *of = (ops_FILE *)stream;
+
+		if (of->ops->seek == NULL) {
+			errno = ESPIPE;
+			return -1;
+		}
+		return of->ops->seek(of->cookie, offset, whence);
+	}
+
+	return lseek(stream->fd, offset, whence);
+}
+
+
+static int file_rawClose(FILE *stream)
+{
+	if ((stream->flags & F_OPS) != 0) {
+		ops_FILE *of = (ops_FILE *)stream;
+
+		stream->flags &= ~F_OPS;
+		return (of->ops->close != NULL) ? of->ops->close(of->cookie) : 0;
+	}
+
+	return __safe_close(stream->fd);
+}
+
+
 /* Is `file` currently on the open-FILE list? Called with the lock held.
  *
  * Guards against closing a FILE twice. The second fclose() used to walk into
@@ -232,7 +304,7 @@ int fclose(FILE *stream)
 
 	err = fflush(stream);
 
-	if (__safe_close(stream->fd) < 0) {
+	if (file_rawClose(stream) < 0) {
 		err = EOF;
 	}
 	file_release(stream);
@@ -359,7 +431,8 @@ FILE *freopen(const char *pathname, const char *mode, FILE *stream)
 	}
 
 	if (pathname != NULL) {
-		__safe_close(stream->fd);
+		/* also ends a hook-backed stream, which then becomes a plain one */
+		file_rawClose(stream);
 
 		if ((stream->fd = __safe_open(pathname, m, DEFFILEMODE)) < 0) {
 			file_free(stream);
@@ -388,15 +461,22 @@ FILE *freopen(const char *pathname, const char *mode, FILE *stream)
 }
 
 
-static ssize_t full_write(int fd, const void *ptr, size_t size)
+static ssize_t full_write(FILE *stream, const void *ptr, size_t size)
 {
 	ssize_t err;
 	ssize_t total = 0;
 
 	while (size > 0) {
-		err = __safe_write_nb(fd, ptr, size);
+		err = file_rawWrite(stream, ptr, size);
 		if (err < 0) {
 			return (errno == EAGAIN) ? total : -1;
+		}
+		if ((err == 0) && ((stream->flags & F_OPS) != 0)) {
+			/* A hook takes nothing more, e.g. an fmemopen() buffer is full.
+			 * Report it as the short write it is, like EAGAIN above, so the
+			 * callers keep the unwritten remainder and set the error flag. */
+			errno = ENOSPC;
+			return total;
 		}
 		ptr += err;
 		total += err;
@@ -419,7 +499,7 @@ static int __fflush_one(FILE *stream)
 
 	if ((stream->flags & F_WRITING) != 0) {
 		if (stream->bufpos != 0) {
-			err = full_write(stream->fd, stream->buffer, stream->bufpos);
+			err = full_write(stream, stream->buffer, stream->bufpos);
 			if (err < 0) {
 				stream->flags |= F_ERROR;
 				ret = -1;
@@ -445,7 +525,7 @@ static int __fflush_one(FILE *stream)
 	}
 	else {
 		if (stream->bufpos != stream->bufeof) {
-			off = lseek(stream->fd, (off_t)stream->bufpos - stream->bufeof, SEEK_CUR);
+			off = file_rawSeek(stream, (off_t)stream->bufpos - stream->bufeof, SEEK_CUR);
 			if (off == (off_t)-1) {
 				if (errno == ESPIPE) {
 					/* read buffer for non-seekable stream cannot be flushed */
@@ -486,7 +566,7 @@ static inline ssize_t read_buffer(FILE *stream, size_t readsz)
 	 * but stop if at least readsz bytes have already been read.
 	 */
 	while (total < readsz) {
-		err = __safe_read_nb(stream->fd, stream->buffer + total, stream->bufsz - total);
+		err = file_rawRead(stream, stream->buffer + total, stream->bufsz - total);
 		if (err < 0) {
 			stream->flags |= F_ERROR;
 			if (errno != EAGAIN) {
@@ -516,7 +596,7 @@ static inline ssize_t read_data(FILE *stream, void *ptr, size_t readsz)
 	ssize_t total = 0;
 
 	while (readsz > 0) {
-		err = __safe_read_nb(stream->fd, ptr, readsz);
+		err = file_rawRead(stream, ptr, readsz);
 		if (err < 0) {
 			stream->flags |= F_ERROR;
 			if (errno != EAGAIN) {
@@ -632,7 +712,7 @@ static inline size_t buffer_data(FILE *stream, const void *ptr, size_t writesz)
 
 static inline ssize_t write_buffer(FILE *stream, size_t writesz)
 {
-	ssize_t err = full_write(stream->fd, stream->buffer, writesz);
+	ssize_t err = full_write(stream, stream->buffer, writesz);
 	if (err >= 0) {
 		stream->bufpos -= err;
 
@@ -654,7 +734,7 @@ static inline ssize_t write_buffer(FILE *stream, size_t writesz)
 
 static inline ssize_t write_data(FILE *stream, const void *ptr, size_t writesz)
 {
-	ssize_t err = full_write(stream->fd, ptr, writesz);
+	ssize_t err = full_write(stream, ptr, writesz);
 	if (err >= 0) {
 		if (err < writesz) {
 			/* EAGAIN */
@@ -948,7 +1028,7 @@ static off_t fseek_unlocked(FILE *stream, off_t offset, int whence)
 		return -1;
 	}
 
-	return lseek(stream->fd, offset, whence);
+	return file_rawSeek(stream, offset, whence);
 }
 
 
@@ -986,7 +1066,7 @@ static off_t ftell_unlocked(FILE *stream)
 {
 	off_t off;
 
-	off = lseek(stream->fd, 0, SEEK_CUR);
+	off = file_rawSeek(stream, 0, SEEK_CUR);
 	if (off == (off_t)-1) {
 		return -1;
 	}
@@ -1040,12 +1120,17 @@ int fgetpos(FILE *stream, fpos_t *pos)
 
 int fileno(FILE *stream)
 {
-	return stream->fd;
+	return fileno_unlocked(stream);
 }
 
 
 int fileno_unlocked(FILE *stream)
 {
+	if ((stream->flags & F_OPS) != 0) {
+		errno = EBADF; /* POSIX: the stream is not associated with a file */
+		return -1;
+	}
+
 	return stream->fd;
 }
 
@@ -1561,6 +1646,49 @@ int pclose(FILE *file)
 	}
 
 	return stat;
+}
+
+
+FILE *_file_openOps(const char *mode, const file_ops_t *ops, void *cookie)
+{
+	ops_FILE *of;
+	int m, err;
+
+	if ((m = string2mode(mode)) < 0) {
+		errno = EINVAL;
+		return NULL;
+	}
+
+	if ((of = calloc(1, sizeof(*of))) == NULL) {
+		return NULL;
+	}
+
+	if ((of->file.buffer = buffAlloc(BUFSIZ)) == NULL) {
+		free(of);
+		errno = ENOMEM;
+		return NULL;
+	}
+
+	err = mutexCreateWithAttr(&of->file.lock, &flockAttr);
+	if (err < 0) {
+		buffFree(of->file.buffer, BUFSIZ);
+		free(of);
+		errno = -err;
+		return NULL;
+	}
+
+	of->ops = ops;
+	of->cookie = cookie;
+	of->file.fd = -1;
+	of->file.flags = F_OPS;
+	of->file.bufsz = BUFSIZ;
+	of->file.mode = m;
+
+	mutexLock(file_common.lock);
+	LIST_ADD(&file_common.list, &of->file);
+	mutexUnlock(file_common.lock);
+
+	return &of->file;
 }
 
 

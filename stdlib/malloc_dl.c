@@ -928,6 +928,15 @@ static void malloc_c1FreeLogReport(uintptr_t addr)
 #ifdef C1_P4_WIDE
 #define C1_P4_NPROBE 4u
 static const uint32_t c1P4Off[C1_P4_NPROBE] = { 4u, 0x404u, 0x804u, 0xc04u };
+
+/* A STRING, purely so this arm can be strings-verified in the shipped image.
+ *
+ * Arming the wide probe changes only numeric constants, so `strings loader.disk`
+ * has nothing to match and there is no way to confirm the running binary is the
+ * arm you think it is -- which is exactly the mistake this project forbids
+ * ("verify with strings ... and make sure your change HAS such a string").
+ * __attribute__((used)) keeps it through -ffunction-sections/--gc-sections. */
+static const char c1P4WideArmMarker[] __attribute__((used)) = "c1-p4-wide-armed-4-offsets";
 #else
 #define C1_P4_NPROBE 1u
 static const uint32_t c1P4Off[C1_P4_NPROBE] = { 4u };

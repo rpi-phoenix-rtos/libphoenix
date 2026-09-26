@@ -438,6 +438,13 @@ static unsigned int caRelLines = 0u;
  * allocation path. */
 static unsigned long malloc_c1Heaps = 0u;
 static unsigned long malloc_c1HeapBytes = 0u;
+/* How many heap creations had their physical page checked against the v3d
+ * closed-BO ring, and how many of those pages HAD been a BO. The probe count is
+ * reported alongside the hit count on purpose: "0 hits" means nothing without it,
+ * and a probe count of 0 would mean va2pa never resolved rather than that the
+ * route is clean. */
+static unsigned long malloc_c1HeapProbes = 0u;
+static unsigned long malloc_c1HeapFromBo = 0u;
 
 
 /* Read the pacing counters. Either pointer may be NULL.
@@ -455,6 +462,21 @@ void malloc_c1Pacing(unsigned long *heaps, unsigned long *bytes)
 	}
 	if (bytes != NULL) {
 		*bytes = malloc_c1HeapBytes;
+	}
+}
+
+
+/* How many heaps landed on a page the v3d driver had closed, and how many were
+ * checked at all. Separate from malloc_c1Pacing() so the older two-value call
+ * keeps working; both are weak-linked by the winsys. */
+void malloc_c1HeapBoHits(unsigned long *hits, unsigned long *probes);
+void malloc_c1HeapBoHits(unsigned long *hits, unsigned long *probes)
+{
+	if (hits != NULL) {
+		*hits = malloc_c1HeapFromBo;
+	}
+	if (probes != NULL) {
+		*probes = malloc_c1HeapProbes;
 	}
 }
 
@@ -2045,6 +2067,41 @@ static heap_t *_malloc_heapAlloc(size_t size)
 	malloc_common.live[malloc_common.liveIdx & 255u] = (uintptr_t)heap;
 	malloc_common.liveSize[malloc_common.liveIdx & 255u] = heapSize;
 	++malloc_common.liveIdx;
+
+	/* ★ THE ROUTE C1 ACTUALLY NEEDS, counted for the first time.
+	 *
+	 * C1's signature is a heap header corrupted at +4, so the page was under
+	 * malloc. For the BO hypothesis to work, a page the V3D driver closed has to
+	 * come back through the kernel and be handed to THIS allocator. Everything
+	 * measured so far counts the driver's half -- closes, unmaps, BO-to-BO reuse --
+	 * and none of it establishes that a BO page ever reaches malloc at all.
+	 *
+	 * This does: at every heap creation, ask the driver's PA-keyed closed-BO ring
+	 * whether this heap's physical page used to be a BO. The counter then has two
+	 * readings and both are worth having:
+	 *
+	 *   stays 0 all run  -> no BO page ever became a heap, and the whole BO route
+	 *                       is dead for the *heap-header* corruption. That would be
+	 *                       the largest single elimination the hunt has managed.
+	 *   first non-zero   -> a date. If it lands at the ~76 s where the fire window
+	 *                       opens, the onset has its mechanism.
+	 *
+	 * ⚠ Placed HERE, after the heap is live and its header written, not next to the
+	 * mmap: va2pa() on a page that has not been touched yet can read 0, which would
+	 * silently under-count and look like the "dead route" answer.
+	 *
+	 * v3d_c1_lookup_pa is weak (declared above) so a binary without the driver
+	 * simply never counts; cost is one 512-entry scan per heap creation. */
+	if (v3d_c1_lookup_pa != NULL) {
+		uintptr_t hpa = (uintptr_t)va2pa((void *)heap);
+
+		if (hpa != 0u) {
+			malloc_c1HeapProbes++;
+			if (v3d_c1_lookup_pa((unsigned long)hpa, NULL, NULL, NULL) > 0) {
+				malloc_c1HeapFromBo++;
+			}
+		}
+	}
 
 	if ((malloc_common.heapLo == 0u) || ((uintptr_t)heap < malloc_common.heapLo)) {
 		malloc_common.heapLo = (uintptr_t)heap;

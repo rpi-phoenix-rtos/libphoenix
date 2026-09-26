@@ -41,6 +41,17 @@ extern "C" {
 #endif /* NDEBUG */
 
 
+/* C11 7.2p3: <assert.h> defines static_assert as _Static_assert.
+ * Not in C++, where static_assert is a keyword (a macro would break libstdc++),
+ * and not in C23, where it is a keyword as well. Unlike assert() it does not
+ * depend on NDEBUG, so a definition that is already in place (from an earlier
+ * inclusion, or a port's own compatibility header) is left alone. */
+#if !defined(__cplusplus) && !defined(static_assert) && defined(__STDC_VERSION__) && \
+	(__STDC_VERSION__ >= 201112L) && (__STDC_VERSION__ < 202311L)
+#define static_assert _Static_assert
+#endif
+
+
 #ifdef __cplusplus
 }
 #endif

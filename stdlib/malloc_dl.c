@@ -985,6 +985,25 @@ static void malloc_c1P4Poison(chunk_t *chunk, size_t chunksz)
 	uintptr_t hi = (uintptr_t)chunk + chunksz - 8u;
 	uintptr_t p = ((uintptr_t)chunk + (uintptr_t)_PAGE_SIZE - 1u) & ~((uintptr_t)_PAGE_SIZE - 1u);
 
+#ifdef C1_P4_WIDE
+	/* Announce the arm ONCE, so the log itself says how many offsets were probed.
+	 *
+	 * Without this, "only +4 broke" is UNINTERPRETABLE: it is the expected result
+	 * both when the writer is offset-specific AND when only +4 was armed, and
+	 * those are opposite conclusions. The binary carries a strings marker for the
+	 * same reason, but a log read months later will not have the binary.
+	 *
+	 * Wide arm only, so the default build gains no output at all. */
+	{
+		static int armAnnounced = 0;
+
+		if (armAnnounced == 0) {
+			armAnnounced = 1;
+			debug("malloc: C1-hunt: p4 probe arm = WIDE (4 offsets: 4, 0x404, 0x804, 0xc04)\n");
+		}
+	}
+#endif
+
 	for (; (p + 8u) <= hi; p += (uintptr_t)_PAGE_SIZE) {
 		unsigned int k;
 

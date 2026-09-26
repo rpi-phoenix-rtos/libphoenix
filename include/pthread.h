@@ -59,6 +59,9 @@ extern "C" {
 #define PTHREAD_CANCEL_ENABLE  1
 #define PTHREAD_CANCELED       2
 
+#define PTHREAD_CANCEL_DEFERRED     0
+#define PTHREAD_CANCEL_ASYNCHRONOUS 1
+
 /* clang-format off */
 #define PTHREAD_MUTEX_INITIALIZER  { 0, 0 }
 #define PTHREAD_COND_INITIALIZER   { 0, 0 }
@@ -76,6 +79,14 @@ int pthread_detach(pthread_t thread);
 
 
 int pthread_setcancelstate(int state, int *oldstate);
+
+
+/* NOTE: libphoenix acts on a cancellation request as soon as it is made and
+ * cancellation is enabled -- the target is stopped wherever it is, not at a
+ * cancellation point. That is PTHREAD_CANCEL_ASYNCHRONOUS behaviour, whichever
+ * type is set; PTHREAD_CANCEL_DEFERRED (the default) is recorded but deferral
+ * is not implemented. */
+int pthread_setcanceltype(int type, int *oldtype);
 
 
 int pthread_cancel(pthread_t thread);

@@ -57,6 +57,7 @@ typedef struct pthread_ctx {
 	struct pthread_ctx *prev;
 	int is_detached;
 	int cancelstate;
+	int canceltype;
 	int cancelled;
 	struct __errno_t e;
 	int refcount;
@@ -262,6 +263,7 @@ static int pthread_create_main(void)
 	ctx->stacksize = 0;
 	ctx->is_detached = (pthread_attr_default.detachstate == PTHREAD_CREATE_DETACHED) ? 1 : 0;
 	ctx->cancelstate = PTHREAD_CANCEL_ENABLE;
+	ctx->canceltype = PTHREAD_CANCEL_DEFERRED;
 	ctx->cancelled = 0;
 	ctx->refcount = 1;
 	ctx->key_data_list = NULL;
@@ -340,6 +342,7 @@ int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
 	ctx->stacksize = stacksize;
 	ctx->key_data_list = NULL;
 	ctx->cancelstate = PTHREAD_CANCEL_ENABLE;
+	ctx->canceltype = PTHREAD_CANCEL_DEFERRED;
 	ctx->cancelled = 0;
 	ctx->cleanup_list = NULL;
 	*thread = (pthread_t)ctx;
@@ -541,6 +544,23 @@ int pthread_detach(pthread_t thread)
 }
 
 
+/* Called with pthread_list_lock held and a reference on ctx; drops both. For
+ * an asynchronous-type thread, a request that arrived while cancellation was
+ * disabled is acted on the moment it becomes deliverable (POSIX
+ * pthread_setcanceltype/setcancelstate rationale), instead of waiting for a
+ * pthread_testcancel() the thread may never call. */
+static void _pthread_cancelPendingAsync(pthread_ctx *ctx)
+{
+	if ((ctx->canceltype == PTHREAD_CANCEL_ASYNCHRONOUS) && (ctx->cancelstate == PTHREAD_CANCEL_ENABLE) &&
+			(ctx->cancelled != 0)) {
+		_pthread_ctx_put(ctx);
+		pthread_exit((void *)PTHREAD_CANCELED);
+		/* no return */
+	}
+	_pthread_ctx_put(ctx);
+}
+
+
 int pthread_setcancelstate(int state, int *oldstate)
 {
 	int err = 0;
@@ -556,9 +576,44 @@ int pthread_setcancelstate(int state, int *oldstate)
 			*oldstate = ctx->cancelstate;
 		}
 		ctx->cancelstate = state;
-		_pthread_ctx_put(ctx);
+		_pthread_cancelPendingAsync(ctx);
 	}
 	return err;
+}
+
+
+/* The type is recorded and reported, and ASYNCHRONOUS is fully honoured:
+ * pthread_cancel() stops an enabled target immediately, and a request left
+ * pending while disabled fires as soon as it is re-enabled.
+ *
+ * DEFERRED is accepted but NOT honoured: pthread_cancel() treats every
+ * target as asynchronous (it runs the target's cleanup handlers and kills
+ * the thread at once), so a deferred-type thread can also be stopped outside
+ * a cancellation point. Changing that would change behaviour for every
+ * existing caller, since DEFERRED is the default; it needs cancellation
+ * points in the blocking calls first. */
+int pthread_setcanceltype(int type, int *oldtype)
+{
+	pthread_ctx *ctx;
+
+	if ((type != PTHREAD_CANCEL_DEFERRED) && (type != PTHREAD_CANCEL_ASYNCHRONOUS)) {
+		return EINVAL;
+	}
+
+	ctx = (pthread_ctx *)pthread_self();
+	if (ctx == NULL) {
+		return ESRCH;
+	}
+
+	mutexLock(pthread_common.pthread_list_lock);
+	_pthread_ctx_get(ctx);
+	if (oldtype != NULL) {
+		*oldtype = ctx->canceltype;
+	}
+	ctx->canceltype = type;
+	_pthread_cancelPendingAsync(ctx);
+
+	return 0;
 }
 
 

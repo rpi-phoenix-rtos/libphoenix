@@ -929,14 +929,21 @@ static void malloc_c1FreeLogReport(uintptr_t addr)
 #define C1_P4_NPROBE 4u
 static const uint32_t c1P4Off[C1_P4_NPROBE] = { 4u, 0x404u, 0x804u, 0xc04u };
 
-/* A STRING, purely so this arm can be strings-verified in the shipped image.
+/* ↩ A dedicated marker string was tried here and REMOVED: it does not survive.
  *
- * Arming the wide probe changes only numeric constants, so `strings loader.disk`
- * has nothing to match and there is no way to confirm the running binary is the
- * arm you think it is -- which is exactly the mistake this project forbids
- * ("verify with strings ... and make sure your change HAS such a string").
- * __attribute__((used)) keeps it through -ffunction-sections/--gc-sections. */
-static const char c1P4WideArmMarker[] __attribute__((used)) = "c1-p4-wide-armed-4-offsets";
+ * `__attribute__((used))` stops the COMPILER discarding an unreferenced object;
+ * it does not stop the LINKER. This target builds with -ffunction-sections
+ * -fdata-sections and links with -Wl,--gc-sections, which collected the marker's
+ * section outright -- 0 occurrences in both loader.disk and the shipped binary,
+ * while the arm itself was correctly compiled in.
+ *
+ * ⚠ And the host harness could not catch that, because it does not link with
+ * --gc-sections. Verifying a marker against a host proxy proves nothing about the
+ * target image.
+ *
+ * The strings-verifiable artifact is therefore the ARM BANNER below, whose text
+ * is referenced by a live debug() call and so cannot be collected. It is also the
+ * same string the per-trial log guard looks for, so one artifact serves both. */
 #else
 #define C1_P4_NPROBE 1u
 static const uint32_t c1P4Off[C1_P4_NPROBE] = { 4u };

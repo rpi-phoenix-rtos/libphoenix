@@ -13,6 +13,7 @@
  * %LICENSE%
  */
 
+#include <inttypes.h>
 #include <stdlib.h>
 
 
@@ -66,6 +67,22 @@ lldiv_t lldiv(long long int num, long long int den)
 		result.quot++;
 		result.rem -= den;
 	}
+
+	return result;
+}
+
+
+intmax_t imaxabs(intmax_t j)
+{
+	return (j < 0) ? -j : j;
+}
+
+
+imaxdiv_t imaxdiv(intmax_t numer, intmax_t denom)
+{
+	/* C99 6.5.5p6: integer division truncates toward zero, so / and % already
+	 * give the quotient and remainder 7.8.2.2 asks for. */
+	imaxdiv_t result = { .quot = numer / denom, .rem = numer % denom };
 
 	return result;
 }

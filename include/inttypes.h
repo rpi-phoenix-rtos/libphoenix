@@ -20,6 +20,10 @@
 #include <arch.h>
 #include <stdint.h>
 
+/* wchar_t only, for wcstoimax()/wcstoumax() (C99 7.8.2.4) */
+#define __need_wchar_t
+#include <stddef.h>
+
 
 #ifdef __cplusplus
 extern "C" {
@@ -87,6 +91,38 @@ extern "C" {
 #define PRIXLEAST64 PRIX64
 #define PRIiLEAST64 PRIi64
 #define PRIoLEAST64 PRIo64
+
+/* The fast types differ per architecture (int_fast8_t is 8 bits on ia32 and 32
+ * bits elsewhere), and _SCN_FAST* already names the length modifier that
+ * matches each one. hh/h are valid printf modifiers too, so the same prefix
+ * serves both directions and stays -Wformat clean on every arch. */
+#define PRIdFAST8 _SCN_FAST8 "d"
+#define PRIuFAST8 _SCN_FAST8 "u"
+#define PRIxFAST8 _SCN_FAST8 "x"
+#define PRIXFAST8 _SCN_FAST8 "X"
+#define PRIiFAST8 _SCN_FAST8 "i"
+#define PRIoFAST8 _SCN_FAST8 "o"
+
+#define PRIdFAST16 _SCN_FAST16 "d"
+#define PRIuFAST16 _SCN_FAST16 "u"
+#define PRIxFAST16 _SCN_FAST16 "x"
+#define PRIXFAST16 _SCN_FAST16 "X"
+#define PRIiFAST16 _SCN_FAST16 "i"
+#define PRIoFAST16 _SCN_FAST16 "o"
+
+#define PRIdFAST32 _SCN_FAST32 "d"
+#define PRIuFAST32 _SCN_FAST32 "u"
+#define PRIxFAST32 _SCN_FAST32 "x"
+#define PRIXFAST32 _SCN_FAST32 "X"
+#define PRIiFAST32 _SCN_FAST32 "i"
+#define PRIoFAST32 _SCN_FAST32 "o"
+
+#define PRIdFAST64 _SCN_FAST64 "d"
+#define PRIuFAST64 _SCN_FAST64 "u"
+#define PRIxFAST64 _SCN_FAST64 "x"
+#define PRIXFAST64 _SCN_FAST64 "X"
+#define PRIiFAST64 _SCN_FAST64 "i"
+#define PRIoFAST64 _SCN_FAST64 "o"
 
 #define PRIdMAX _PRI_64 "d"
 #define PRIiMAX _PRI_64 "i"
@@ -174,12 +210,44 @@ extern "C" {
 #define SCNiFAST64 _SCN_FAST64 "i"
 #define SCNoFAST64 _SCN_FAST64 "o"
 
+/* intmax_t is int64_t on every supported architecture */
+#define SCNdMAX _SCN_64 "d"
+#define SCNuMAX _SCN_64 "u"
+#define SCNxMAX _SCN_64 "x"
+#define SCNiMAX _SCN_64 "i"
+#define SCNoMAX _SCN_64 "o"
+
+/* scanf and printf use the same length modifier for int and long */
+#define SCNdPTR _PRI_PTR "d"
+#define SCNuPTR _PRI_PTR "u"
+#define SCNxPTR _PRI_PTR "x"
+#define SCNiPTR _PRI_PTR "i"
+#define SCNoPTR _PRI_PTR "o"
+
 #endif
+
+typedef struct {
+	intmax_t quot;
+	intmax_t rem;
+} imaxdiv_t;
+
+
+extern intmax_t imaxabs(intmax_t j);
+
+
+extern imaxdiv_t imaxdiv(intmax_t numer, intmax_t denom);
+
 
 extern intmax_t strtoimax(const char *nptr, char **endptr, int base);
 
 
 extern uintmax_t strtoumax(const char *nptr, char **endptr, int base);
+
+
+extern intmax_t wcstoimax(const wchar_t *__restrict nptr, wchar_t **__restrict endptr, int base);
+
+
+extern uintmax_t wcstoumax(const wchar_t *__restrict nptr, wchar_t **__restrict endptr, int base);
 
 
 #ifdef __cplusplus

@@ -17,6 +17,7 @@
 #define _LIBPHOENIX_SYS_FILE_H_
 
 #include <sys/types.h>
+#include <fcntl.h> /* LOCK_SH, LOCK_EX, LOCK_NB, LOCK_UN for flock() */
 #include <phoenix/file.h>
 
 
@@ -44,6 +45,8 @@ typedef struct {
 } mount_o_msg_t;
 
 
+/* Whole-file advisory lock; see posix/flock.c for how it maps onto fcntl()
+ * record locks and where that differs from BSD flock(). */
 extern int flock(int fd, int operation);
 
 

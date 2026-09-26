@@ -5,4 +5,4 @@
 #
 
 OBJS += $(addprefix $(PREFIX_O)unistd/, alarm.o at.o conf.o crypt.o dir.o ioctl-helper.o file.o hostname.o getlogin.o getopt.o getpass.o grp.o \
-	hostid.o pause.o pwd.o sys.o user.o)
+	hostid.o pause.o pwd.o sys.o user.o scandir.o)

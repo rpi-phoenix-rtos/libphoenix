@@ -1023,6 +1023,28 @@ static void malloc_c1P4Verify(chunk_t *chunk, size_t chunksz)
 					 * wrong and the hunt goes back to a virtual-address writer.
 					 * Either answer is worth more than another rare-event run. */
 					malloc_debugHex("malloc:   p4pa   = ", (uintptr_t)va2pa((void *)p));
+
+					/* TODO(C1-hunt): the SAME physical-frame BO attribution as the
+					 * corrupt-header path.
+					 *
+					 * Wiring it only to the header path was the mirror image of the
+					 * mistake that path was fixing. Run c1pfn1 fired with TWO poison
+					 * breaks and ZERO header reports, so the attribution never ran at
+					 * all -- a fire spent for no answer. Both detectors see the same
+					 * defect and both know a physical page; both must ask. */
+					if (v3d_c1_lookup_pa != NULL) {
+						unsigned int pnp = 0u, pord = 0u, ptot = 0u;
+						int pn = v3d_c1_lookup_pa(
+							(unsigned long)va2pa((void *)(p & ~(uintptr_t)(_PAGE_SIZE - 1))),
+							&pnp, &pord, &ptot);
+
+						malloc_debugHex("malloc:   p4bopa= ", (uintptr_t)(unsigned)pn);
+						malloc_debugHex("malloc:   p4botl= ", (uintptr_t)ptot);
+						if (pn > 0) {
+							malloc_debugHex("malloc:   p4bonp= ", (uintptr_t)pnp);
+							malloc_debugHex("malloc:   p4bord= ", (uintptr_t)pord);
+						}
+					}
 					malloc_debugHex("malloc:   p4want = ", (uintptr_t)want);
 					malloc_debugHex("malloc:   p4got  = ", (uintptr_t)got);
 					malloc_debugHex("malloc:   p4chunk= ", (uintptr_t)chunk);

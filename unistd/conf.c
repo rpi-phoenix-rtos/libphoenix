@@ -14,10 +14,12 @@
  */
 
 #include <errno.h>
+#include <string.h>
 #include <unistd.h>
 #include <sys/syslimits.h>
 #include <sys/statvfs.h>
 #include <limits.h>
+#include <sys/mman.h>
 
 /* _SC_NPROCESSORS_* needs the CPU count. On aarch64-generic (RPi4) the kernel
  * exposes it via platformctl(pctl_cpucount); other targets fall back to EINVAL
@@ -30,6 +32,41 @@
 
 
 __EXPORT_INLINE int getpagesize(void);
+
+
+/* _SC_PHYS_PAGES / _SC_AVPHYS_PAGES from the kernel's page allocator, via
+ * meminfo(). mapsz = -1 asks for the counters only, not the page/entry/map
+ * tables. The kernel always sets page.sz (sizeof(page_t)), so a zero there
+ * means the call did nothing.
+ *
+ * ⚠ meminfo_t carries the byte counts in `unsigned int`, so they wrap above
+ * 4 GiB of managed RAM (kernel FIXME in vm_mapinfo). A 4 GB Pi 4 manages
+ * 3997696 KB, just below that; an 8 GB board would need the kernel fields
+ * widened first. */
+static long conf_physPages(int avail)
+{
+	meminfo_t info;
+	unsigned long long bytes;
+
+	memset(&info, 0, sizeof(info));
+	info.page.mapsz = -1;
+	info.entry.mapsz = -1;
+	info.entry.kmapsz = -1;
+	info.maps.mapsz = -1;
+
+	meminfo(&info);
+	if (info.page.sz == 0U) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	bytes = (unsigned long long)info.page.free;
+	if (avail == 0) {
+		bytes += (unsigned long long)info.page.alloc;
+	}
+
+	return (long)(bytes / _PAGE_SIZE);
+}
 
 
 long sysconf(int name)
@@ -72,6 +109,10 @@ long sysconf(int name)
 #endif
 			errno = EINVAL;
 			return -1;
+		case _SC_PHYS_PAGES:
+			return conf_physPages(0);
+		case _SC_AVPHYS_PAGES:
+			return conf_physPages(1);
 		default:
 			errno = EINVAL;
 			return -1;

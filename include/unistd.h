@@ -59,6 +59,8 @@ extern "C" {
 #define _SC_LINE_MAX         100
 #define _SC_NPROCESSORS_CONF 101
 #define _SC_NPROCESSORS_ONLN 102
+#define _SC_PHYS_PAGES       103 /* pages of RAM the kernel manages */
+#define _SC_AVPHYS_PAGES     104 /* ...of which currently free */
 
 /* POSIX conformance version (IEEE Std 1003.1-2008). A POSIX system must define
  * this in <unistd.h>; without it, portable software (e.g. bash) falls back to

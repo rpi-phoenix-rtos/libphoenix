@@ -430,6 +430,34 @@ static unsigned int malloc_liveUnmappedReports = 0u;
 static unsigned int caPaLines = 0u;
 static unsigned int caRelLines = 0u;
 
+/* Heap-growth pacing counters. Bumped unconditionally in _malloc_heapAlloc() --
+ * see the long note there for why they are not env-gated -- and read back through
+ * malloc_c1Pacing() by whoever wants to place an event on the heap-growth axis.
+ * Kept at file scope rather than inside malloc_common: C1 is layout-sensitive, and
+ * there is no reason to disturb the hot struct for a counter nothing reads on the
+ * allocation path. */
+static unsigned long malloc_c1Heaps = 0u;
+static unsigned long malloc_c1HeapBytes = 0u;
+
+
+/* Read the pacing counters. Either pointer may be NULL.
+ *
+ * The v3d winsys declares this WEAK and prints it next to its `flipstat` line, so
+ * a binary linked without this allocator still links; the weak-symbol direction is
+ * the mirror image of v3d_c1_lookup_pa() below, which malloc declares weak for the
+ * same reason. Exported unconditionally so it can never be the silently-absent
+ * half of a pair. */
+void malloc_c1Pacing(unsigned long *heaps, unsigned long *bytes);
+void malloc_c1Pacing(unsigned long *heaps, unsigned long *bytes)
+{
+	if (heaps != NULL) {
+		*heaps = malloc_c1Heaps;
+	}
+	if (bytes != NULL) {
+		*bytes = malloc_c1HeapBytes;
+	}
+}
+
 
 /* Is the all-heap physical-page trace armed? Cached, and deliberately shared by
  * both call sites.
@@ -1921,6 +1949,32 @@ static heap_t *_malloc_heapAlloc(size_t size)
 	if (heap == MAP_FAILED) {
 		return NULL;
 	}
+
+	/* ★ PACING COUNTERS -- two adds, no branch, no UART, never gated.
+	 *
+	 * WHY THEY ARE HERE. The archive says C1 fires ~90 s after the first rendered
+	 * frame, and that the frame count at the fire differs by 1.9x between two
+	 * groups of runs whose elapsed time agrees to 3%. So the event is paced by
+	 * TIME, not by the work the application is doing -- which is a strange result
+	 * that no suspect on the C1 list predicts, and it was reached entirely by
+	 * inference from a frame counter that happens to be logged.
+	 *
+	 * These make the same question answerable DIRECTLY on the next fire: the
+	 * winsys prints them next to `flipstat`, so a fire's position is readable on
+	 * the heap-growth axis as well as the time and frame axes, and whichever one
+	 * is invariant across runs is the anchor. Heap growth is the axis that matters
+	 * most here, because STK streams assets over NFS at a rate set by the network
+	 * rather than by the frame loop -- so "paced by time" and "paced by heap
+	 * growth" are NOT distinguishable from anything logged today, and they imply
+	 * completely different suspects.
+	 *
+	 * ⚠ DELIBERATELY NOT env-gated, unlike every other probe in this file. A gated
+	 * counter is a counter that can silently be zero -- this project has four
+	 * recorded ways for exactly that to happen -- and the cost here is two
+	 * increments per heap creation, a few hundred times per run. There is nothing
+	 * to save by making it conditional and a whole failure mode to buy. */
+	malloc_c1Heaps++;
+	malloc_c1HeapBytes += (unsigned long)heapSize;
 
 	/* This region may be one we released earlier: mmap reuses addresses. Drop any
 	 * released[] record that overlaps it, or malloc_chunkValid() would go on

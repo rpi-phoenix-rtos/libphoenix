@@ -1002,6 +1002,62 @@ static const uint32_t c1P4Off[C1_P4_NPROBE] = { 4u };
 
 /* Keyed on the PROBE address, not the page, so the four probes in a page hold
  * different values and a block copy cannot alias one onto another. */
+/* ★ HOW LONG DID THE CHUNK SIT POISONED BEFORE THE BREAK WAS NOTICED?
+ *
+ * Every "C1 fires at ~90 s" measured so far is a DETECTION time, not a
+ * corruption time: the poison is written when a chunk is FREED and only read
+ * when the allocator next WALKS it, so the write can have happened any time in
+ * between. That matters because the 90 s anchor coincides with the end of heap
+ * growth -- which is also exactly when the allocator stops taking fresh heaps
+ * and starts reusing free chunks, i.e. when it first CHECKS them. Without an
+ * age, "the fire lands at the plateau" and "checking begins at the plateau" are
+ * the same observation.
+ *
+ * So: stamp each poisoned page with the tick at which it was poisoned, and
+ * report the delta at the break. A hash-indexed table, because the probe poisons
+ * many pages and the only one that matters is the one that breaks.
+ *
+ * ⚠ DELIBERATELY NOT stored in the chunk. The poison word itself must not change
+ * size or position: C1 is layout-sensitive, the victim offset IS the finding, and
+ * widening the write to 8 bytes would alter what sits at page+8. A side table
+ * cannot perturb the thing it measures.
+ *
+ * ⚠ A miss is reported as AGED OUT, never as zero. An entry evicted by a later
+ * page is indistinguishable from "poisoned at tick 0" unless the two are printed
+ * apart, and "the corruption is older than 256 poisoned pages" is itself the
+ * answer to the question being asked. */
+#define C1_P4AGE_N 256u
+
+static struct {
+	uint32_t pfn;   /* page >> 12, 0 = slot never used */
+	uint32_t tick;
+} c1P4Age[C1_P4AGE_N];
+
+
+static void malloc_c1P4AgeStamp(uintptr_t page)
+{
+	uint32_t pfn = (uint32_t)(page >> 12);
+	uint32_t i = pfn % C1_P4AGE_N;
+
+	c1P4Age[i].pfn = pfn;
+	c1P4Age[i].tick = malloc_common.scanTick;
+}
+
+
+/* Ticks elapsed since this page was poisoned, or 0xffffffff if the slot has been
+ * taken by another page (aged out). */
+static uint32_t malloc_c1P4AgeOf(uintptr_t page)
+{
+	uint32_t pfn = (uint32_t)(page >> 12);
+	uint32_t i = pfn % C1_P4AGE_N;
+
+	if (c1P4Age[i].pfn != pfn) {
+		return 0xffffffffu;
+	}
+	return malloc_common.scanTick - c1P4Age[i].tick;
+}
+
+
 static uint32_t malloc_c1P4Word(uintptr_t q)
 {
 	return C1_P4_MAGIC ^ (uint32_t)(q >> 2);
@@ -1071,6 +1127,7 @@ static void malloc_c1P4Poison(chunk_t *chunk, size_t chunksz)
 				*(uint32_t *)q = malloc_c1P4Word(q);
 			}
 		}
+		malloc_c1P4AgeStamp(p);
 		/* TODO(C1-hunt): A/B ARM -- checksum store still disabled; see the note on
 		 * malloc_c1PageCk. Four probe words per 4 KiB page is still a very light
 		 * touch compared with the body poison that suppressed the event. */
@@ -1109,6 +1166,12 @@ static void malloc_c1P4Verify(chunk_t *chunk, size_t chunksz)
 					malloc_debugHex("malloc:   p4off  = ", (uintptr_t)c1P4Off[k]);
 					malloc_debugHex("malloc:   p4addr = ", q);
 					malloc_debugHex("malloc:   p4page = ", p);
+					/* Ticks between the poison write and this read. A small value
+					 * means the corruption landed in a chunk the allocator was
+					 * about to touch anyway; a large one means it sat unseen and
+					 * the fire time says nothing about when the write happened. */
+					malloc_debugHex("malloc:   p4age  = ", (uintptr_t)malloc_c1P4AgeOf(p));
+					malloc_debugHex("malloc:   p4tick = ", (uintptr_t)malloc_common.scanTick);
 					/* The PHYSICAL address of the broken page.
 					 *
 					 * This is the sharpest test of the standing model. The

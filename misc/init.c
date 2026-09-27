@@ -37,8 +37,8 @@
  */
 /* Two levels, because the full trace may be perturbing what it measures.
  *
- * LIBC_STARTUP_TRACE     -- all eight markers. Names the initialiser a stall
- *                           happens in, at the cost of 8 debug() syscalls per
+ * LIBC_STARTUP_TRACE     -- all nine markers. Names the initialiser a stall
+ *                           happens in, at the cost of 9 debug() syscalls per
  *                           process before anything else runs.
  * LIBC_STARTUP_TRACE_MIN -- the entry marker ONLY: one syscall.
  *
@@ -74,6 +74,7 @@ extern void _atexit_init(void);
 extern void _init_array(void);
 extern void _pthread_init(void);
 extern void _stat_init(void);
+extern void _time_init(void);
 
 
 void _libc_init(void)
@@ -96,5 +97,7 @@ void _libc_init(void)
 	_pthread_init();
 	LIBC_TRACE("pthread");
 	_stat_init();
-	LIBC_TRACE("stat -> init_array");
+	LIBC_TRACE("stat");
+	_time_init();
+	LIBC_TRACE("time -> init_array");
 }

@@ -24,7 +24,74 @@
 #include "../common/util.h"
 
 
-char *tzname[2];
+/*
+ * Time zones
+ *
+ * TZ holds a POSIX time zone string (POSIX.1-2017, XBD 8.3):
+ *
+ *   std offset [dst [offset] [,start[/time],end[/time]]]
+ *
+ * - std and dst name the zone: three or more letters, or three or more letters,
+ *   digits, '+' or '-' between '<' and '>' (e.g. <+0330>).
+ * - offset is [+|-]hh[:mm[:ss]] WEST of UTC, hh 0-24, so CET-1 is one hour east
+ *   of UTC. The DST offset defaults to one hour ahead of standard time.
+ * - start and end are the changes to DST and back: Jn is day 1-365 not counting
+ *   February 29th, n is day 0-365 counting it, Mm.w.d is day d (0 = Sunday) of
+ *   week w (1-5, 5 = the last) of month m. time is the local time of the change
+ *   in the time then in force, [+|-]hh[:mm[:ss]] with hh 0-167 (the POSIX.1-2024
+ *   extension), 02:00:00 by default. Without rules the US rules M3.2.0,M11.1.0
+ *   apply, as in glibc and musl.
+ *
+ * There is no time zone database, therefore:
+ * - an unset or empty TZ is UTC, named "UTC",
+ * - a TZ beginning with ':' (implementation-defined by POSIX) or naming a zone,
+ *   e.g. Europe/Warsaw, is UTC too. The name is kept as given only when it is a
+ *   valid POSIX zone name by itself (":UTC", "GMT"), otherwise it is "UTC",
+ * - a valid standard time followed by a malformed DST part is that standard
+ *   time without DST. A name longer than TZ_NAME_MAX makes its part malformed.
+ *
+ * tzset(), localtime_r(), mktime() and strftime() all re-read TZ, so a change
+ * takes effect without calling tzset(); parsing is skipped while TZ is the same.
+ * As in glibc, whether a time is DST is decided by the changes of the year it
+ * falls in in UTC.
+ *
+ * struct tm has no tm_gmtoff and tm_zone, so strftime() %z and %Z take the
+ * offset and name of the current TZ selected by tm_isdst.
+ */
+
+#define TZ_NAME_MAX  15  /* longest zone name kept, POSIX requires at least 6 */
+#define TZ_CACHE_LEN 128 /* longest TZ value that is not parsed again on every call */
+
+
+enum { tzrule_jday, tzrule_yday, tzrule_mweek };
+
+
+struct tzrule {
+	int type;
+	int day;   /* tzrule_jday: 1-365, tzrule_yday: 0-365, tzrule_mweek: weekday 0-6 */
+	int week;  /* tzrule_mweek: 1-5, 5 = the last one in the month */
+	int month; /* tzrule_mweek: 1-12 */
+	long time; /* local time of the change, seconds after midnight */
+};
+
+
+struct tzinfo {
+	long offset[2];        /* UTC offset of standard [0] and DST [1] time, seconds EAST */
+	int hasdst;
+	struct tzrule rule[2]; /* the change to DST [0] and back to standard time [1] */
+	char name[2][TZ_NAME_MAX + 1];
+};
+
+
+static struct {
+	handle_t lock;
+	int cached;            /* tz holds the TZ value info was parsed from */
+	char tz[TZ_CACHE_LEN];
+	struct tzinfo info;
+} tz_common = { .info = { .name = { "UTC", "UTC" } } };
+
+
+char *tzname[2] = { tz_common.info.name[0], tz_common.info.name[1] };
 
 
 long timezone;
@@ -57,18 +124,289 @@ static inline int isleap(int year)
 }
 
 
+/* Calculate number of leap days between 1970-01-01 and year-01-01 */
+static int leapcount(int year)
+{
+	/* Center on 2000-01-01 for the calculations. There are 8 leap days between 1970-01-01 and that date.
+	 * Also subtract 1 because while 2000 is a leap year, its leap day isn't counted yet at 2000-01-01.
+	 */
+	int leap_days = 8;
+	year -= 2001;
+	if (year < 0) {
+		/* If year is negative, push it into the positive and compensate by subtracting the appropriate
+		 * number of leap days from the result. This avoids dealing with the C division operator on negative numbers.
+		 */
+		int periods = (year - 399) / 400;
+		year -= periods * 400;
+		leap_days += periods * 97;
+	}
+
+	leap_days += year / 400;
+	leap_days -= year / 100;
+	leap_days += year / 4;
+
+	return leap_days;
+}
+
+
+/* Parses a decimal number of at most max, returns NULL if there is none or it is larger */
+static const char *tz_parseNum(const char *s, long max, long *val)
+{
+	long v = 0;
+
+	if (isdigit((unsigned char)*s) == 0) {
+		return NULL;
+	}
+
+	do {
+		v = v * 10 + (*s++ - '0');
+		if (v > max) {
+			return NULL;
+		}
+	} while (isdigit((unsigned char)*s) != 0);
+
+	*val = v;
+
+	return s;
+}
+
+
+/* Parses [+|-]hh[:mm[:ss]] with hh at most maxHours into seconds */
+static const char *tz_parseTime(const char *s, long maxHours, long *secs)
+{
+	long sign = 1, hh, mm = 0, ss = 0;
+
+	if ((*s == '+') || (*s == '-')) {
+		sign = (*s == '-') ? -1 : 1;
+		s++;
+	}
+
+	s = tz_parseNum(s, maxHours, &hh);
+	if ((s != NULL) && (*s == ':')) {
+		s = tz_parseNum(s + 1, 59, &mm);
+		if ((s != NULL) && (*s == ':')) {
+			s = tz_parseNum(s + 1, 59, &ss);
+		}
+	}
+
+	if (s != NULL) {
+		*secs = sign * (hh * 3600 + mm * 60 + ss);
+	}
+
+	return s;
+}
+
+
+static const char *tz_parseName(const char *s, char *name)
+{
+	const char *start;
+	size_t len;
+
+	if (*s == '<') {
+		start = ++s;
+		while ((isalnum((unsigned char)*s) != 0) || (*s == '+') || (*s == '-')) {
+			s++;
+		}
+		len = s - start;
+		if (*s != '>') {
+			return NULL;
+		}
+		s++;
+	}
+	else {
+		start = s;
+		while (isalpha((unsigned char)*s) != 0) {
+			s++;
+		}
+		len = s - start;
+	}
+
+	if ((len < 3) || (len > TZ_NAME_MAX)) {
+		return NULL;
+	}
+
+	memcpy(name, start, len);
+	name[len] = '\0';
+
+	return s;
+}
+
+
+/* Parses Jn, n or Mm.w.d, optionally followed by /time */
+static const char *tz_parseRule(const char *s, struct tzrule *rule)
+{
+	long v;
+
+	if (*s == 'J') {
+		rule->type = tzrule_jday;
+		s = tz_parseNum(s + 1, 365, &v);
+		if ((s == NULL) || (v == 0)) {
+			return NULL;
+		}
+		rule->day = (int)v;
+	}
+	else if (*s == 'M') {
+		rule->type = tzrule_mweek;
+		s = tz_parseNum(s + 1, 12, &v);
+		if ((s == NULL) || (v == 0) || (*s != '.')) {
+			return NULL;
+		}
+		rule->month = (int)v;
+
+		s = tz_parseNum(s + 1, 5, &v);
+		if ((s == NULL) || (v == 0) || (*s != '.')) {
+			return NULL;
+		}
+		rule->week = (int)v;
+
+		s = tz_parseNum(s + 1, 6, &v);
+		if (s == NULL) {
+			return NULL;
+		}
+		rule->day = (int)v;
+	}
+	else {
+		rule->type = tzrule_yday;
+		s = tz_parseNum(s, 365, &v);
+		if (s == NULL) {
+			return NULL;
+		}
+		rule->day = (int)v;
+	}
+
+	rule->time = 2 * 3600;
+	if (*s == '/') {
+		s = tz_parseTime(s + 1, 167, &rule->time);
+	}
+
+	return s;
+}
+
+
+static void tz_parse(const char *tz, struct tzinfo *info)
+{
+	static const struct tzrule usStart = { .type = tzrule_mweek, .day = 0, .week = 2, .month = 3, .time = 2 * 3600 };
+	static const struct tzrule usEnd = { .type = tzrule_mweek, .day = 0, .week = 1, .month = 11, .time = 2 * 3600 };
+	struct tzinfo dst;
+	const char *s = NULL;
+	long offset;
+
+	memset(info, 0, sizeof(*info));
+
+	if (*tz != ':') {
+		s = tz_parseName(tz, info->name[0]);
+		if (s != NULL) {
+			s = tz_parseTime(s, 24, &offset);
+		}
+	}
+
+	if (s == NULL) {
+		/* No standard time: UTC, named as given if that is a valid zone name */
+		tz += (*tz == ':') ? 1 : 0;
+		s = tz_parseName(tz, info->name[0]);
+		if ((s == NULL) || (*s != '\0')) {
+			strcpy(info->name[0], "UTC");
+		}
+		strcpy(info->name[1], info->name[0]);
+		return;
+	}
+
+	info->offset[0] = -offset;
+	info->offset[1] = info->offset[0];
+	strcpy(info->name[1], info->name[0]);
+
+	/* Fill a copy, so that a malformed DST part leaves standard time only */
+	dst = *info;
+
+	if ((*s == '\0') || ((s = tz_parseName(s, dst.name[1])) == NULL)) {
+		return;
+	}
+
+	dst.offset[1] = dst.offset[0] + 3600;
+	if ((*s != ',') && (*s != '\0')) {
+		s = tz_parseTime(s, 24, &offset);
+		if (s == NULL) {
+			return;
+		}
+		dst.offset[1] = -offset;
+	}
+
+	if (*s == '\0') {
+		dst.rule[0] = usStart;
+		dst.rule[1] = usEnd;
+	}
+	else {
+		if (*s != ',') {
+			return;
+		}
+		s = tz_parseRule(s + 1, &dst.rule[0]);
+		if ((s == NULL) || (*s != ',')) {
+			return;
+		}
+		s = tz_parseRule(s + 1, &dst.rule[1]);
+		if ((s == NULL) || (*s != '\0')) {
+			return;
+		}
+	}
+
+	dst.hasdst = 1;
+	*info = dst;
+}
+
+
+/* Brings the parsed rules up to date with TZ, called with tz_common.lock held */
+static void tz_update(void)
+{
+	struct tzinfo info;
+	const char *tz = getenv("TZ");
+
+	if (tz == NULL) {
+		tz = "";
+	}
+
+	if ((tz_common.cached != 0) && (strcmp(tz, tz_common.tz) == 0)) {
+		return;
+	}
+
+	tz_parse(tz, &info);
+	tz_common.info = info;
+
+	if (strlen(tz) < sizeof(tz_common.tz)) {
+		strcpy(tz_common.tz, tz);
+		tz_common.cached = 1;
+	}
+	else {
+		tz_common.cached = 0;
+	}
+
+	tzname[0] = tz_common.info.name[0];
+	tzname[1] = tz_common.info.name[1];
+	timezone = -tz_common.info.offset[0];
+	daylight = tz_common.info.hasdst;
+}
+
+
+/* Returns a snapshot of the current rules, so that callers need not hold the lock */
+static void tz_get(struct tzinfo *info)
+{
+	mutexLock(tz_common.lock);
+	tz_update();
+	*info = tz_common.info;
+	mutexUnlock(tz_common.lock);
+}
+
+
 void tzset(void)
 {
-	static char tznamestore[2][4];
+	mutexLock(tz_common.lock);
+	tz_update();
+	mutexUnlock(tz_common.lock);
+}
 
-	/* TODO - env parsing */
 
-	strcpy(tznamestore[0], "UTC");
-	tznamestore[1][0] = '\0';
-	tzname[0] = tznamestore[0];
-	tzname[1] = tznamestore[1];
-	timezone = 0;
-	daylight = 0;
+void _time_init(void)
+{
+	(void)mutexCreate(&tz_common.lock);
 }
 
 
@@ -327,10 +665,114 @@ struct tm *gmtime(const time_t *timep)
 }
 
 
+/* Days from the Epoch to January 1st of the year */
+static time_t tz_yearDays(int year)
+{
+	return (time_t)(year - 1970) * 365 + leapcount(year);
+}
+
+
+/* Day of the year (0 = January 1st) a rule falls on */
+static int tz_ruleYday(const struct tzrule *rule, int year)
+{
+	int leap = isleap(year), yday = 0, mday, wday, i;
+
+	if (rule->type == tzrule_jday) {
+		return rule->day - 1 + (((leap != 0) && (rule->day >= 60)) ? 1 : 0);
+	}
+
+	if (rule->type == tzrule_yday) {
+		return rule->day;
+	}
+
+	for (i = 0; i < rule->month - 1; i++) {
+		yday += daysofmonth(i, leap);
+	}
+
+	/* Weekday of the first day of the month, 1970-01-01 was a Thursday */
+	wday = (int)((tz_yearDays(year) + yday + 4) % 7);
+	if (wday < 0) {
+		wday += 7;
+	}
+
+	/* The first such weekday of the month, then the requested week of it, or the last one */
+	mday = (rule->day - wday + 7) % 7 + (rule->week - 1) * 7;
+	while (mday >= daysofmonth(rule->month - 1, leap)) {
+		mday -= 7;
+	}
+
+	return yday + mday;
+}
+
+
+/* UTC time of a change in a year, offset is the UTC offset in force before the change */
+static time_t tz_change(const struct tzrule *rule, int year, long offset)
+{
+	return (tz_yearDays(year) + tz_ruleYday(rule, year)) * (24 * 60 * 60) + rule->time - offset;
+}
+
+
+static int tz_isdst(const struct tzinfo *info, time_t t)
+{
+	time_t days, start, end;
+	int year, yday;
+
+	if (info->hasdst == 0) {
+		return 0;
+	}
+
+	days = t / (24 * 60 * 60);
+	if ((t % (24 * 60 * 60)) < 0) {
+		days--;
+	}
+
+	if ((days > INT_MAX) || (days < INT_MIN)) {
+		return 0;
+	}
+
+	/* Like glibc, use the changes of the year t falls in in UTC */
+	year = epochDaysToYears((int)days, &yday);
+	start = tz_change(&info->rule[0], year, info->offset[0]);
+	end = tz_change(&info->rule[1], year, info->offset[1]);
+
+	if (start > end) {
+		/* Southern hemisphere, DST spans the new year */
+		return ((t < end) || (t >= start)) ? 1 : 0;
+	}
+
+	return ((t >= start) && (t < end)) ? 1 : 0;
+}
+
+
+static struct tm *tz_localtime(const struct tzinfo *info, time_t t, struct tm *res)
+{
+	int isdst = tz_isdst(info, t);
+	long offset = info->offset[isdst];
+
+	/* time_t is 64-bit */
+	if (((offset > 0) && (t > LLONG_MAX - offset)) || ((offset < 0) && (t < LLONG_MIN - offset))) {
+		errno = EOVERFLOW;
+		return NULL;
+	}
+
+	t += offset;
+	if (gmtime_r(&t, res) == NULL) {
+		return NULL;
+	}
+
+	res->tm_isdst = isdst;
+
+	return res;
+}
+
+
 struct tm *localtime_r(const time_t *timep, struct tm *res)
 {
-	/* TODO - use timezone information */
-	return gmtime_r(timep, res);
+	struct tzinfo info;
+
+	tz_get(&info);
+
+	return tz_localtime(&info, *timep, res);
 }
 
 
@@ -358,31 +800,6 @@ char *ctime(const time_t *timep)
 
 	return ctime_r(timep, buff);
 }
-
-/* Calculate number of leap days between 1970-01-01 and year-01-01 */
-static int leapcount(int year)
-{
-	/* Center on 2000-01-01 for the calculations. There are 8 leap days between 1970-01-01 and that date.
-	 * Also subtract 1 because while 2000 is a leap year, its leap day isn't counted yet at 2000-01-01.
-	 */
-	int leap_days = 8;
-	year -= 2001;
-	if (year < 0) {
-		/* If year is negative, push it into the positive and compensate by subtracting the appropriate
-		 * number of leap days from the result. This avoids dealing with the C division operator on negative numbers.
-		 */
-		int periods = (year - 399) / 400;
-		year -= periods * 400;
-		leap_days += periods * 97;
-	}
-
-	leap_days += year / 400;
-	leap_days -= year / 100;
-	leap_days += year / 4;
-
-	return leap_days;
-}
-
 
 static time_t _mktimeSkel(const struct tm *tp)
 {
@@ -413,16 +830,42 @@ static time_t _mktimeSkel(const struct tm *tp)
 
 time_t mktime(struct tm *tp)
 {
-	time_t res;
+	struct tzinfo info;
+	time_t local, t, tstd, tdst;
 
-	tzset();
+	tz_get(&info);
 
-	res = _mktimeSkel(tp) + timezone - ((daylight && tp->tm_isdst > 0) ? 3600 : 0);
-	if (localtime_r(&res, tp) == NULL) {
+	local = _mktimeSkel(tp);
+	tstd = local - info.offset[0];
+	tdst = local - info.offset[1];
+
+	if (info.hasdst == 0) {
+		/* Like glibc, presume a one hour DST if asked for it in a zone without DST */
+		t = (tp->tm_isdst > 0) ? (tstd - 3600) : tstd;
+	}
+	else if (tp->tm_isdst > 0) {
+		t = tdst;
+	}
+	else if (tp->tm_isdst == 0) {
+		t = tstd;
+	}
+	else if (tz_isdst(&info, tstd) == 0) {
+		/* Standard time is valid. If DST is too, in the hour repeated by the change back, take the earlier */
+		t = ((tz_isdst(&info, tdst) != 0) && (tdst < tstd)) ? tdst : tstd;
+	}
+	else if (tz_isdst(&info, tdst) != 0) {
+		t = tdst;
+	}
+	else {
+		/* In the hour skipped by the change to DST: taken as standard time, like glibc does */
+		t = tstd;
+	}
+
+	if (tz_localtime(&info, t, tp) == NULL) {
 		return -1;
 	}
 
-	return res;
+	return t;
 }
 
 
@@ -481,6 +924,8 @@ size_t strftime(char *__restrict s, size_t maxsize, const char *__restrict forma
 	size_t size = 0;
 	const char *c = format;
 	struct tm time;
+	struct tzinfo info;
+	long offset;
 	char buf[64];
 	int isoYear;
 
@@ -674,7 +1119,14 @@ size_t strftime(char *__restrict s, size_t maxsize, const char *__restrict forma
 				defMinWidth = 2;
 				break;
 			case 'z':
-				snprintf(buf, sizeof(buf), "+0000");
+				if (timeptr->tm_isdst < 0) {
+					skip = 1; /* offset unknown -> emit nothing */
+					break;
+				}
+				tz_get(&info);
+				offset = info.offset[(timeptr->tm_isdst > 0) ? 1 : 0];
+				snprintf(buf, sizeof(buf), "%c%02ld%02ld", (offset < 0) ? '-' : '+',
+						labs(offset) / 3600, labs(offset) / 60 % 60);
 				defPad = ' ';
 				break;
 			case 'n':
@@ -688,7 +1140,13 @@ size_t strftime(char *__restrict s, size_t maxsize, const char *__restrict forma
 				defPad = ' ';
 				break;
 			case 'Z':
-				skip = 1; /* no timezone name available -> emit nothing */
+				if (timeptr->tm_isdst < 0) {
+					skip = 1; /* zone unknown -> emit nothing */
+					break;
+				}
+				tz_get(&info);
+				snprintf(buf, sizeof(buf), "%s", info.name[(timeptr->tm_isdst > 0) ? 1 : 0]);
+				defPad = ' ';
 				break;
 			case '%':
 				buf[0] = '%';

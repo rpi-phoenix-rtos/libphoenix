@@ -15,7 +15,9 @@ include ../phoenix-rtos-build/Makefile.common
 SYSROOT := $(shell $(CC) $(CFLAGS) -print-sysroot)
 MULTILIB_DIR := $(shell $(CC) $(CFLAGS) -print-multi-directory)
 LIBC_INSTALL_DIR := $(SYSROOT)/lib/$(MULTILIB_DIR)
-LIBC_INSTALL_NAMES := libc.a libm.a libg.a libpthread.a libubsan.a
+# libdl.a: dlopen() and friends live in libphoenix, but ports link -ldl as on glibc and musl
+# (CPython appends -ldl as soon as <execinfo.h> provides backtrace())
+LIBC_INSTALL_NAMES := libc.a libm.a libg.a libpthread.a libubsan.a libdl.a
 HEADERS_INSTALL_DIR := $(SYSROOT)/usr/include
 LIBNAME := libphoenix.a
 

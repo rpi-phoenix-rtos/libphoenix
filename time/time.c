@@ -5,15 +5,14 @@
  *
  * time
  *
- * Copyright 2017, 2023 Phoenix Systems
- * Author: Andrzej Asztemborski, Jacek Maksymowicz
+ * Copyright 2017, 2023, 2026 Phoenix Systems
+ * Author: Andrzej Asztemborski, Jacek Maksymowicz, Michal Lach
  *
- * This file is part of Phoenix-RTOS.
- *
- * %LICENSE%
+ * SPDX-License-Identifier: BSD-3-Clause
  */
 
 #include <sys/time.h>
+#include <sys/threads.h>
 #include <time.h>
 #include <errno.h>
 #include <stdlib.h>
@@ -98,24 +97,43 @@ time_t time(time_t *tp)
 
 int clock_gettime(clockid_t clk_id, struct timespec *tp)
 {
-	int err;
+	int err, tid;
 	time_t now, offs;
+	threadinfo_t info;
 
 	if (tp == NULL) {
 		return SET_ERRNO(-EINVAL);
 	}
 
-	if (clk_id != CLOCK_REALTIME && clk_id != CLOCK_MONOTONIC && clk_id != CLOCK_MONOTONIC_RAW) {
-		return SET_ERRNO(-EINVAL);
-	}
+	switch (clk_id) {
+		case CLOCK_REALTIME:
+			/* fallthrough */
+		case CLOCK_MONOTONIC_RAW:
+			/* fallthrough */
+		case CLOCK_MONOTONIC:
+			err = gettime(&now, &offs);
+			if (err < 0) {
+				return SET_ERRNO(err);
+			}
 
-	err = gettime(&now, &offs);
-	if (err < 0) {
-		return SET_ERRNO(err);
-	}
+			if (clk_id == CLOCK_REALTIME) {
+				now += offs;
+			}
 
-	if (clk_id == CLOCK_REALTIME) {
-		now += offs;
+			break;
+		case CLOCK_THREAD_CPUTIME_ID:
+			tid = gettid();
+			/* threadinfo() returns the number of entries filled (1) on success,
+			 * not EOK -- testing `!= EOK` returned 1 without writing *tp. */
+			err = threadinfo(tid, PH_THREADINFO_CPUTIME, &info);
+			if (err < 0) {
+				return SET_ERRNO(err);
+			}
+
+			now = info.cpuTime;
+			break;
+		default:
+			return SET_ERRNO(-EINVAL);
 	}
 
 	tp->tv_sec = now / (1000 * 1000);
@@ -148,16 +166,17 @@ int clock_settime(clockid_t clock_id, const struct timespec *tp)
 
 int clock_getres(clockid_t clk_id, struct timespec *res)
 {
-	if (clk_id != CLOCK_REALTIME && clk_id != CLOCK_MONOTONIC && clk_id != CLOCK_MONOTONIC_RAW) {
+	if (clk_id != CLOCK_REALTIME && clk_id != CLOCK_MONOTONIC && clk_id != CLOCK_MONOTONIC_RAW &&
+			clk_id != CLOCK_THREAD_CPUTIME_ID) {
 		return SET_ERRNO(-EINVAL);
 	}
 
 	/* Passing NULL is allowed by POSIX and only validates clk_id. */
 	if (res != NULL) {
 		/*
-		 * gettime() reports microseconds, so that is the resolution every
-		 * clock_gettime() result is truncated to, regardless of how fine the
-		 * underlying hardware counter is.
+		 * gettime() and threadinfo()'s cpuTime both report microseconds, so
+		 * that is the resolution every clock_gettime() result is truncated
+		 * to, regardless of how fine the underlying hardware counter is.
 		 */
 		res->tv_sec = 0;
 		res->tv_nsec = 1000;
@@ -175,7 +194,7 @@ char *asctime_r(const struct tm *tp, char *buf)
 	mon = tp->tm_mon < 0 || tp->tm_mon > 11 ? 12 : tp->tm_mon;
 
 	sprintf(buf, "%.3s %.3s %d %02d:%02d:%02d %d\n", wdayasc[wday], monasc[mon],
-		tp->tm_mday, tp->tm_hour, tp->tm_min, tp->tm_sec, tp->tm_year + 1900);
+			tp->tm_mday, tp->tm_hour, tp->tm_min, tp->tm_sec, tp->tm_year + 1900);
 
 	return buf;
 }

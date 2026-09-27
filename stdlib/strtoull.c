@@ -77,10 +77,7 @@ static unsigned long long int strtoll_common(const char *nptr, char **endptr, in
 		cutoff = ULLONG_MAX;
 	}
 	else {
-		/* `-LLONG_MIN` overflows a signed long long, which is undefined
-		 * behaviour; compute |LLONG_MIN| in the unsigned type it is used in. */
-		cutoff = (neg != 0) ? ((unsigned long long int)LLONG_MAX + 1uLL) :
-							  (unsigned long long int)LLONG_MAX;
+		cutoff = (neg != 0) ? -(unsigned long long int)LLONG_MIN : LLONG_MAX;
 	}
 
 	cutlim = (int)(cutoff % base);
@@ -127,11 +124,7 @@ static unsigned long long int strtoll_common(const char *nptr, char **endptr, in
 			acc = ULLONG_MAX;
 		}
 		else {
-			/* Same UB as above; converting the negative limit to the unsigned
-			 * accumulator is modular and well-defined, and the caller casts it
-			 * back to long long. This mirrors what strtoul.c does. */
-			acc = (neg != 0) ? (unsigned long long int)LLONG_MIN :
-							   (unsigned long long int)LLONG_MAX;
+			acc = (neg != 0) ? -(unsigned long long int)LLONG_MIN : LLONG_MAX;
 		}
 	}
 	else if (neg != 0) {

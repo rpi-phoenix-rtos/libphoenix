@@ -58,11 +58,7 @@ static unsigned long int strtoul_common(const char *nptr, char **endptr, int bas
 		cutoff = ULONG_MAX;
 	}
 	else {
-		/* `-LONG_MIN` overflows a signed long, which is undefined behaviour --
-		 * it happens to wrap to the right magnitude on two's complement, but the
-		 * compiler is entitled to assume it cannot happen. Compute |LONG_MIN| in
-		 * the unsigned type the value is used in. */
-		cutoff = (negative != 0) ? ((unsigned long int)LONG_MAX + 1UL) : (unsigned long int)LONG_MAX;
+		cutoff = (negative != 0) ? -(unsigned long int)LONG_MIN : LONG_MAX;
 	}
 
 	cutlim = (int)(cutoff % base);

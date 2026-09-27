@@ -193,7 +193,7 @@ char *asctime_r(const struct tm *tp, char *buf)
 	wday = tp->tm_wday < 0 || tp->tm_wday > 6 ? 7 : tp->tm_wday;
 	mon = tp->tm_mon < 0 || tp->tm_mon > 11 ? 12 : tp->tm_mon;
 
-	sprintf(buf, "%.3s %.3s %d %02d:%02d:%02d %d\n", wdayasc[wday], monasc[mon],
+	sprintf(buf, "%.3s %.3s%3d %.2d:%.2d:%.2d %d\n", wdayasc[wday], monasc[mon],
 			tp->tm_mday, tp->tm_hour, tp->tm_min, tp->tm_sec, tp->tm_year + 1900);
 
 	return buf;

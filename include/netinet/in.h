@@ -164,30 +164,32 @@ struct ipv6_mreq {
 	  (a)->s6_addr32[2] == 0 && (a)->s6_addr32[3] != 0x01000000 && \
 	  (a)->s6_addr32[3] != 0))
 
+/* Multicast scopes: the scope is the low 4 bits of the second byte; the high 4 are flags (RFC 4291 2.7) */
+
 /* Multicast node-local address */
 #define IN6_IS_ADDR_MC_NODELOCAL(a) \
 		((IN6_IS_ADDR_MULTICAST(a) && \
-		  a->s6_addr[1] == IPv6_ADDR_MC_SCOPE_NODELOCAL))
+		  ((a)->s6_addr[1] & 0x0f) == IPv6_ADDR_MC_SCOPE_NODELOCAL))
 
 /* Multicast link-local address */
 #define IN6_IS_ADDR_MC_LINKLOCAL(a) \
 		((IN6_IS_ADDR_MULTICAST(a) && \
-		  a->s6_addr[1] == IPv6_ADDR_MC_SCOPE_LINKLOCAL))
+		  ((a)->s6_addr[1] & 0x0f) == IPv6_ADDR_MC_SCOPE_LINKLOCAL))
 
 /* Multicast site-local address */
 #define IN6_IS_ADDR_MC_SITELOCAL(a) \
 		((IN6_IS_ADDR_MULTICAST(a) && \
-		  a->s6_addr[1] == IPv6_ADDR_MC_SCOPE_SITELOCAL))
+		  ((a)->s6_addr[1] & 0x0f) == IPv6_ADDR_MC_SCOPE_SITELOCAL))
 
 /* Multicast organization-local address */
 #define IN6_IS_ADDR_MC_ORGLOCAL(a) \
 		((IN6_IS_ADDR_MULTICAST(a) && \
-		  a->s6_addr[1] == IPv6_ADDR_MC_SCOPE_ORGLOCAL))
+		  ((a)->s6_addr[1] & 0x0f) == IPv6_ADDR_MC_SCOPE_ORGLOCAL))
 
 /* Multicast global address */
 #define IN6_IS_ADDR_MC_GLOBAL(a) \
 		((IN6_IS_ADDR_MULTICAST(a) && \
-		  a->s6_addr[1] == IPv6_ADDR_MC_SCOPE_GLOBAL))
+		  ((a)->s6_addr[1] & 0x0f) == IPv6_ADDR_MC_SCOPE_GLOBAL))
 
 /* Not defined by POSIX but still needed */
 #define IN6_ARE_ADDR_EQUAL(a, b) \

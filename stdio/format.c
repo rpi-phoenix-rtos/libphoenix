@@ -1113,6 +1113,11 @@ int format_parse(void *ctx, feedfunc feed, const char *format, va_list args)
 			else if (fmt == '*') {
 				flags |= FLAG_FIELD_WIDTH_STAR;
 			}
+			else if (fmt == '\'') {
+				/* POSIX/XSI: group the integer part with LC_NUMERIC's
+				 * thousands_sep. Only the C/POSIX locale exists here and its
+				 * separator is empty, so the flag is accepted and has no effect. */
+			}
 			else {
 				break;
 			}

@@ -175,8 +175,9 @@ int vswprintf(wchar_t *__restrict ws, size_t n, const wchar_t *__restrict format
 			continue;
 		}
 
-		/* flags */
-		while ((*p == L'-') || (*p == L'+') || (*p == L' ') || (*p == L'#') || (*p == L'0')) {
+		/* flags; the POSIX/XSI ' (grouping) flag is passed through to snprintf,
+		 * which accepts it and, in the only (C) locale, ignores it */
+		while ((*p == L'-') || (*p == L'+') || (*p == L' ') || (*p == L'#') || (*p == L'0') || (*p == L'\'')) {
 			if (si < (SWP_SPECMAX - 8u)) {
 				spec[si++] = (char)*p;
 			}

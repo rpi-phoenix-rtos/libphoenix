@@ -87,16 +87,35 @@ extern const struct in6_addr in6addr_loopback;
 #define INET_ADDRSTRLEN 16 /* Length of the string form for IPv4 */
 #define INET6_ADDRSTRLEN 46 /* Length of the string form for IPv6 */
 
-#define IPV6_JOIN_GROUP			0x00000001 /* Join a multicast group */
-#define IPV6_LEAVE_GROUP		0x00000002 /* Quit a multicast group */
+/*
+ * IPPROTO_IPV6 socket options. setsockopt()/getsockopt() hand level and optname
+ * to phoenix-rtos-lwip unchanged (port/sockets.c calls lwip_setsockopt() with
+ * them), so the numbers lwip implements must be lwip's own (lwip/sockets.h):
+ * IPV6_CHECKSUM, IPV6_V6ONLY, IPV6_JOIN_GROUP and IPV6_LEAVE_GROUP (the last two
+ * need LWIP_IPV6_MLD). lwip has no counterpart for the others, which it rejects
+ * with ENOPROTOOPT whatever their value.
+ */
+#define IPV6_CHECKSUM			7  /* Calculate and insert the ICMPv6 checksum (raw sockets) */
+#define IPV6_JOIN_GROUP			12 /* Join a multicast group (struct ipv6_mreq) */
+#define IPV6_LEAVE_GROUP		13 /* Quit a multicast group (struct ipv6_mreq) */
+#define IPV6_V6ONLY				27 /* Restrict AF_INET6 socket to IPv6 communications only */
+
+/* Pre-RFC 3493 names of IPV6_JOIN_GROUP/IPV6_LEAVE_GROUP (lwip, Linux, BSD) */
+#define IPV6_ADD_MEMBERSHIP		IPV6_JOIN_GROUP
+#define IPV6_DROP_MEMBERSHIP	IPV6_LEAVE_GROUP
+
 #define IPV6_MULTICAST_HOPS		0x00000004 /* Multicast hop limit */
 #define IPV6_MULTICAST_IF		0x00000008 /* Interface to use for outgoing multicast packets */
 #define IPV6_MULTICAST_LOOP		0x00000010 /* Multicast packets are delivered back to the local application */
 #define IPV6_UNICAST_HOPS		0x00000020 /* Unicast hop limit */
-#define IPV6_V6ONLY				0x00000040 /* Restrict AF_INET6 socket to IPv6 communications only */
 
-#define IPV6_CHECKSUM 7
 #define IPV6_HOPLIMIT 52 /* not implemented  */
+
+/* IPv6 multicast group membership request (IPV6_JOIN_GROUP, IPV6_LEAVE_GROUP) */
+struct ipv6_mreq {
+	struct in6_addr ipv6mr_multiaddr; /* IPv6 multicast address */
+	unsigned int ipv6mr_interface;    /* Interface index, or 0 for the default */
+};
 
 /* IPv6 multicast address scopes */
 #define IPv6_ADDR_MC_SCOPE_NODELOCAL	0x1 /* Interface-Local scope */

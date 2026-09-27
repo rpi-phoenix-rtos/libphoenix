@@ -628,6 +628,72 @@ extern int v3d_c1_lookup_page(unsigned long page, unsigned int *handle, unsigned
 #endif /* V3D_C1_HUNT */
 
 
+#ifdef C1_PAGE_PROVENANCE
+/* TODO(C1-hunt): ask the KERNEL who held a victim's physical page before malloc did.
+ *
+ * Needs a kernel built with the same -DC1_PAGE_PROVENANCE: it keeps a per-page log of
+ * every allocation, free and physical mapping in the band below (phoenix-rtos-kernel
+ * vm/page.c) and prints a page's log as `C1PROV ` lines when meminfo() carries this magic
+ * in all four map sizes. A stock kernel rejects those sizes and writes nothing, so
+ * page.alloc keeping its canary means "this kernel has no log" -- said out loud below,
+ * because an instrument that silently prints nothing reads as "no history".
+ * Keep the magic and the band in sync with vm/page.h and vm/page.c.
+ *
+ * Reasons, printed as the second half of the kernel's d= field:
+ *   0 positive control -- one of this process's first in-band heaps (C1_HEAP_TRACE_ALL=1)
+ *   1 poison break (p4pa)    2 corrupt heap header (hpa)
+ *   3 negative control -- this process's first out-of-band heap (C1_HEAP_TRACE_ALL=1) */
+#define C1PROV_MEMINFO_MAGIC (-0xc1)
+#define C1PROV_BAND_LO       0x08000000u
+#define C1PROV_BAND_HI       0x08600000u
+#define C1PROV_CTL_DUMPS     2u
+
+static void malloc_c1ProvDump(uintptr_t pa, unsigned int reason)
+{
+	meminfo_t info;
+
+	memset(&info, 0, sizeof(info));
+	info.page.mapsz = C1PROV_MEMINFO_MAGIC;
+	info.entry.mapsz = C1PROV_MEMINFO_MAGIC;
+	info.entry.kmapsz = C1PROV_MEMINFO_MAGIC;
+	info.maps.mapsz = C1PROV_MEMINFO_MAGIC;
+	info.page.alloc = ~0u;
+	info.maps.total = (size_t)pa;
+	info.maps.free = 1u;
+	info.entry.pid = reason;
+
+	malloc_debugHex("malloc:   c1prov = ", pa);
+	meminfo(&info);
+	if (info.page.alloc == ~0u) {
+		debug("malloc:   c1prov = NO ANSWER -- kernel built without C1_PAGE_PROVENANCE\n");
+	}
+}
+
+
+/* Positive and negative control: the dump of a heap page this process has just faulted in
+ * must end in `ev=alloc kind=anon` with this process's pid and an age of about zero. */
+static void malloc_c1ProvControl(uintptr_t hpa)
+{
+	static unsigned int inBand = 0u, outOfBand = 0u;
+
+	if (malloc_caTraceOn() == 0) {
+		return;
+	}
+
+	if ((hpa >= C1PROV_BAND_LO) && (hpa < C1PROV_BAND_HI)) {
+		if (inBand < C1PROV_CTL_DUMPS) {
+			inBand++;
+			malloc_c1ProvDump(hpa, 0u);
+		}
+	}
+	else if (outOfBand == 0u) {
+		outOfBand = 1u;
+		malloc_c1ProvDump(hpa, 3u);
+	}
+}
+#endif /* C1_PAGE_PROVENANCE */
+
+
 static void malloc_reportHeapSize(const heap_t *heap)
 {
 	uintptr_t hbase = (uintptr_t)heap;
@@ -713,6 +779,21 @@ static void malloc_reportHeapSize(const heap_t *heap)
 		}
 	}
 #endif /* V3D_C1_HUNT */
+
+#ifdef C1_PAGE_PROVENANCE
+	/* Several reporters land here for the same heap, so dump each page once, at most 4 */
+	{
+		static unsigned int provDumps = 0u;
+		static uintptr_t provLast = 0u;
+		uintptr_t ppa = (uintptr_t)va2pa((void *)((uintptr_t)heap & ~(uintptr_t)(_PAGE_SIZE - 1)));
+
+		if ((ppa != 0u) && (ppa != provLast) && (provDumps < 4u)) {
+			provDumps++;
+			provLast = ppa;
+			malloc_c1ProvDump(ppa, 2u);
+		}
+	}
+#endif
 }
 
 
@@ -1325,6 +1406,11 @@ static void malloc_c1P4Verify(chunk_t *chunk, size_t chunksz)
 							malloc_debugHex("malloc:   p4w= ", (uintptr_t)base[w]);
 						}
 					}
+
+#ifdef C1_PAGE_PROVENANCE
+					/* Last, so the p4 block above stays contiguous for its readers */
+					malloc_c1ProvDump((uintptr_t)va2pa((void *)p), 1u);
+#endif
 				}
 				return;
 			}
@@ -2204,6 +2290,9 @@ static heap_t *_malloc_heapAlloc(size_t size)
 			if (v3d_c1_lookup_pa((unsigned long)hpa, NULL, NULL, NULL) > 0) {
 				malloc_c1HeapFromBo++;
 			}
+#ifdef C1_PAGE_PROVENANCE
+			malloc_c1ProvControl(hpa);
+#endif
 		}
 	}
 

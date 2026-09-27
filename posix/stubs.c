@@ -214,12 +214,6 @@ unsigned int minor(dev_t dev)
 }
 
 
-int flock(int fd, int operation)
-{
-	return 0;
-}
-
-
 long ulimit(int __cmd, ...)
 {
 	return 0;

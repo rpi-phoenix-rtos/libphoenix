@@ -70,6 +70,18 @@ extern void rewinddir(DIR *dirp);
 extern int closedir(DIR *dirp);
 
 
+/* Lists `dir`: the entries `sel` accepts (all, if NULL), sorted with `compar`
+ * (unsorted, if NULL). *namelist and each entry are malloc()ed; the caller
+ * frees them. Returns the count, or -1 with errno set. */
+extern int scandir(const char *dir, struct dirent ***namelist,
+	int (*sel)(const struct dirent *),
+	int (*compar)(const struct dirent **, const struct dirent **));
+
+
+/* scandir() comparator: by d_name, in the collation order (strcoll). */
+extern int alphasort(const struct dirent **a, const struct dirent **b);
+
+
 #ifdef __cplusplus
 }
 #endif

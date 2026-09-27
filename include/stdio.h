@@ -211,6 +211,17 @@ char *tmpnam(char *str);
 char *tempnam(const char *dir, const char *pfx);
 
 
+/* Opens a write-only stream into a dynamically allocated buffer; after fflush()
+ * or fclose(), *bufp holds the (NUL-terminated) buffer and *sizep its size.
+ * The caller frees *bufp after fclose(). */
+FILE *open_memstream(char **bufp, size_t *sizep);
+
+
+/* Opens a stream over the `size`-byte buffer `buf` (allocated privately and
+ * freed on fclose() if NULL). */
+FILE *fmemopen(void *__restrict buf, size_t size, const char *__restrict mode);
+
+
 /* Sends formatted output to a stream. */
 int fprintf(FILE *stream, const char *format, ...)
 		__attribute__((format(printf, 2, 3)));

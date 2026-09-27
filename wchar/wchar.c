@@ -14,6 +14,7 @@
  */
 
 #include <wchar.h>
+#include <inttypes.h>
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
@@ -589,6 +590,8 @@ WCSTONUM_DEF(wcstol,   long,               strtol(buf, &cend, base),   (const wc
 WCSTONUM_DEF(wcstoul,  unsigned long,      strtoul(buf, &cend, base),  (const wchar_t *__restrict nptr, wchar_t **__restrict endptr, int base))
 WCSTONUM_DEF(wcstoll,  long long,          strtoll(buf, &cend, base),  (const wchar_t *__restrict nptr, wchar_t **__restrict endptr, int base))
 WCSTONUM_DEF(wcstoull, unsigned long long, strtoull(buf, &cend, base), (const wchar_t *__restrict nptr, wchar_t **__restrict endptr, int base))
+WCSTONUM_DEF(wcstoimax, intmax_t,          strtoimax(buf, &cend, base), (const wchar_t *__restrict nptr, wchar_t **__restrict endptr, int base))
+WCSTONUM_DEF(wcstoumax, uintmax_t,         strtoumax(buf, &cend, base), (const wchar_t *__restrict nptr, wchar_t **__restrict endptr, int base))
 WCSTONUM_DEF(wcstod,   double,             strtod(buf, &cend),         (const wchar_t *__restrict nptr, wchar_t **__restrict endptr))
 WCSTONUM_DEF(wcstof,   float,              strtof(buf, &cend),         (const wchar_t *__restrict nptr, wchar_t **__restrict endptr))
 WCSTONUM_DEF(wcstold,  long double,        strtold(buf, &cend),        (const wchar_t *__restrict nptr, wchar_t **__restrict endptr))

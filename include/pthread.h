@@ -59,6 +59,11 @@ extern "C" {
 #define PTHREAD_CANCEL_ENABLE  1
 #define PTHREAD_CANCELED       2
 
+#define PTHREAD_BARRIER_SERIAL_THREAD (-1)
+
+#define PTHREAD_CANCEL_DEFERRED     0
+#define PTHREAD_CANCEL_ASYNCHRONOUS 1
+
 /* clang-format off */
 #define PTHREAD_MUTEX_INITIALIZER  { 0, 0 }
 #define PTHREAD_COND_INITIALIZER   { 0, 0 }
@@ -76,6 +81,35 @@ int pthread_detach(pthread_t thread);
 
 
 int pthread_setcancelstate(int state, int *oldstate);
+
+
+int pthread_barrier_init(pthread_barrier_t *barrier, const pthread_barrierattr_t *attr, unsigned int count);
+
+
+int pthread_barrier_destroy(pthread_barrier_t *barrier);
+
+
+int pthread_barrier_wait(pthread_barrier_t *barrier);
+
+
+int pthread_barrierattr_init(pthread_barrierattr_t *attr);
+
+
+int pthread_barrierattr_destroy(pthread_barrierattr_t *attr);
+
+
+int pthread_barrierattr_getpshared(const pthread_barrierattr_t *attr, int *pshared);
+
+
+int pthread_barrierattr_setpshared(pthread_barrierattr_t *attr, int pshared);
+
+
+/* NOTE: libphoenix acts on a cancellation request as soon as it is made and
+ * cancellation is enabled -- the target is stopped wherever it is, not at a
+ * cancellation point. That is PTHREAD_CANCEL_ASYNCHRONOUS behaviour, whichever
+ * type is set; PTHREAD_CANCEL_DEFERRED (the default) is recorded but deferral
+ * is not implemented. */
+int pthread_setcanceltype(int type, int *oldtype);
 
 
 int pthread_cancel(pthread_t thread);

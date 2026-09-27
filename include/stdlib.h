@@ -123,6 +123,15 @@ extern void *reallocf(void *ptr, size_t size);
 extern size_t malloc_usable_size(void *ptr);
 
 
+/* Allocates `size` bytes aligned to `alignment`, which must be a power of two
+ * and a multiple of sizeof(void *). Returns 0, EINVAL or ENOMEM (POSIX). */
+extern int posix_memalign(void **memptr, size_t alignment, size_t size);
+
+
+/* Allocates `size` bytes aligned to `alignment`, a power of two (C11). */
+extern void *aligned_alloc(size_t alignment, size_t size);
+
+
 /* Returns the (short) name of the current program, as recorded at startup. */
 extern const char *getprogname(void);
 

@@ -68,6 +68,7 @@ FILE *stdin, *stdout, *stderr;
 static struct {
 	FILE *list;
 	handle_t lock;
+	FILE *std[3]; /* the stdin, stdout and stderr objects _file_init() made */
 } file_common;
 
 
@@ -260,11 +261,37 @@ static int file_unlink(FILE *file)
 }
 
 
+static int file_isStd(const FILE *file)
+{
+	return ((file == file_common.std[0]) || (file == file_common.std[1]) || (file == file_common.std[2])) ? 1 : 0;
+}
+
+
 static void file_release(FILE *file)
 {
 
 	if (file->buffer != NULL && !(file->flags & F_USRBUF)) {
 		buffFree(file->buffer, file->bufsz);
+	}
+
+	/* The standard stream objects are never freed, only emptied, as in glibc and
+	 * musl. Pointers to them outlive fclose(): libstdc++'s std::cout/cerr/clog
+	 * keep the value stdout/stderr had at startup and fflush() it from
+	 * ios_base::Init::~Init(), an exit-time destructor. SuperTuxKart ends main()
+	 * with fclose(stderr); fclose(stdout); and so flushed freed memory at every
+	 * exit -- harmless while the stale words happened to read as an idle stream,
+	 * a Data Abort once they read as F_OPS (stk-drm, 2026-09-27: far=0xba in
+	 * file_rawSeek). Emptied, the object is inert: no buffer, so fflush() is a
+	 * no-op; no descriptor, so I/O fails with EBADF; off the list, so fclose()
+	 * again fails with EBADF. The lock stays, since fflush() takes it. */
+	if (file_isStd(file) != 0) {
+		file->buffer = NULL;
+		file->bufsz = 0;
+		file->bufpos = 0;
+		file->bufeof = 0;
+		file->fd = -1;
+		file->flags = 0;
+		return;
 	}
 
 	resourceDestroy(file->lock);
@@ -1733,6 +1760,10 @@ void _file_init(void)
 	stdin = stdStream(0, O_RDONLY, 0, BUFSIZ);
 	stdout = stdStream(1, O_WRONLY, F_WRITING, BUFSIZ);
 	stderr = stdStream(2, O_WRONLY, F_WRITING, 0);
+
+	file_common.std[0] = stdin;
+	file_common.std[1] = stdout;
+	file_common.std[2] = stderr;
 
 	if (stdin != NULL) {
 		/* Nothing buffered yet: make the first read refill. */

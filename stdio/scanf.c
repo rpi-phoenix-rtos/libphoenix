@@ -112,7 +112,7 @@ static int scanf_parse(char *ccltab, const char *inp, int *inr, char const *fmt0
 {
 	const unsigned char *fmt = (const unsigned char *)fmt0;
 	int c, n, flags, nassigned, nconversions, nread, base;
-	int nconsumed, lastc;
+	int nconsumed, nsign, lastc;
 	size_t width;
 	char *p, *p0;
 	char buf[32];
@@ -554,6 +554,7 @@ static int scanf_parse(char *ccltab, const char *inp, int *inr, char const *fmt0
 				 * nothing had been copied -- which under SUPPRESS is always.
 				 * Track consumption separately instead. */
 				nconsumed = 0;
+				nsign = 0;
 				lastc = 0;
 				flags |= SIGNOK | NDIGITS | NZDIGITS;
 				for (p = buf; width; width--) {
@@ -619,13 +620,17 @@ static int scanf_parse(char *ccltab, const char *inp, int *inr, char const *fmt0
 						case '-':
 							if ((flags & SIGNOK) != 0) {
 								flags &= ~SIGNOK;
+								nsign = 1;
 								ok = 1;
 							}
 							break;
 
 						case 'x':
 						case 'X':
-							if (((flags & PFXOK) != 0) && (nconsumed == 1)) {
+							/* The prefix is legal right after the leading 0, which
+							 * follows an optional sign: "0x10" and "-0x10" alike
+							 * (C11 7.21.6.2p12, %i as strtol with base 0). */
+							if (((flags & PFXOK) != 0) && (nconsumed == 1 + nsign)) {
 								base = 16; /* if %i */
 								flags &= ~PFXOK;
 								ok = 1;
@@ -661,12 +666,11 @@ static int scanf_parse(char *ccltab, const char *inp, int *inr, char const *fmt0
 
 				c = lastc;
 				if ((c == 'x') || (c == 'X')) {
-					if ((flags & SUPPRESS) == 0) {
-						--p;
-					}
-					nconsumed--;
-					inp--;
-					(*inr)++;
+					/* "0x" (or "-0x") with no hex digit after it is a prefix of a
+					 * matching sequence but not one itself, so it is a matching
+					 * failure (C11 7.21.6.2p9-10), as in glibc -- not a
+					 * conversion of the "0" with the "x" pushed back. */
+					return nassigned;
 				}
 
 				if ((flags & SUPPRESS) == 0) {

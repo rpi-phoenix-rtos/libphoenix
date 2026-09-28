@@ -526,13 +526,19 @@ int clock_getres(clockid_t clk_id, struct timespec *res)
 
 char *asctime_r(const struct tm *tp, char *buf)
 {
-	int wday, mon;
+	int wday, mon, len;
 
 	wday = tp->tm_wday < 0 || tp->tm_wday > 6 ? 7 : tp->tm_wday;
 	mon = tp->tm_mon < 0 || tp->tm_mon > 11 ? 12 : tp->tm_mon;
 
-	sprintf(buf, "%.3s %.3s%3d %.2d:%.2d:%.2d %d\n", wdayasc[wday], monasc[mon],
+	/* POSIX sizes the buffer at 26 bytes; a result that does not fit (a year past 9999, an
+	 * out-of-range field) fails with EOVERFLOW, as in glibc, instead of overrunning it. */
+	len = snprintf(buf, 26, "%.3s %.3s%3d %.2d:%.2d:%.2d %d\n", wdayasc[wday], monasc[mon],
 			tp->tm_mday, tp->tm_hour, tp->tm_min, tp->tm_sec, tp->tm_year + 1900);
+	if ((len < 0) || (len >= 26)) {
+		errno = EOVERFLOW;
+		return NULL;
+	}
 
 	return buf;
 }

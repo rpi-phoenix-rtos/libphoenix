@@ -3,7 +3,7 @@
  *
  * libphoenix
  *
- * dl.c — in-process dynamic loader (dlopen/dlsym/dlclose/dlerror)
+ * dl.c — in-process dynamic loader (dlopen/dlsym/dlclose/dlerror/dladdr)
  *
  * Loads a -fPIC ET_DYN aarch64 shared object entirely from userspace using the
  * primitives Phoenix already provides (open/read/mmap/mprotect):
@@ -84,6 +84,9 @@ typedef struct {
 #define PF_W         0x2
 #define SHT_SYMTAB   2
 #define SHN_UNDEF    0
+#define STT_OBJECT   1
+#define STT_FUNC     2
+#define ELF64_ST_TYPE(i) ((i) & 0xfU)
 
 #define DT_NULL         0
 #define DT_HASH         4
@@ -116,6 +119,7 @@ typedef struct dl_obj {
 	Elf64_Sym *symtab;   /* mapped .dynsym */
 	const char *strtab;  /* mapped .dynstr */
 	uint32_t symcount;   /* DT_HASH nchain */
+	char *path;          /* the name dlopen() was given, for dladdr() */
 	struct dl_obj *next; /* loaded-object list */
 } dl_obj_t;
 
@@ -326,6 +330,11 @@ void *dlopen(const char *filename, int flags)
 		goto fail;
 	}
 	o->fd = fd;
+	o->path = strdup(filename);
+	if (o->path == NULL) {
+		dl_seterr("dlopen: out of memory", NULL);
+		goto fail;
+	}
 	o->map_span = PAGE_UP(vmax) - PAGE_DOWN(vmin);
 	o->map_base = (uintptr_t)mmap(NULL, o->map_span, PROT_READ, MAP_ANONYMOUS, -1, 0);
 	if (o->map_base == (uintptr_t)MAP_FAILED) {
@@ -457,6 +466,7 @@ fail:
 		if (o->map_base != 0 && o->map_base != (uintptr_t)MAP_FAILED) {
 			(void)munmap((void *)o->map_base, o->map_span);
 		}
+		free(o->path);
 		free(o);
 	}
 	close(fd);
@@ -510,8 +520,107 @@ int dlclose(void *handle)
 		(void)munmap((void *)o->map_base, o->map_span);
 	}
 	close(o->fd);
+	free(o->path);
 	free(o);
 	return 0;
+}
+
+
+/* the symbol whose [value, value + size) holds addr (a sized function or object); base is
+   added to every value (the load bias of an object, 0 for the host) */
+static const Elf64_Sym *dl_symAt(const Elf64_Sym *sym, uint32_t nsym, uintptr_t base, uintptr_t addr)
+{
+	uint32_t i;
+	unsigned int type;
+	uintptr_t v;
+
+	for (i = 0; i < nsym; i++) {
+		type = ELF64_ST_TYPE(sym[i].st_info);
+		if ((sym[i].st_shndx == SHN_UNDEF) || (sym[i].st_value == 0) || ((type != STT_FUNC) && (type != STT_OBJECT))) {
+			continue;
+		}
+		v = base + (uintptr_t)sym[i].st_value;
+		if ((addr >= v) && ((addr - v) < ((sym[i].st_size != 0) ? sym[i].st_size : 1))) {
+			return &sym[i];
+		}
+	}
+	return NULL;
+}
+
+
+/* the host executable's loaded range, from its PT_LOAD headers (no ASLR: file vaddrs) */
+static int dl_hostRange(uintptr_t *lo, uintptr_t *hi)
+{
+	const Elf64_Ehdr *eh = (const Elf64_Ehdr *)dl_host.base;
+	const Elf64_Phdr *ph;
+	uint64_t vmin = ~0ULL, vmax = 0;
+	int i;
+
+	if ((eh == NULL) || (eh->e_phoff == 0) || (eh->e_phoff + (uint64_t)eh->e_phnum * sizeof(Elf64_Phdr) > dl_host.size)) {
+		return -1;
+	}
+	ph = (const Elf64_Phdr *)(dl_host.base + eh->e_phoff);
+	for (i = 0; i < eh->e_phnum; i++) {
+		if (ph[i].p_type == PT_LOAD) {
+			if (ph[i].p_vaddr < vmin) {
+				vmin = ph[i].p_vaddr;
+			}
+			if (ph[i].p_vaddr + ph[i].p_memsz > vmax) {
+				vmax = ph[i].p_vaddr + ph[i].p_memsz;
+			}
+		}
+	}
+	if (vmin >= vmax) {
+		return -1;
+	}
+	*lo = (uintptr_t)vmin;
+	*hi = (uintptr_t)vmax;
+	return 0;
+}
+
+
+int dladdr(const void *addr, Dl_info *info)
+{
+	uintptr_t a = (uintptr_t)addr, lo, hi;
+	const dl_obj_t *o;
+	const Elf64_Sym *s;
+
+	if (info == NULL) {
+		return 0;
+	}
+	memset(info, 0, sizeof(*info));
+
+	/* a loaded object: its name and base, and the .dynsym symbol that holds addr */
+	for (o = dl_loaded; o != NULL; o = o->next) {
+		if ((a >= o->map_base) && ((a - o->map_base) < o->map_span)) {
+			info->dli_fname = o->path;
+			info->dli_fbase = (void *)o->map_base;
+			s = dl_symAt(o->symtab, o->symcount, o->bias, a);
+			if (s != NULL) {
+				info->dli_sname = o->strtab + s->st_name;
+				info->dli_saddr = (void *)(o->bias + (uintptr_t)s->st_value);
+			}
+			return 1;
+		}
+	}
+
+	/* the host executable: its .symtab (needs an unstripped program, as dlsym) */
+	if (!dl_host.tried) {
+		dl_hostInit();
+	}
+	if ((dl_host.base == NULL) || (dl_hostRange(&lo, &hi) < 0) || (a < lo) || (a >= hi)) {
+		return 0;
+	}
+	info->dli_fname = argv_progname;
+	info->dli_fbase = (void *)lo;
+	if (dl_host.sym != NULL) {
+		s = dl_symAt(dl_host.sym, dl_host.nsym, 0, a);
+		if (s != NULL) {
+			info->dli_sname = dl_host.str + s->st_name;
+			info->dli_saddr = (void *)(uintptr_t)s->st_value;
+		}
+	}
+	return 1;
 }
 
 char *dlerror(void)

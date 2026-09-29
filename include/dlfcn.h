@@ -36,6 +36,18 @@ extern void *dlsym(void *handle, const char *symbol);
 extern int dlclose(void *handle);
 extern char *dlerror(void);
 
+/* dladdr(): the object and the symbol an address belongs to (a GNU/BSD extension; returns 0
+   when addr lies in no loaded object and not in the program). dli_sname/dli_saddr are NULL
+   when no sized symbol holds addr, and for a stripped program. */
+typedef struct {
+	const char *dli_fname; /* path of the object (argv[0] for the program) */
+	void *dli_fbase;       /* its load address */
+	const char *dli_sname; /* the symbol that holds addr, or NULL */
+	void *dli_saddr;       /* that symbol's address, or NULL */
+} Dl_info;
+
+extern int dladdr(const void *addr, Dl_info *info);
+
 #ifdef __cplusplus
 }
 #endif

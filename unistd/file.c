@@ -30,6 +30,7 @@
 
 #include "posix/utils.h"
 #include "ioctl-helper.h"
+#include "file-internal.h"
 
 
 extern ssize_t sys_read(int fildes, void *buf, size_t nbyte, off_t offset);
@@ -472,7 +473,7 @@ int access(const char *path, int amode)
 	}
 
 	// NOTE: for now checking only if file exists
-	if (lookup(canonical_name, &oid, &dev) < 0) {
+	if (__safe_lookup(canonical_name, &oid, &dev) < 0) {
 		free(canonical_name);
 		errno = ENOENT;
 		return -1;

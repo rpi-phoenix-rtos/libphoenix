@@ -6,22 +6,43 @@
  * malloc.h - non-standard allocator interfaces
  *
  * Copyright 2026 Phoenix Systems
+ * Author: Michal Lach
  *
- * This file is part of Phoenix-RTOS.
- *
- * %LICENSE%
+ * SPDX-License-Identifier: BSD-3-Clause
  */
 
 #ifndef _LIBPHOENIX_MALLOC_H_
 #define _LIBPHOENIX_MALLOC_H_
 
 
+#include <stddef.h>
 #include <stdlib.h> /* malloc(), free(), malloc_usable_size() */
 
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+
+typedef struct _mallocInfo_t {
+	/*
+	 * Amount of memory mapped from the system for user-data and dynamic
+	 * allocation structures
+	 */
+	size_t mapsz;
+
+	/*
+	 * Memory free to be used by the user, does not include allocator
+	 * structures overhead
+	 */
+	size_t freesz;
+
+	/* Maximum allocation size throughout allocators lifetime */
+	size_t maxalloc;
+} mallocInfo_t;
+
+
+void mallocInfo(mallocInfo_t *info);
 
 
 /* Obsolete: allocate `size` bytes aligned to `alignment` (a power of two).
@@ -34,4 +55,4 @@ extern void *memalign(size_t alignment, size_t size);
 #endif
 
 
-#endif
+#endif /* _LIBPHOENIX_MALLOC_H_ */

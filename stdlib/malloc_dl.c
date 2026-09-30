@@ -5,12 +5,10 @@
  *
  * stdlib/malloc (Doug Lea)
  *
- * Copyright 2017, 2020 Phoenix Systems
- * Author: Jakub Sejdak, Jan Sikorski, Aleksander Kaminski
+ * Copyright 2017, 2020, 2026 Phoenix Systems
+ * Author: Jakub Sejdak, Jan Sikorski, Aleksander Kaminski, Michal Lach
  *
- * This file is part of Phoenix-RTOS.
- *
- * %LICENSE%
+ * SPDX-License-Identifier: BSD-3-Clause
  */
 
 #include <errno.h>
@@ -25,22 +23,24 @@
 #include <arch.h>
 #include <stddef.h>
 #include <stdlib.h>
+#include <stdbool.h>
 #include <limits.h>
 #include <string.h>
 #include <sysexits.h>
 #include <unistd.h>
+#include <malloc.h>
 
 #include "malloc-internal.h"
 
-#define CEIL(value, size)          ((((value) + (size) - 1) / (size)) * (size))
-#define FLOOR(value, size)         (((value) / (size)) * (size))
+#define CEIL(value, size)  ((((value) + (size) - 1U) / (size)) * (size))
+#define FLOOR(value, size) (((value) / (size)) * (size))
 
-#define CHUNK_PUSED                1
-#define CHUNK_CUSED                2
+#define CHUNK_PUSED (1U)
+#define CHUNK_CUSED (2U)
 
-#define CHUNK_OVERHEAD             CEIL(__builtin_offsetof(chunk_t, next), 8)
-#define CHUNK_MIN_SIZE             CEIL(__builtin_offsetof(chunk_t, node) + sizeof(size_t), 8)
-#define CHUNK_SMALLBIN_MAX_SIZE    (256 - CHUNK_OVERHEAD)
+#define CHUNK_OVERHEAD          CEIL(__builtin_offsetof(chunk_t, next), 8U)
+#define CHUNK_MIN_SIZE          CEIL(__builtin_offsetof(chunk_t, node) + sizeof(size_t), 8U)
+#define CHUNK_SMALLBIN_MAX_SIZE (256U - CHUNK_OVERHEAD)
 
 
 typedef struct {
@@ -51,7 +51,7 @@ typedef struct {
 
 
 typedef struct _chunk_t {
-/*	size_t prevSize; This is a foot field of the previous chunk! */
+	/*	size_t prevSize; This is a foot field of the previous chunk! */
 	size_t size;
 	heap_t *heap;
 
@@ -68,8 +68,9 @@ struct {
 	chunk_t *sbins[32];
 	rbtree_t lbins[32];
 
-	size_t allocsz;
+	size_t mapsz;
 	size_t freesz;
+	size_t maxalloc;
 
 	/* The last few heaps handed back to the kernel, newest at `relIdx - 1`.
 	 *
@@ -172,8 +173,9 @@ static int malloc_cmp(rbnode_t *n1, rbnode_t *n2)
 	size_t e1sz = malloc_chunkSize(e1);
 	size_t e2sz = malloc_chunkSize(e2);
 
-	if (e1sz == e2sz)
+	if (e1sz == e2sz) {
 		return 0;
+	}
 
 	return (e1sz > e2sz) ? 1 : -1;
 }
@@ -188,12 +190,14 @@ static int malloc_find(rbnode_t *n1, rbnode_t *n2)
 	size_t e1sz = malloc_chunkSize(e1);
 	size_t e2sz = malloc_chunkSize(e2);
 
-	if (e1sz == e2sz)
+	if (e1sz == e2sz) {
 		return 0;
+	}
 
 	if (e1sz > e2sz) {
-		if (e1_left != NULL && malloc_chunkSize(e1_left) >= e2sz)
+		if (e1_left != NULL && malloc_chunkSize(e1_left) >= e2sz) {
 			return 1;
+		}
 
 		return 0;
 	}
@@ -204,28 +208,30 @@ static int malloc_find(rbnode_t *n1, rbnode_t *n2)
 
 static inline unsigned int malloc_getsidx(size_t size)
 {
-	return (size + 7) >> 3;
+	return (size + 7U) >> 3U;
 }
 
 
 static inline unsigned int malloc_getlidx(size_t size)
 {
-	unsigned int x = (size >> 8), k;
+	unsigned int x = (size >> 8U), k;
 
-	if (x == 0)
-		return 0;
+	if (x == 0U) {
+		return 0U;
+	}
 
-	if (x > 0xffff)
-		return 31;
+	if (x > 0xffffU) {
+		return 31U;
+	}
 
-	k = sizeof(x) * __CHAR_BIT__ - 1 - __builtin_clz(x);
-	return (k << 1) + (size >> (k + (8 - 1)) & 1);
+	k = sizeof(x) * __CHAR_BIT__ - 1U - __builtin_clz(x);
+	return (k << 1U) + (size >> (k + (8U - 1U)) & 1U);
 }
 
 
-static inline int malloc_chunkIsFirst(chunk_t *chunk)
+static inline bool malloc_chunkIsFirst(chunk_t *chunk)
 {
-	return (chunk->heap->space == (uint8_t*) chunk);
+	return (chunk->heap->space == (uint8_t *)chunk);
 }
 
 
@@ -314,7 +320,7 @@ static int malloc_heapMapped(uintptr_t base)
 }
 
 
-static long int malloc_chunkIsLast(chunk_t *chunk)
+static bool malloc_chunkIsLast(chunk_t *chunk)
 {
 	/* Answering "yes, last" is the conservative reply: it stops the coalesce walk
 	 * instead of stepping to an address derived from a size we do not believe. */
@@ -364,26 +370,28 @@ static inline chunk_t *malloc_chunkPrev(chunk_t *chunk)
 	 * footer into a plausible-looking small offset, which is exactly the case the
 	 * validation below exists to catch. */
 	size_t prevSize = ((chunk->size & CHUNK_PUSED) != 0) ? 0u : *((size_t *)chunk - 1);
-	if (prevSize == 0)
+	if (prevSize == 0U) {
 		return NULL;
+	}
 
-	return (chunk_t *) ((uintptr_t) chunk - prevSize);
+	return (chunk_t *)((uintptr_t)chunk - prevSize);
 }
 
 
 static inline chunk_t *malloc_chunkNext(chunk_t *chunk)
 {
-	if (malloc_chunkIsLast(chunk))
+	if (malloc_chunkIsLast(chunk)) {
 		return NULL;
+	}
 
-	return (chunk_t *) ((uintptr_t) chunk + malloc_chunkSize(chunk));
+	return (chunk_t *)((uintptr_t)chunk + malloc_chunkSize(chunk));
 }
 
 
 static inline void malloc_chunkSetFooter(chunk_t *chunk)
 {
 	size_t size = malloc_chunkSize(chunk);
-	*((size_t *)((uintptr_t) chunk + size) - 1) = size;
+	*((size_t *)((uintptr_t)chunk + size) - 1U) = size;
 }
 
 
@@ -1366,6 +1374,7 @@ static void _malloc_chunkAdd(chunk_t *chunk)
 	size_t chunksz = malloc_chunkSize(chunk);
 	chunk_t *exist;
 
+	malloc_common.freesz += chunksz - CHUNK_OVERHEAD;
 	if (chunksz <= CHUNK_SMALLBIN_MAX_SIZE) {
 		idx = malloc_getsidx(chunksz);
 		LIST_ADD(&malloc_common.sbins[idx], chunk);
@@ -1401,7 +1410,7 @@ static void _malloc_chunkAdd(chunk_t *chunk)
 				pw += sizeof(size_t);
 			}
 		}
-		malloc_common.sbinmap |= (1 << idx);
+		malloc_common.sbinmap |= (1U << idx);
 		return;
 	}
 
@@ -1409,12 +1418,13 @@ static void _malloc_chunkAdd(chunk_t *chunk)
 
 	idx = malloc_getlidx(chunksz);
 	exist = lib_treeof(chunk_t, node, lib_rbInsert(&malloc_common.lbins[idx], &chunk->node));
-	if (exist != NULL)
+	if (exist != NULL) {
 		/* Mark chunk as not actually being in the tree */
 		chunk->node.parent = &chunk->node;
+	}
 	LIST_ADD(&exist, chunk);
 
-	malloc_common.lbinmap |= (1 << idx);
+	malloc_common.lbinmap |= (1U << idx);
 }
 
 
@@ -1704,6 +1714,8 @@ static int _malloc_chunkRemove(chunk_t *chunk)
 		return 0;
 	}
 
+	malloc_common.freesz -= chunksz - CHUNK_OVERHEAD;
+
 	if (chunksz <= CHUNK_SMALLBIN_MAX_SIZE) {
 		/* Did anything write into this block while it was free? See the poison in
 		 * _malloc_chunkAdd(). A mismatch PROVES a write into freed memory, which is
@@ -1746,8 +1758,9 @@ static int _malloc_chunkRemove(chunk_t *chunk)
 		}
 		idx = malloc_getsidx(chunksz);
 		LIST_REMOVE(&malloc_common.sbins[idx], chunk);
-		if (malloc_common.sbins[idx] == NULL)
-			malloc_common.sbinmap &= ~(1 << idx);
+		if (malloc_common.sbins[idx] == NULL) {
+			malloc_common.sbinmap &= ~(1U << idx);
+		}
 
 		return 1;
 	}
@@ -1760,8 +1773,9 @@ static int _malloc_chunkRemove(chunk_t *chunk)
 	if (next == NULL) {
 		lib_rbRemove(&malloc_common.lbins[idx], &chunk->node);
 
-		if (malloc_common.lbins[idx].root == NULL)
-			malloc_common.lbinmap &= ~(1 << idx);
+		if (malloc_common.lbins[idx].root == NULL) {
+			malloc_common.lbinmap &= ~(1U << idx);
+		}
 	}
 	else if (chunk->node.parent != &chunk->node) {
 		/* Hand the tree node over to the new list head -- but ONLY if the tree
@@ -1826,7 +1840,7 @@ static int _malloc_chunkRemove(chunk_t *chunk)
 }
 
 
-static inline int malloc_chunkCanSplit(chunk_t *chunk, size_t size)
+static inline bool malloc_chunkCanSplit(chunk_t *chunk, size_t size)
 {
 	return (size >= CHUNK_OVERHEAD) && (malloc_chunkSize(chunk) >= size + CHUNK_MIN_SIZE);
 }
@@ -1838,7 +1852,7 @@ static void _malloc_chunkSplit(chunk_t *chunk, size_t size)
 
 	_malloc_chunkRemove(chunk);
 
-	sibling = (chunk_t *) ((uintptr_t) chunk + size);
+	sibling = (chunk_t *)((uintptr_t)chunk + size);
 	malloc_chunkInit(sibling, chunk->heap, malloc_chunkSize(chunk) - size);
 
 	chunk->size = size | CHUNK_PUSED;
@@ -1920,7 +1934,7 @@ static void _malloc_chunkJoin(chunk_t *chunk)
 	const heap_t *heap = chunk->heap;
 
 	/* Join with the previous chunks. */
-	while (!malloc_chunkIsFirst(it) && (it->size & CHUNK_PUSED) == 0) {
+	while (!malloc_chunkIsFirst(it) && (it->size & CHUNK_PUSED) == 0U) {
 		sibling = malloc_chunkPrev(it);
 		if ((sibling == NULL) || (malloc_chunkValid(sibling, heap) == 0)) {
 			malloc_reportBadNeighbour("prev", it, sibling, heap);
@@ -2057,7 +2071,7 @@ static void malloc_c1Scan(void)
 static heap_t *_malloc_heapAlloc(size_t size)
 {
 	chunk_t *chunk;
-	size_t heapSize = CEIL(sizeof(heap_t) + size, _PAGE_SIZE);
+	size_t chunkSize, heapSize = CEIL(sizeof(heap_t) + size, _PAGE_SIZE);
 	heap_t *heap;
 
 	if (heapSize < size) {
@@ -2214,7 +2228,7 @@ static heap_t *_malloc_heapAlloc(size_t size)
 		malloc_common.heapHi = (uintptr_t)heap + heapSize;
 	}
 
-	chunk = (chunk_t*) heap->space;
+	chunk = (chunk_t *)heap->space;
 
 	/* TODO(C1-hunt): temporary, bounded to 16 reports.
 	 *
@@ -2405,7 +2419,10 @@ static heap_t *_malloc_heapAlloc(size_t size)
 	}
 
 	malloc_heapInit(heap, heapSize);
-	malloc_chunkInit(chunk, heap, FLOOR(heap->size - sizeof(heap_t), 8));
+
+	chunkSize = FLOOR(heap->size - sizeof(heap_t), 8U);
+	malloc_chunkInit(chunk, heap, chunkSize);
+	malloc_common.mapsz += heapSize;
 	chunk->size |= CHUNK_PUSED;
 	_malloc_chunkAdd(chunk);
 	return heap;
@@ -2415,6 +2432,7 @@ static heap_t *_malloc_heapAlloc(size_t size)
 static inline void *_malloc_allocFrom(chunk_t *chunk, size_t size)
 {
 	chunk_t *chunkNext;
+	size_t usable;
 
 	/* ⚠ THIS CHECK MUST STAY AHEAD OF THE SPLIT. It tests CHUNK_CUSED, and
 	 * _malloc_chunkSplit() ERASES that bit -- `chunk->size = size | CHUNK_PUSED`
@@ -2453,19 +2471,27 @@ static inline void *_malloc_allocFrom(chunk_t *chunk, size_t size)
 		_exit(EX_SOFTWARE);
 	}
 
-	if (malloc_chunkCanSplit(chunk, size))
+	if (malloc_chunkCanSplit(chunk, size)) {
 		_malloc_chunkSplit(chunk, size);
-	else
+	}
+	else {
 		_malloc_chunkRemove(chunk);
+	}
 
 	chunk->heap->freesz -= malloc_chunkSize(chunk);
-
 	chunk->size |= CHUNK_CUSED;
 
-	if ((chunkNext = malloc_chunkNext(chunk)) != NULL)
+	chunkNext = malloc_chunkNext(chunk);
+	if (chunkNext != NULL) {
 		chunkNext->size |= CHUNK_PUSED;
+	}
 
-	return (void *) ((uintptr_t) chunk + CHUNK_OVERHEAD);
+	usable = malloc_chunkSize(chunk) - CHUNK_OVERHEAD;
+	if (malloc_common.maxalloc < usable) {
+		malloc_common.maxalloc = usable;
+	}
+
+	return (void *)((uintptr_t)chunk + CHUNK_OVERHEAD);
 }
 
 
@@ -2515,26 +2541,29 @@ static void malloc_auditLargeBin(rbnode_t *node, unsigned int depth, unsigned in
 static void *_malloc_allocLarge(size_t size)
 {
 	/* Lookup table to speed-up operation reverse to malloc_getlidx(). */
+	/* clang-format off */
 	static const size_t lookup[32] = {
-		   0x17f,    0x1ff,    0x2ff,    0x3ff,    0x5ff,    0x7ff,    0xbff,      0xfff,
-		  0x17ff,   0x1fff,   0x2fff,   0x3fff,   0x5fff,   0x7fff,   0xbfff,     0xffff,
-		 0x17fff,  0x1ffff,  0x2ffff,  0x3ffff,  0x5ffff,  0x7ffff,  0xbffff,    0xfffff,
-		0x17ffff, 0x1fffff, 0x2fffff, 0x3fffff, 0x5fffff, 0x7fffff, 0xbfffff,        0x0
+		   0x17f,    0x1ff,    0x2ff,    0x3ff,    0x5ff,    0x7ff,    0xbff,    0xfff,
+		  0x17ff,   0x1fff,   0x2fff,   0x3fff,   0x5fff,   0x7fff,   0xbfff,   0xffff,
+		 0x17fff,  0x1ffff,  0x2ffff,  0x3ffff,  0x5ffff,  0x7ffff,  0xbffff,  0xfffff,
+		0x17ffff, 0x1fffff, 0x2fffff, 0x3fffff, 0x5fffff, 0x7fffff, 0xbfffff,      0x0
 	};
+	/* clang-format on */
 
 	unsigned int idx = malloc_getlidx(size);
-	unsigned int binmap = malloc_common.lbinmap & ~((1 << idx) - 1);
+	unsigned int binmap = malloc_common.lbinmap & ~((1U << idx) - 1U);
 	heap_t *heap;
 	chunk_t *chunk = NULL;
 	chunk_t t;
 	t.size = size;
 
-	while (idx < 32 && binmap) {
+	while (idx < 32U && binmap != 0U) {
 		chunk = lib_treeof(chunk_t, node, lib_rbFindEx(malloc_common.lbins[idx].root, &t.node, malloc_find));
-		if (chunk != NULL)
+		if (chunk != NULL) {
 			break;
+		}
 
-		binmap = binmap & ~(1 << idx++);
+		binmap = binmap & ~(1U << idx++);
 	}
 
 	/* The tree's answer is a POINTER DERIVED BY SUBTRACTION -- lib_treeof() takes
@@ -2599,10 +2628,11 @@ static void *_malloc_allocLarge(size_t size)
 
 	if (chunk == NULL) {
 		idx = malloc_getlidx(size);
-		if ((heap = _malloc_heapAlloc(max(lookup[idx], size))) == NULL)
+		if ((heap = _malloc_heapAlloc(max(lookup[idx], size))) == NULL) {
 			return NULL;
+		}
 
-		chunk = (chunk_t *) heap->space;
+		chunk = (chunk_t *)heap->space;
 	}
 
 	return _malloc_allocFrom(chunk, size);
@@ -2612,18 +2642,23 @@ static void *_malloc_allocLarge(size_t size)
 static void *_malloc_allocSmall(size_t size)
 {
 	unsigned int idx = malloc_getsidx(size);
-	unsigned int binmap = malloc_common.sbinmap & ~((1 << idx) - 1);
-	size_t targetSize = idx << 3;
+	unsigned int binmap = malloc_common.sbinmap & ~((1U << idx) - 1U);
+	size_t targetSize = idx << 3U;
 	size_t idxSize;
 	chunk_t *chunk;
 	heap_t *heap;
 
-	if (binmap)
+	if (binmap != 0U) {
 		idx = __builtin_ctz(binmap);
-	else if (malloc_common.lbinmap)
+	}
+	else if (malloc_common.lbinmap != 0U) {
 		return _malloc_allocLarge(size);
+	}
+	else {
+		/* No action necessary */
+	}
 
-	idxSize = idx << 3;
+	idxSize = idx << 3U;
 	chunk = malloc_common.sbins[idx];
 
 	/* Validate the small-bin head for the same reason _malloc_allocLarge()
@@ -2650,10 +2685,11 @@ static void *_malloc_allocSmall(size_t size)
 	}
 
 	if (chunk == NULL) {
-		if ((heap = _malloc_heapAlloc(idxSize)) == NULL)
+		if ((heap = _malloc_heapAlloc(idxSize)) == NULL) {
 			return NULL;
+		}
 
-		chunk = (chunk_t *) heap->space;
+		chunk = (chunk_t *)heap->space;
 
 		if (malloc_chunkCanSplit(chunk, idxSize)) {
 			_malloc_chunkSplit(chunk, idxSize);
@@ -2669,7 +2705,7 @@ static void *_malloc_allocSmall(size_t size)
 size_t malloc_usable_size(void *ptr)
 {
 	chunk_t *chunk;
-	size_t size = 0;
+	size_t size = 0U;
 
 	if (ptr != NULL) {
 		mutexLock(malloc_common.mutex);
@@ -2691,7 +2727,7 @@ void *malloc(size_t size)
 	 * (e.g. jq's jv_mem_calloc) does `p = malloc(0); if (!p) out_of_memory();`
 	 * and mis-reports OOM if we hand back NULL. Allocate a minimum chunk so
 	 * size 0 yields a distinct, freeable, non-NULL pointer. */
-	if (size == 0) {
+	if (size == 0U) {
 		size = 1;
 	}
 
@@ -2700,7 +2736,7 @@ void *malloc(size_t size)
 		return NULL;
 	}
 
-	size = CEIL(max(size + CHUNK_OVERHEAD, CHUNK_MIN_SIZE), 8);
+	size = CEIL(max(size + CHUNK_OVERHEAD, CHUNK_MIN_SIZE), 8U);
 
 	/* TODO(C1-hunt): see malloc_common.lastCaller. */
 	malloc_common.lastCaller = (uintptr_t)__builtin_return_address(0);
@@ -2725,7 +2761,7 @@ void *malloc(size_t size)
 
 void *calloc(size_t nitems, size_t size)
 {
-	if ((nitems != 0) && (size > SIZE_MAX / nitems)) {
+	if ((nitems != 0U) && (size > SIZE_MAX / nitems)) {
 		errno = ENOMEM;
 		return NULL;
 	}
@@ -2737,7 +2773,7 @@ void *calloc(size_t nitems, size_t size)
 		return NULL;
 	}
 
-	memset(ptr, 0, allocSize);
+	memset(ptr, 0U, allocSize);
 	return ptr;
 }
 
@@ -2764,12 +2800,13 @@ void free(void *ptr)
 	 * say) this names that caller's caller; treat it as a strong hint, not gospel. */
 	const void *caller = __builtin_return_address(0);
 
-	if (ptr == NULL)
+	if (ptr == NULL) {
 		return;
+	}
 
 	mutexLock(malloc_common.mutex);
 
-	chunk = (chunk_t *) ((uintptr_t) ptr - CHUNK_OVERHEAD);
+	chunk = (chunk_t *)((uintptr_t)ptr - CHUNK_OVERHEAD);
 	heap = chunk->heap;
 
 	/* Refuse a free whose header cannot be trusted. Leaking the block is
@@ -2925,8 +2962,10 @@ void free(void *ptr)
 	chunk->size &= ~CHUNK_CUSED;
 	malloc_chunkSetFooter(chunk);
 
-	if ((chunkNext = malloc_chunkNext(chunk)) != NULL)
+	chunkNext = malloc_chunkNext(chunk);
+	if (chunkNext != NULL) {
 		chunkNext->size &= ~CHUNK_PUSED;
+	}
 
 	heap->freesz += malloc_chunkSize(chunk);
 	_malloc_chunkAdd(chunk);
@@ -3029,6 +3068,7 @@ void free(void *ptr)
 				}
 			}
 
+			malloc_common.mapsz -= heap->size;
 			if (munmap(heap, heap->size) < 0) {
 				debug("malloc: munmap of a released heap FAILED -- released[] now lies\n");
 				malloc_debugHex("malloc:   heap  = ", (uintptr_t)heap);
@@ -3045,15 +3085,16 @@ void *realloc(void *ptr, size_t size)
 {
 	chunk_t *chunk, *sibling, *next;
 	heap_t *heap;
-	size_t chunksz;
+	size_t chunksz, usable;
 	int rwhy;
 
 	void *p;
 
-	if (ptr == NULL)
+	if (ptr == NULL) {
 		return malloc(size);
+	}
 
-	if (size == 0) {
+	if (size == 0U) {
 		free(ptr);
 		return NULL;
 	}
@@ -3063,11 +3104,11 @@ void *realloc(void *ptr, size_t size)
 		return NULL;
 	}
 
-	size = CEIL(max(size + CHUNK_OVERHEAD, CHUNK_MIN_SIZE), 8);
+	size = CEIL(max(size + CHUNK_OVERHEAD, CHUNK_MIN_SIZE), 8U);
 
 	mutexLock(malloc_common.mutex);
 
-	chunk = (chunk_t *) ((uintptr_t) ptr - CHUNK_OVERHEAD);
+	chunk = (chunk_t *)((uintptr_t)ptr - CHUNK_OVERHEAD);
 	heap = chunk->heap;
 
 	/* free() validates its chunk header before touching the heap (see the banner
@@ -3088,7 +3129,7 @@ void *realloc(void *ptr, size_t size)
 
 
 	if (size < chunksz && malloc_chunkCanSplit(chunk, size)) {
-		sibling = (chunk_t *) ((uintptr_t) chunk + size);
+		sibling = (chunk_t *)((uintptr_t)chunk + size);
 		malloc_chunkInit(sibling, heap, chunksz - size);
 		sibling->size |= CHUNK_PUSED;
 		_malloc_chunkAdd(sibling);
@@ -3098,14 +3139,20 @@ void *realloc(void *ptr, size_t size)
 
 		_malloc_chunkJoin(sibling);
 
-		if ((next = malloc_chunkNext(sibling)) != NULL)
+		next = malloc_chunkNext(sibling);
+		if (next != NULL) {
 			next->size &= ~CHUNK_PUSED;
+		}
 	}
 	else if (size > chunksz) {
-		if ((next = malloc_chunkNext(chunk)) != NULL && !(next->size & CHUNK_CUSED) &&
-				(malloc_chunkSize(next) >= (size - chunksz))) {
+		next = malloc_chunkNext(chunk);
+		if (next != NULL && !(next->size & CHUNK_CUSED) && (malloc_chunkSize(next) >= (size - chunksz))) {
 			_malloc_allocFrom(next, size - chunksz);
 			chunk->size += malloc_chunkSize(next);
+			usable = malloc_chunkSize(chunk) - CHUNK_OVERHEAD;
+			if (malloc_common.maxalloc < usable) {
+				malloc_common.maxalloc = usable;
+			}
 		}
 		else {
 			mutexUnlock(malloc_common.mutex);
@@ -3225,10 +3272,11 @@ void _malloc_init(void)
 {
 	int i;
 
-	malloc_common.allocsz = 0;
-	malloc_common.freesz = 0;
-	malloc_common.sbinmap = 0;
-	malloc_common.lbinmap = 0;
+	malloc_common.mapsz = 0U;
+	malloc_common.freesz = 0U;
+	malloc_common.maxalloc = 0U;
+	malloc_common.sbinmap = 0U;
+	malloc_common.lbinmap = 0U;
 
 	for (i = 0; i < 32; ++i) {
 		malloc_common.sbins[i] = NULL;
@@ -3239,11 +3287,13 @@ void _malloc_init(void)
 }
 
 
-#define ASSERT(cond, ...) do {					\
-		if (!(cond)) {					\
-			printf(__VA_ARGS__);			\
-			for (;;) ;				\
-		}						\
+#define ASSERT(cond, ...) \
+	do { \
+		if (!(cond)) { \
+			printf(__VA_ARGS__); \
+			for (;;) \
+				; \
+		} \
 	} while (0)
 
 
@@ -3268,8 +3318,9 @@ static void malloc_test_lbin(int lidx, chunk_t *chunk)
 	size_t sz;
 	chunk_t *c;
 
-	if (chunk == NULL)
+	if (chunk == NULL) {
 		return;
+	}
 
 	malloc_test_heap(chunk);
 
@@ -3278,13 +3329,28 @@ static void malloc_test_lbin(int lidx, chunk_t *chunk)
 	ASSERT(malloc_getlidx(sz) == lidx, "malloc_dl: wrong chunk size (%zu) at lbin %d", sz, lidx);
 
 	c = chunk;
-	do  {
+	do {
 		ASSERT(!(c->size & CHUNK_CUSED), "malloc_dl: free chunk marked as used\n");
 		ASSERT(malloc_chunkSize(c) == sz, "malloc_dl: wrong chunk size at lidx %d\n", lidx);
 	} while (c->next != chunk && (c = c->next));
 
 	malloc_test_lbin(lidx, lib_treeof(chunk_t, node, chunk->node.left));
 	malloc_test_lbin(lidx, lib_treeof(chunk_t, node, chunk->node.right));
+}
+
+
+void mallocInfo(mallocInfo_t *info)
+{
+	if (info == NULL) {
+		return;
+	}
+
+	memset(info, 0, sizeof(*info));
+	mutexLock(malloc_common.mutex);
+	info->mapsz = malloc_common.mapsz;
+	info->freesz = malloc_common.freesz;
+	info->maxalloc = malloc_common.maxalloc;
+	mutexUnlock(malloc_common.mutex);
 }
 
 
@@ -3295,29 +3361,31 @@ void malloc_test(void)
 	mutexLock(malloc_common.mutex);
 
 	for (i = 0; i < 32; ++i) {
-		if (malloc_common.sbinmap & (1 << i)) {
+		if (malloc_common.sbinmap & (1U << i)) {
 			ASSERT(malloc_common.sbins[i] != NULL, "malloc_dl: sbinmap bit %d set but bin is empty\n", i);
 			chunk = malloc_common.sbins[i];
 
-			do  {
+			do {
 				malloc_test_heap(chunk);
 				ASSERT(!(chunk->size & CHUNK_CUSED), "malloc_dl: free chunk marked as used\n");
 				ASSERT(malloc_chunkSize(chunk) == (i << 3), "malloc_dl: wrong chunk size at sidx %d\n", i);
 			} while (chunk->next != malloc_common.sbins[i] && (chunk = chunk->next));
 		}
-		else
+		else {
 			ASSERT(malloc_common.sbins[i] == NULL, "malloc_dl: empty lbin %d should be NULL\n", i);
+		}
 	}
 
 	for (i = 0; i < 32; ++i) {
-		if (malloc_common.lbinmap & (1 << i)) {
+		if (malloc_common.lbinmap & (1U << i)) {
 			ASSERT(malloc_common.lbins[i].root != NULL, "malloc_dl: lbinmap bit %d set but bin is empty\n", i);
 			chunk = lib_treeof(chunk_t, node, malloc_common.lbins[i].root);
 
 			malloc_test_lbin(i, chunk);
 		}
-		else
+		else {
 			ASSERT(malloc_common.lbins[i].root == NULL, "malloc_dl: empty lbin %d should be NULL\n", i);
+		}
 	}
 
 	mutexUnlock(malloc_common.mutex);

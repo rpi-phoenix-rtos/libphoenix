@@ -24,6 +24,7 @@
 #include <limits.h>
 
 #include "posix/utils.h"
+#include "../unistd/file-internal.h"
 
 
 static struct {
@@ -37,7 +38,7 @@ static int _stat_abs(const char *path, struct stat *buf)
 {
 	oid_t oid, dev;
 
-	if (lookup(path, &oid, &dev) < 0) {
+	if (__safe_lookup(path, &oid, &dev) < 0) {
 		return -ENOENT;
 	}
 
@@ -56,7 +57,7 @@ static int _stat_abs(const char *path, struct stat *buf)
 		.o.size = sizeof(attrs)
 	};
 
-	int err = msgSend(oid.port, &msg);
+	int err = __safe_msgSend(oid.port, &msg);
 	if (err < 0) {
 		return err;
 	}

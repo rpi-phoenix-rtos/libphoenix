@@ -28,6 +28,8 @@
 #include <posix/utils.h>
 #include <fcntl.h>
 
+#include "file-internal.h"
+
 
 static struct {
 	char *cwd;
@@ -35,17 +37,6 @@ static struct {
 
 static ssize_t _readlink_abs(const char *path, char *buf, size_t bufsiz);
 static int _resolve_abspath(char *path, char *result, int resolve_last_symlink, int allow_missing_leaf);
-
-
-/* stop-gap for waitpid POSIX incompatibilty (spurious SIGCHLD delivered during other syscalls) */
-static int safe_lookup(const char *name, oid_t *file, oid_t *dev)
-{
-	int err;
-	while ((err = lookup(name, file, dev)) == -EINTR)
-		;
-
-	return err;
-}
 
 
 int chdir(const char *path)
@@ -441,7 +432,7 @@ DIR *opendir(const char *dirname)
 		return NULL; /* errno set by resolve_path */
 	}
 
-	if (!dirname[0] || (safe_lookup(canonical_name, NULL, &dirp->oid) < 0)) {
+	if (!dirname[0] || (__safe_lookup(canonical_name, NULL, &dirp->oid) < 0)) {
 		free(canonical_name);
 		free(dirp);
 		errno = ENOENT;
@@ -610,7 +601,7 @@ static ssize_t _readlink_abs(const char *path, char *buf, size_t bufsiz)
 
 	assert(path && path[0] == '/');
 
-	int ret = safe_lookup(path, &oid, NULL);
+	int ret = __safe_lookup(path, &oid, NULL);
 	if (ret < 0) {
 		return SET_ERRNO(ret);
 	}
@@ -621,7 +612,7 @@ static ssize_t _readlink_abs(const char *path, char *buf, size_t bufsiz)
 		.i.attr.type = atMode
 	};
 
-	ret = msgSend(oid.port, &msg);
+	ret = __safe_msgSend(oid.port, &msg);
 	if (ret != EOK) {
 		return SET_ERRNO(ret);
 	}
@@ -640,7 +631,7 @@ static ssize_t _readlink_abs(const char *path, char *buf, size_t bufsiz)
 
 	msg.o.size = bufsiz;
 	msg.o.data = buf;
-	ret = msgSend(oid.port, &msg);
+	ret = __safe_msgSend(oid.port, &msg);
 	if (ret != EOK) {
 		return SET_ERRNO(ret);
 	}
@@ -705,7 +696,7 @@ int rmdir(const char *path)
 	}
 
 	oid_t dir, dev;
-	if (safe_lookup(canonical_name, &dir, &dev)) {
+	if (__safe_lookup(canonical_name, &dir, &dev)) {
 		free(canonical_name);
 		return SET_ERRNO(-ENOENT);
 	}
@@ -719,7 +710,7 @@ int rmdir(const char *path)
 	char *dirname, *name;
 	splitname(canonical_name, &name, &dirname);
 
-	if (safe_lookup(dirname, NULL, &dev)) {
+	if (__safe_lookup(dirname, NULL, &dev)) {
 		free(canonical_name);
 		return SET_ERRNO(-ENOENT);
 	}

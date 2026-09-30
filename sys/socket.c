@@ -31,6 +31,8 @@
 #include <ifaddrs.h>
 #include <limits.h>
 
+#include "../net/hosts-internal.h"
+
 WRAP_ERRNO_DEF(int, accept4, (int socket, struct sockaddr *address, socklen_t *address_len, int flags), (socket, address, address_len, flags))
 WRAP_ERRNO_DEF(int, bind, (int socket, const struct sockaddr *address, socklen_t address_len), (socket, address, address_len))
 WRAP_ERRNO_DEF(int, connect, (int socket, const struct sockaddr *address, socklen_t address_len), (socket, address, address_len))
@@ -358,7 +360,7 @@ struct hostent *gethostbyname(const char *name)
 	struct addrinfo *res;
 	struct hostent *ret;
 
-	if (name == NULL) {
+	if ((name == NULL) || (name[0] == '\0')) {
 		h_errno = HOST_NOT_FOUND;
 		return NULL;
 	}
@@ -485,9 +487,19 @@ int getaddrinfo(const char *node, const char *service,
 	sockport_resp_t *smo = (void *)msg.o.raw;
 	size_t nodesz, servsz, bufsz;
 	char *p;
+	int err;
 
 	if (hints && (hints->ai_addrlen || hints->ai_canonname || hints->ai_next))
 		return EAI_BADFLAGS;
+
+	if (res == NULL)
+		return EAI_FAIL;
+
+	/* /etc/hosts, localhost and the own hostname: the network stack's resolver
+	 * knows only "localhost" and would send the rest to a name server */
+	err = __netdb_localAddrInfo(node, service, hints, res);
+	if (err != NETDB_NOT_LOCAL)
+		return err;
 
 	nodesz = node ? strlen(node) + 1 : 0;
 	servsz = service ? strlen(service) + 1 : 0;

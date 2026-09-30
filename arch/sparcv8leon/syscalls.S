@@ -46,4 +46,9 @@ vfork:
 	SYSCALLDEF(name, __COUNTER__);
 
 
+/* beginthreadex() is a C function (sys/threads.c): it marks the process
+ * multithreaded before the new thread can run. Its stub takes another name;
+ * the syscall number is unchanged. */
+#define beginthreadex sys_beginthreadex
+
 SYSCALLS(SYSCALLS_LIBC)

@@ -16,6 +16,15 @@
 #include <sys/threads.h>
 #include <errno.h>
 
+#include "threads-internal.h"
+
+
+int __libc_multithreaded = 0;
+
+
+/* The raw syscall stub; arch/<arch>/syscalls.S gives it this name */
+int sys_beginthreadex(void (*start)(void *), int priority, void *stack, unsigned int stacksz, void *arg, handle_t *id);
+
 
 __EXPORT_INLINE int beginthread(void (*start)(void *), int priority, void *stack, unsigned int stacksz, void *arg);
 __EXPORT_INLINE int threadsinfo(int n, unsigned int flags, threadinfo_t *info);
@@ -23,6 +32,26 @@ __EXPORT_INLINE int threadinfo(int tid, unsigned int flags, threadinfo_t *info);
 __EXPORT_INLINE int threadcount(void);
 __EXPORT_INLINE int mutexCreateWithAttr(handle_t *h, const struct lockAttr *attr);
 __EXPORT_INLINE int condCreateWithAttr(handle_t *h, const struct condAttr *attr);
+
+
+/* Every thread of a process starts here: pthread_create(), beginthread() (an
+ * inline in <sys/threads.h>) and every server that calls beginthread*() directly.
+ *
+ * The flag is stored BEFORE the syscall, so it is 1 before the new thread can
+ * run. Ordering: the creating thread sees its own store (program order; the
+ * call below is also a compiler barrier). The new thread is made runnable by
+ * the kernel under its scheduler lock and starts after that lock's release, so
+ * everything this thread wrote before the svc -- the flag and the heap it built
+ * unlocked -- happens-before the new thread's first instruction, the same edge
+ * that makes the start argument visible to it. The release store only states
+ * that intent. It stays set if the syscall fails: a stale 1 costs speed, never
+ * correctness. */
+int beginthreadex(void (*start)(void *), int priority, void *stack, unsigned int stacksz, void *arg, handle_t *id)
+{
+	__atomic_store_n(&__libc_multithreaded, 1, __ATOMIC_RELEASE);
+
+	return sys_beginthreadex(start, priority, stack, stacksz, arg, id);
+}
 
 
 int mutexCreate(handle_t *h)

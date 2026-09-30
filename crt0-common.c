@@ -66,6 +66,7 @@ static void _fini_array(void)
 }
 
 
+extern void _stack_chk_init(char **argv, char **env);
 extern void _libc_init(void);
 extern int main(int argc, char **argv, char **env);
 
@@ -74,8 +75,13 @@ char **environ;
 const char *argv_progname;
 
 
-__attribute__((noreturn)) void _startc(void (*cleanup)(void), int argc, char **argv, char **env)
+/* Not stack-protected: its frame is live while _stack_chk_init() sets the guard.
+ * (It never returns, but a protected prologue would still read the guard.) */
+__attribute__((noreturn, no_stack_protector)) void _startc(void (*cleanup)(void), int argc, char **argv, char **env)
 {
+	/* First, before any protected function is entered (see misc/stack_chk.c) */
+	_stack_chk_init(argv, env);
+
 	environ = env;
 	argv_progname = *argv;
 

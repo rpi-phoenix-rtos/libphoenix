@@ -55,6 +55,10 @@ OBJS :=
 # crt0.o should have all necessary initialization + call to main()
 CRT0_OBJS := $(PREFIX_O)crt0-common.o
 
+# The code that runs before and while the stack-protector guard is seeded must not
+# be protected itself, whatever CFLAGS a build adds (see misc/stack_chk.c).
+$(PREFIX_O)crt0-common.o $(PREFIX_O)misc/stack_chk.o: CFLAGS += -fno-stack-protector
+
 LIB_TARGETS := $(PREFIX_A)libphoenix.a $(PREFIX_A)crt0.o
 
 all: $(LIB_TARGETS)

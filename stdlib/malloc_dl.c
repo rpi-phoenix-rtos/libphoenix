@@ -31,6 +31,7 @@
 #include <malloc.h>
 
 #include "malloc-internal.h"
+#include "../sys/threads-internal.h"
 
 #define CEIL(value, size)  ((((value) + (size) - 1U) / (size)) * (size))
 #define FLOOR(value, size) (((value) / (size)) * (size))
@@ -2702,16 +2703,40 @@ static void *_malloc_allocSmall(size_t size)
 }
 
 
+/* The heap lock is taken only once the process has a second thread (see
+ * sys/threads-internal.h). While it is single-threaded no one can contend for
+ * it, and on Phoenix a lock/unlock pair is two syscalls: ~4.5 us on the Pi 4,
+ * more than the allocation itself. Each entry point decides ONCE and passes the
+ * result to malloc_unlock(), so a lock is released only if it was taken. */
+static inline int malloc_lock(void)
+{
+	if (_libc_isMultithreaded() == 0) {
+		return 0;
+	}
+
+	mutexLock(malloc_common.mutex);
+	return 1;
+}
+
+
+static inline void malloc_unlock(int locked)
+{
+	if (locked != 0) {
+		mutexUnlock(malloc_common.mutex);
+	}
+}
+
+
 size_t malloc_usable_size(void *ptr)
 {
 	chunk_t *chunk;
 	size_t size = 0U;
 
 	if (ptr != NULL) {
-		mutexLock(malloc_common.mutex);
+		const int locked = malloc_lock();
 		chunk = (chunk_t *)((uintptr_t)ptr - CHUNK_OVERHEAD);
 		size = malloc_chunkSize(chunk) - CHUNK_OVERHEAD;
-		mutexUnlock(malloc_common.mutex);
+		malloc_unlock(locked);
 	}
 
 	return size;
@@ -2741,7 +2766,7 @@ void *malloc(size_t size)
 	/* TODO(C1-hunt): see malloc_common.lastCaller. */
 	malloc_common.lastCaller = (uintptr_t)__builtin_return_address(0);
 
-	mutexLock(malloc_common.mutex);
+	const int locked = malloc_lock();
 	malloc_c1Scan(); /* TODO(C1-hunt) */
 	if (size <= CHUNK_SMALLBIN_MAX_SIZE) {
 		ptr = _malloc_allocSmall(size);
@@ -2749,7 +2774,7 @@ void *malloc(size_t size)
 	else {
 		ptr = _malloc_allocLarge(size);
 	}
-	mutexUnlock(malloc_common.mutex);
+	malloc_unlock(locked);
 
 	if (ptr == NULL) {
 		errno = ENOMEM;
@@ -2804,7 +2829,7 @@ void free(void *ptr)
 		return;
 	}
 
-	mutexLock(malloc_common.mutex);
+	const int locked = malloc_lock();
 
 	chunk = (chunk_t *)((uintptr_t)ptr - CHUNK_OVERHEAD);
 	heap = chunk->heap;
@@ -2900,7 +2925,7 @@ void free(void *ptr)
 			 * Costs nothing on a healthy run: this branch does not execute. */
 			malloc_reportHeapSize(heap);
 		}
-		mutexUnlock(malloc_common.mutex);
+		malloc_unlock(locked);
 		return;
 	}
 
@@ -3077,7 +3102,7 @@ void free(void *ptr)
 		}
 	}
 
-	mutexUnlock(malloc_common.mutex);
+	malloc_unlock(locked);
 }
 
 
@@ -3106,7 +3131,7 @@ void *realloc(void *ptr, size_t size)
 
 	size = CEIL(max(size + CHUNK_OVERHEAD, CHUNK_MIN_SIZE), 8U);
 
-	mutexLock(malloc_common.mutex);
+	const int locked = malloc_lock();
 
 	chunk = (chunk_t *)((uintptr_t)ptr - CHUNK_OVERHEAD);
 	heap = chunk->heap;
@@ -3121,7 +3146,7 @@ void *realloc(void *ptr, size_t size)
 		malloc_debugHex("malloc:   why    = ", (uintptr_t)rwhy);
 		malloc_debugHex("malloc:   ptr    = ", (uintptr_t)ptr);
 		malloc_debugHex("malloc:   heap   = ", (uintptr_t)heap);
-		mutexUnlock(malloc_common.mutex);
+		malloc_unlock(locked);
 		return NULL;
 	}
 
@@ -3155,7 +3180,7 @@ void *realloc(void *ptr, size_t size)
 			}
 		}
 		else {
-			mutexUnlock(malloc_common.mutex);
+			malloc_unlock(locked);
 
 			p = malloc(size);
 			if (p != NULL) {
@@ -3167,7 +3192,7 @@ void *realloc(void *ptr, size_t size)
 		}
 	}
 
-	mutexUnlock(malloc_common.mutex);
+	malloc_unlock(locked);
 
 	return ptr;
 }
@@ -3234,7 +3259,7 @@ void *_malloc_aligned(size_t alignment, size_t size)
 
 	addr = (uintptr_t)p;
 	if ((addr & (alignment - 1u)) != 0u) {
-		mutexLock(malloc_common.mutex);
+		const int locked = malloc_lock();
 
 		chunk = (chunk_t *)(addr - CHUNK_OVERHEAD);
 		heap = chunk->heap;
@@ -3258,7 +3283,7 @@ void *_malloc_aligned(size_t alignment, size_t size)
 		_malloc_chunkAdd(chunk);
 		_malloc_chunkJoin(chunk);
 
-		mutexUnlock(malloc_common.mutex);
+		malloc_unlock(locked);
 
 		p = (void *)payload;
 	}
@@ -3346,11 +3371,11 @@ void mallocInfo(mallocInfo_t *info)
 	}
 
 	memset(info, 0, sizeof(*info));
-	mutexLock(malloc_common.mutex);
+	const int locked = malloc_lock();
 	info->mapsz = malloc_common.mapsz;
 	info->freesz = malloc_common.freesz;
 	info->maxalloc = malloc_common.maxalloc;
-	mutexUnlock(malloc_common.mutex);
+	malloc_unlock(locked);
 }
 
 
@@ -3358,7 +3383,7 @@ void malloc_test(void)
 {
 	int i;
 	chunk_t *chunk;
-	mutexLock(malloc_common.mutex);
+	const int locked = malloc_lock();
 
 	for (i = 0; i < 32; ++i) {
 		if (malloc_common.sbinmap & (1U << i)) {
@@ -3388,5 +3413,5 @@ void malloc_test(void)
 		}
 	}
 
-	mutexUnlock(malloc_common.mutex);
+	malloc_unlock(locked);
 }

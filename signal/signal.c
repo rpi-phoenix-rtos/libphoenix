@@ -30,8 +30,9 @@ extern void _signal_trampoline(void);
 
 /* dbg (ours): the aarch64 signal trampoline (arch/aarch64/signal.S) stashes the
  * interrupted cpu_context_t* here on every signal delivery, so a userspace
- * debug/backtrace helper can read the interrupted pc + x29 frame pointer
- * (Phoenix delivers no ucontext to handlers). NULL until the first signal.
+ * debug/backtrace helper can read the interrupted pc + x29 frame pointer from
+ * any handler (an SA_SIGINFO handler also gets them in its ucontext_t, but a
+ * plain one does not). NULL until the first signal.
  * Harmless on other arches -- their trampolines simply do not write it.
  * Read by phoenix-rtos-corelibs/libdbg (dbg.c), so both must stay exported. */
 void *_dbg_signal_ctx = NULL;

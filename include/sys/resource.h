@@ -50,9 +50,25 @@ enum { RLIM_INFINITY = -1, RUSAGE_CHILDREN = -1 };
 enum { RUSAGE_SELF };
 
 
+/* POSIX requires only the times; the rest are the usual BSD/Linux members,
+ * which mimalloc and WebKit read. getrusage() reports all of them as 0. */
 struct rusage {
 	struct timeval ru_utime;
 	struct timeval ru_stime;
+	long ru_maxrss;   /* peak resident set, KiB */
+	long ru_ixrss;
+	long ru_idrss;
+	long ru_isrss;
+	long ru_minflt;
+	long ru_majflt;
+	long ru_nswap;
+	long ru_inblock;
+	long ru_oublock;
+	long ru_msgsnd;
+	long ru_msgrcv;
+	long ru_nsignals;
+	long ru_nvcsw;
+	long ru_nivcsw;
 };
 
 

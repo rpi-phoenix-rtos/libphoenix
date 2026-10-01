@@ -17,6 +17,7 @@
 #include <stdlib.h>
 #include <errno.h>
 #include <limits.h>
+#include <stdint.h>
 #include <sys/list.h>
 #include <sys/mman.h>
 #include <sys/minmax.h>
@@ -53,6 +54,15 @@ typedef struct pthread_ctx {
 	 */
 	void *stack;
 	size_t stacksize;
+	/*
+	 * The stack as pthread_getattr_np() reports it: the thread runs on
+	 * [stackaddr, stackaddr + stackusable) and guardsize bytes of guard lie just
+	 * below stackaddr. NULL for the main thread, whose stack the kernel
+	 * allocated (see pthread_mainStack()).
+	 */
+	void *stackaddr;
+	size_t stackusable;
+	size_t guardsize;
 	struct pthread_ctx *next;
 	struct pthread_ctx *prev;
 	int is_detached;
@@ -103,6 +113,14 @@ static struct {
 	 * a fork(), consumed by the parent and child halves (see fork_prepare). */
 	pthread_ctx *forking;
 	sigset_t forkSigmask;
+
+	/* The main thread's stack: an address inside it, recorded on that thread,
+	 * and the bounds pthread_mainStack() found from it (NULL until looked up). */
+	struct {
+		void *hint;
+		void *addr;
+		size_t size;
+	} mainStack;
 
 	/*
 	 * TODO: replace with an array indexed by SCHED_FIFO, SCHED_RR, etc. once more
@@ -276,6 +294,9 @@ static int pthread_create_main(void)
 	ctx->retval = NULL;
 	ctx->stack = NULL;
 	ctx->stacksize = 0;
+	ctx->stackaddr = NULL;
+	ctx->stackusable = 0;
+	ctx->guardsize = 0;
 	ctx->is_detached = (pthread_attr_default.detachstate == PTHREAD_CREATE_DETACHED) ? 1 : 0;
 	ctx->cancelstate = PTHREAD_CANCEL_ENABLE;
 	ctx->canceltype = PTHREAD_CANCEL_DEFERRED;
@@ -286,6 +307,13 @@ static int pthread_create_main(void)
 	ctx->exiting = 0;
 
 	LIST_ADD(&pthread_common.pthread_list, ctx);
+
+	/* This runs on the thread being described (process start-up, or a fork()
+	 * child of a thread this library did not create), so any address of this
+	 * frame lies in its stack. */
+	pthread_common.mainStack.hint = __builtin_frame_address(0);
+	pthread_common.mainStack.addr = NULL;
+	pthread_common.mainStack.size = 0;
 
 	return 0;
 }
@@ -355,6 +383,9 @@ int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
 	ctx->arg = arg;
 	ctx->stack = stack;
 	ctx->stacksize = stacksize;
+	ctx->stackaddr = (stack == NULL) ? attrs->stackaddr : (char *)stack + guardsize;
+	ctx->stackusable = stacksize - guardsize;
+	ctx->guardsize = guardsize;
 	ctx->key_data_list = NULL;
 	ctx->cancelstate = PTHREAD_CANCEL_ENABLE;
 	ctx->canceltype = PTHREAD_CANCEL_DEFERRED;
@@ -366,7 +397,7 @@ int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
 
 	/* TODO: inherit schedpolicy and contentionscope too once they get relevant */
 	int prio = attrs->inheritsched == PTHREAD_EXPLICIT_SCHED ? attrs->priority : getPriority();
-	int err = beginthreadex(pthread_start_point, prio, stack == NULL ? attrs->stackaddr : stack + guardsize, stacksize - guardsize, (void *)ctx, &ctx->id);
+	int err = beginthreadex(pthread_start_point, prio, ctx->stackaddr, ctx->stackusable, (void *)ctx, &ctx->id);
 
 	if (err != 0) {
 		_pthread_ctx_put(ctx);
@@ -512,11 +543,30 @@ int pthread_join(pthread_t thread, void **value_ptr)
 }
 
 
+/* Caller holds pthread_list_lock. A detached thread frees its own ctx on exit
+ * (pthread_do_exit -> _pthread_release, under this same lock), so a handle must
+ * be found on the live list before it is dereferenced: a stale one is then
+ * rejected instead of read after free. */
+static int _pthread_isLive(const pthread_ctx *ctx)
+{
+	const pthread_ctx *p = pthread_common.pthread_list;
+
+	if ((ctx != NULL) && (p != NULL)) {
+		do {
+			if (p == ctx) {
+				return 1;
+			}
+			p = p->next;
+		} while (p != pthread_common.pthread_list);
+	}
+
+	return 0;
+}
+
+
 int pthread_detach(pthread_t thread)
 {
 	pthread_ctx *ctx = (pthread_ctx *)thread;
-	pthread_ctx *p;
-	int found = 0;
 
 	if (ctx == NULL) {
 		return ESRCH;
@@ -524,24 +574,7 @@ int pthread_detach(pthread_t thread)
 
 	mutexLock(pthread_common.pthread_list_lock);
 
-	/* Validate the handle still refers to a live thread before dereferencing
-	 * it. A detached thread frees its own ctx on exit (pthread_do_exit ->
-	 * _pthread_release, under this same lock), so re-detaching an
-	 * already-detached-and-terminated thread would dereference freed memory
-	 * (use-after-free). Walk the live list under the lock that also guards that
-	 * free and reject a stale handle with ESRCH instead of faulting. */
-	p = pthread_common.pthread_list;
-	if (p != NULL) {
-		do {
-			if (p == ctx) {
-				found = 1;
-				break;
-			}
-			p = p->next;
-		} while (p != pthread_common.pthread_list);
-	}
-
-	if (found == 0) {
+	if (_pthread_isLive(ctx) == 0) {
 		mutexUnlock(pthread_common.pthread_list_lock);
 		return ESRCH;
 	}
@@ -554,6 +587,143 @@ int pthread_detach(pthread_t thread)
 	ctx->is_detached = 1;
 
 	mutexUnlock(pthread_common.pthread_list_lock);
+
+	return 0;
+}
+
+
+/*
+ * Find the stack of the main thread: the map entry that holds an address
+ * recorded on it. The kernel maps that stack itself (proc/process.c,
+ * process_load()) at the top of the user address space, sized by the ELF
+ * PT_GNU_STACK header or a per-architecture default, and tells user space
+ * neither, so the process map is the only authority. The kernel merges
+ * adjacent entries of equal attributes, but mmap() places anonymous memory from
+ * the bottom of the address space up, so nothing ends up next to the stack
+ * unless a caller puts it there with MAP_FIXED.
+ */
+static int pthread_stackLookup(const void *hint, void **addr, size_t *size)
+{
+	meminfo_t info;
+	entryinfo_t one, *map = &one;
+	int mapsz = 1, count, i, err = ESRCH;
+
+	for (;;) {
+		info.page.mapsz = -1;
+		info.entry.kmapsz = -1;
+		info.maps.mapsz = -1;
+		info.entry.pid = getpid();
+		info.entry.mapsz = mapsz;
+		info.entry.map = map;
+		meminfo(&info);
+
+		count = info.entry.mapsz;
+		if ((count < 0) || (count <= mapsz)) {
+			break;
+		}
+
+		/* More entries than room: retry with some slack for maps made meanwhile */
+		if (map != &one) {
+			free(map);
+		}
+		mapsz = count + 16;
+		map = malloc((size_t)mapsz * sizeof(*map));
+		if (map == NULL) {
+			return ENOMEM;
+		}
+	}
+
+	for (i = 0; i < count; i++) {
+		if (((uintptr_t)hint >= (uintptr_t)map[i].vaddr) && ((uintptr_t)hint - (uintptr_t)map[i].vaddr < map[i].size)) {
+			*addr = map[i].vaddr;
+			*size = map[i].size;
+			err = 0;
+			break;
+		}
+	}
+
+	if (map != &one) {
+		free(map);
+	}
+
+	return err;
+}
+
+
+static int pthread_mainStack(void **addr, size_t *size)
+{
+	void *hint, *a = NULL;
+	size_t sz = 0;
+	int err;
+
+	mutexLock(pthread_common.pthread_list_lock);
+	hint = pthread_common.mainStack.hint;
+	a = pthread_common.mainStack.addr;
+	sz = pthread_common.mainStack.size;
+	mutexUnlock(pthread_common.pthread_list_lock);
+
+	if (a == NULL) {
+		/* Not under the lock: meminfo() walks the whole process map */
+		err = pthread_stackLookup(hint, &a, &sz);
+		if (err != 0) {
+			return err;
+		}
+
+		/* The stack never moves, so a concurrent lookup stores the same value */
+		mutexLock(pthread_common.pthread_list_lock);
+		pthread_common.mainStack.addr = a;
+		pthread_common.mainStack.size = sz;
+		mutexUnlock(pthread_common.pthread_list_lock);
+	}
+
+	*addr = a;
+	*size = sz;
+
+	return 0;
+}
+
+
+int pthread_getattr_np(pthread_t thread, pthread_attr_t *attr)
+{
+	pthread_ctx *ctx = (pthread_ctx *)thread;
+	void *stackaddr;
+	size_t stacksize, guardsize;
+	int detached, err;
+	handle_t id;
+	sched_params_t p;
+
+	if (attr == NULL) {
+		return EINVAL;
+	}
+
+	mutexLock(pthread_common.pthread_list_lock);
+	if (_pthread_isLive(ctx) == 0) {
+		mutexUnlock(pthread_common.pthread_list_lock);
+		return ESRCH;
+	}
+	stackaddr = ctx->stackaddr;
+	stacksize = ctx->stackusable;
+	guardsize = ctx->guardsize;
+	detached = ctx->is_detached;
+	id = ctx->id;
+	mutexUnlock(pthread_common.pthread_list_lock);
+
+	if (stackaddr == NULL) {
+		err = pthread_mainStack(&stackaddr, &stacksize);
+		if (err != 0) {
+			return err;
+		}
+		guardsize = 0;
+	}
+
+	*attr = pthread_attr_default;
+	attr->stackaddr = stackaddr;
+	attr->stacksize = stacksize;
+	attr->guardsize = guardsize;
+	attr->detachstate = (detached != 0) ? PTHREAD_CREATE_DETACHED : PTHREAD_CREATE_JOINABLE;
+	if (schedGet(0, id, &p) == EOK) {
+		attr->priority = p.priorityBase;
+	}
 
 	return 0;
 }

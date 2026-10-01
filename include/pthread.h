@@ -151,6 +151,15 @@ int pthread_attr_setstack(pthread_attr_t *attr, void *stackaddr, size_t stacksiz
 int pthread_attr_getstack(const pthread_attr_t *attr, void **stackaddr, size_t *stacksize);
 
 
+/* GNU extension: initialises *attr with the attributes of a running thread.
+ * pthread_attr_getstack() on it then gives the stack the thread runs on, the
+ * main thread included: [stackaddr, stackaddr + stacksize), with the guard
+ * (pthread_attr_getguardsize()) below stackaddr. The kernel keeps a 16-byte
+ * overflow canary in the lowest bytes of every thread stack. Returns ESRCH
+ * for a thread this library did not create or that has exited. */
+int pthread_getattr_np(pthread_t thread, pthread_attr_t *attr);
+
+
 int pthread_attr_setschedparam(pthread_attr_t *attr, const struct sched_param *param);
 
 

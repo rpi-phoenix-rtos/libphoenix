@@ -25,6 +25,9 @@
 extern int sys_tkill(int pid, int tid, int signal);
 
 
+extern int sys_sigaltstack(const stack_t *ss, stack_t *oss);
+
+
 extern void _signal_trampoline(void);
 
 
@@ -119,6 +122,12 @@ int siginterrupt(int sig, int flag)
 	}
 
 	return sigaction(sig, &act, NULL);
+}
+
+
+int sigaltstack(const stack_t *ss, stack_t *oss)
+{
+	return SET_ERRNO(sys_sigaltstack(ss, oss));
 }
 
 

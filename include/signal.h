@@ -44,6 +44,12 @@ extern int sigaction(int, const struct sigaction *, struct sigaction *);
 extern int sigaddset(sigset_t *, int);
 
 
+/* Sets and/or gets the calling thread's alternate signal stack, on which
+ * SA_ONSTACK handlers run. Fails with ENOSYS where the kernel cannot deliver
+ * signals there. */
+extern int sigaltstack(const stack_t *ss, stack_t *oss);
+
+
 extern int sigdelset(sigset_t *, int);
 
 

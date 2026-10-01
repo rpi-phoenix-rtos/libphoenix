@@ -99,6 +99,11 @@ static struct {
 	pthread_fork_handlers_t *pthread_fork_handlers;
 	pthread_retired_t *retired; /* detached stacks awaiting reclaim by a live thread */
 
+	/* Set by _pthread_atfork_prepare() while pthread_list_lock is held across
+	 * a fork(), consumed by the parent and child halves (see fork_prepare). */
+	pthread_ctx *forking;
+	sigset_t forkSigmask;
+
 	/*
 	 * TODO: replace with an array indexed by SCHED_FIFO, SCHED_RR, etc. once more
 	 * sched policies get implemented
@@ -229,24 +234,34 @@ static void _pthread_do_cleanup(pthread_ctx *ctx)
 }
 
 
-static pthread_ctx *pthread_find(handle_t id)
+/* Caller holds pthread_list_lock; no reference is taken. */
+static pthread_ctx *_pthread_find(handle_t id)
 {
-	mutexLock(pthread_common.pthread_list_lock);
 	pthread_ctx *ctx = pthread_common.pthread_list;
 
 	if (ctx != NULL) {
 		do {
 			if (ctx->id == id) {
-				_pthread_ctx_get(ctx);
-				mutexUnlock(pthread_common.pthread_list_lock);
 				return ctx;
 			}
 			ctx = ctx->next;
 		} while (ctx != pthread_common.pthread_list);
 	}
-	mutexUnlock(pthread_common.pthread_list_lock);
 
 	return NULL;
+}
+
+
+static pthread_ctx *pthread_find(handle_t id)
+{
+	mutexLock(pthread_common.pthread_list_lock);
+	pthread_ctx *ctx = _pthread_find(id);
+	if (ctx != NULL) {
+		_pthread_ctx_get(ctx);
+	}
+	mutexUnlock(pthread_common.pthread_list_lock);
+
+	return ctx;
 }
 
 
@@ -1940,6 +1955,121 @@ int pthread_atfork(void (*prepare)(void), void (*parent)(void), void (*child)(vo
 }
 
 
+/*
+ * fork() and the thread list.
+ *
+ * The child of a fork() has exactly one thread, a copy of the one that called
+ * fork(), and on Phoenix it runs under a NEW tid. Every record here is keyed
+ * by tid, so without the fix-up below the child finds no record for itself:
+ * pthread_self() is NULL, pthread_getspecific() loses every value,
+ * pthread_setcancelstate() dereferences NULL, and the records of threads that
+ * do not exist in the child stay on the list -- where a tid the child's own
+ * threads are later given could match one of them.
+ *
+ * The list is held across sys_fork() so the child copies it in a consistent
+ * state, not half-way through another CPU's LIST_ADD/LIST_REMOVE. Signals are
+ * blocked for that window: the parent resumes from sys_fork() with whatever
+ * arrived while it was suspended, and a handler calling pthread_self() then
+ * would self-deadlock on the list lock.
+ */
+static void _pthread_forkPrepare(void)
+{
+	sigset_t all, old;
+
+	(void)sigfillset(&all);
+	(void)sigprocmask(SIG_BLOCK, &all, &old);
+	mutexLock(pthread_common.pthread_list_lock);
+	pthread_common.forkSigmask = old;
+	pthread_common.forking = _pthread_find(gettid());
+}
+
+
+static void _pthread_forkParent(void)
+{
+	sigset_t mask = pthread_common.forkSigmask;
+
+	pthread_common.forking = NULL;
+	mutexUnlock(pthread_common.pthread_list_lock);
+	(void)sigprocmask(SIG_SETMASK, &mask, NULL);
+}
+
+
+static void _pthread_forkDiscard(pthread_ctx *ctx)
+{
+	while (ctx->key_data_list != NULL) {
+		pthread_key_data_t *head = ctx->key_data_list;
+		ctx->key_data_list = head->next;
+		free(head);
+	}
+
+	while (ctx->cleanup_list != NULL) {
+		pthread_cleanup_t *head = ctx->cleanup_list;
+		ctx->cleanup_list = head->next;
+		free(head);
+	}
+
+	/* ctx->stack stays mapped: the child is a replica of the parent's whole
+	 * address space (POSIX), and the forking thread may still hold pointers
+	 * into another thread's stack. Nothing will ever run on it again. */
+	free(ctx);
+}
+
+
+static void _pthread_forkChild(void)
+{
+	pthread_ctx *self = pthread_common.forking;
+	pthread_ctx *ctx;
+	pthread_retired_t *node;
+	sigset_t mask = pthread_common.forkSigmask;
+
+	/* pthread_list_lock is NOT unlocked here: the kernel gives the child fresh,
+	 * unlocked copies of the parent's locks (proc_resourcesCopy), so the lock
+	 * the parent holds is already free in the child, and the child is
+	 * single-threaded until this returns. */
+	pthread_common.forking = NULL;
+
+	/* Destructors and cleanup handlers of the other threads do not run: those
+	 * threads were never part of the child (POSIX). */
+	while (pthread_common.pthread_list != NULL) {
+		ctx = pthread_common.pthread_list;
+		LIST_REMOVE(&pthread_common.pthread_list, ctx);
+		if (ctx != self) {
+			_pthread_forkDiscard(ctx);
+		}
+	}
+
+	/* Exited detached threads of the parent: their stacks are reclaimed here
+	 * directly. _pthread_reapRetired() would threadJoin() a PARENT tid, which
+	 * means nothing in this process. */
+	while (pthread_common.retired != NULL) {
+		node = pthread_common.retired;
+		pthread_common.retired = node->next;
+		if (node->stack != NULL) {
+			munmap(node->stack, node->stacksize);
+		}
+		free(node);
+	}
+
+	if (self != NULL) {
+		/* Same record, so a pthread_t saved before fork() still compares equal
+		 * to pthread_self() in the child, and the thread-specific values it set
+		 * are kept. Any reference another thread held on it is gone with that
+		 * thread. */
+		self->id = gettid();
+		self->refcount = 1;
+		LIST_ADD(&pthread_common.pthread_list, self);
+	}
+	else {
+		/* fork() from a thread this library did not create: it is now the only
+		 * thread of a new process, which is what a main record describes. On
+		 * ENOMEM pthread_self() stays NULL, as it was in the parent. */
+		(void)pthread_create_main();
+	}
+
+	(void)sigprocmask(SIG_SETMASK, &mask, NULL);
+}
+
+
 void _pthread_atfork_prepare(void)
 {
 	/* prepare functions must be called in reverse order */
@@ -1957,12 +2087,16 @@ void _pthread_atfork_prepare(void)
 		} while (curr != last);
 	}
 	mutexUnlock(pthread_common.pthread_atfork_lock);
+
+	_pthread_forkPrepare();
 }
 
 
 /* parent and child functions must be called in order */
 void _pthread_atfork_parent(void)
 {
+	_pthread_forkParent();
+
 	mutexLock(pthread_common.pthread_atfork_lock);
 	pthread_fork_handlers_t *first = pthread_common.pthread_fork_handlers;
 
@@ -1981,6 +2115,9 @@ void _pthread_atfork_parent(void)
 
 void _pthread_atfork_child(void)
 {
+	/* Before the handlers: they may call pthread functions themselves. */
+	_pthread_forkChild();
+
 	mutexLock(pthread_common.pthread_atfork_lock);
 	pthread_fork_handlers_t *first = pthread_common.pthread_fork_handlers;
 
@@ -2485,6 +2622,7 @@ void _pthread_init(void)
 	pthread_cond_init(&pthread_common.pthread_once_cond, NULL);
 	pthread_common.pthread_list = NULL;
 	pthread_common.pthread_fork_handlers = NULL;
+	pthread_common.forking = NULL;
 	pthread_create_main();
 	pthread_cache_policies();
 	pthread_common.retired = NULL;

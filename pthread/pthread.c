@@ -1872,6 +1872,27 @@ int pthread_cond_broadcast(pthread_cond_t *cond)
 }
 
 
+/*
+ * A signal handler that runs while a thread waits on a condition variable runs
+ * inside pthread_cond_wait(), and the wait then ends as a spurious wakeup: the
+ * caller re-checks its predicate. condClockWait() would wait again instead, so
+ * a change made while the handler ran -- by the handler, or by another thread
+ * whose pthread_cond_signal() found no thread waiting -- would be missed until
+ * the next wakeup, possibly forever. The kernel ends an interrupted wait with
+ * the mutex released, so it is taken again first. Never returns EINTR.
+ */
+static int pthread_condWaitPhx(handle_t cond, handle_t mutex, time_t timeout, int clock)
+{
+	int err = phCondWait(cond, mutex, timeout, clock);
+
+	if (err == -EINTR) {
+		err = mutexLock(mutex);
+	}
+
+	return err;
+}
+
+
 int pthread_cond_wait(pthread_cond_t *__restrict cond, pthread_mutex_t *__restrict mutex)
 {
 	int err = pthread_cond_lazy_init(cond, NULL);
@@ -1881,7 +1902,7 @@ int pthread_cond_wait(pthread_cond_t *__restrict cond, pthread_mutex_t *__restri
 	}
 
 	if (err == EOK) {
-		err = -condWait(cond->condh, mutex->mutexh, 0);
+		err = -pthread_condWaitPhx(cond->condh, mutex->mutexh, 0, -1);
 	}
 
 	return err;
@@ -1896,7 +1917,7 @@ static int pthread_cond_clockwait_phx(pthread_cond_t *__restrict cond, pthread_m
 
 	time_t abstime_us = __timespecToUs(abstime);
 
-	/* check timeout as condClockWait with timeout 0 will wait indefinitely */
+	/* check timeout as a condition wait with timeout 0 waits indefinitely */
 	if (abstime_us <= 0) {
 		return ETIMEDOUT;
 	}
@@ -1908,7 +1929,7 @@ static int pthread_cond_clockwait_phx(pthread_cond_t *__restrict cond, pthread_m
 	}
 
 	if (err == EOK) {
-		err = -condClockWait(cond->condh, mutex->mutexh, abstime_us, clock);
+		err = -pthread_condWaitPhx(cond->condh, mutex->mutexh, abstime_us, clock);
 	}
 
 	if (err == ETIME) {

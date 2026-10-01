@@ -584,6 +584,10 @@ int pthread_setcancelstate(int state, int *oldstate)
 	if (state != PTHREAD_CANCEL_ENABLE && state != PTHREAD_CANCEL_DISABLE) {
 		err = EINVAL;
 	}
+	else if (ctx == NULL) {
+		/* A thread this library did not create (see pthread_setcanceltype) */
+		err = ESRCH;
+	}
 	else {
 		mutexLock(pthread_common.pthread_list_lock);
 		_pthread_ctx_get(ctx);

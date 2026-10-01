@@ -52,8 +52,11 @@ typedef struct pthread_attr_t {
 
 typedef uintptr_t pthread_t;
 
+/* The lock word, or the handle of a kernel mutex, and the initialization state
+ * with the kind of mutex (pthread/pthread.c). The size and the all-zero
+ * PTHREAD_MUTEX_INITIALIZER are those of the earlier { handle, initialized }. */
 typedef struct {
-	handle_t mutexh;
+	unsigned int lock;
 	int initialized;
 } pthread_mutex_t;
 
@@ -79,8 +82,9 @@ typedef struct {
 typedef struct lockAttr pthread_mutexattr_t;
 
 
+/* Sequence number, clock and waiter count in one futex word (pthread/pthread.c) */
 typedef struct {
-	handle_t condh;
+	unsigned int seq;
 	int initialized;
 } pthread_cond_t;
 

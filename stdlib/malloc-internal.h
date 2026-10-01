@@ -25,4 +25,15 @@
 void *_malloc_aligned(size_t alignment, size_t size);
 
 
+/* Called by fork() around the system call: prepare in the parent before it,
+ * then parent in the parent or child in the child after it. */
+void _malloc_forkPrepare(void);
+
+
+void _malloc_forkParent(void);
+
+
+void _malloc_forkChild(void);
+
+
 #endif

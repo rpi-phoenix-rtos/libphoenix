@@ -32,6 +32,7 @@
 
 #include "malloc-internal.h"
 #include "../sys/threads-internal.h"
+#include "../sys/ulock-internal.h"
 
 #define CEIL(value, size)  ((((value) + (size) - 1U) / (size)) * (size))
 #define FLOOR(value, size) (((value) / (size)) * (size))
@@ -156,7 +157,8 @@ struct {
 	unsigned int scanReports;
 	uintptr_t scanLastBase;
 
-	handle_t mutex;
+	volatile unsigned int lock; /* the heap lock, see malloc_lock() */
+	int forkLocked;             /* malloc_forkPrepare() took the lock */
 } malloc_common;
 
 
@@ -2703,18 +2705,18 @@ static void *_malloc_allocSmall(size_t size)
 }
 
 
-/* The heap lock is taken only once the process has a second thread (see
- * sys/threads-internal.h). While it is single-threaded no one can contend for
- * it, and on Phoenix a lock/unlock pair is two syscalls: ~4.5 us on the Pi 4,
- * more than the allocation itself. Each entry point decides ONCE and passes the
- * result to malloc_unlock(), so a lock is released only if it was taken. */
+/* The heap lock is a user-space lock (sys/ulock-internal.h): uncontended, it
+ * costs one atomic operation and no system call. It is taken only once the
+ * process has a second thread (see sys/threads-internal.h); before that no one
+ * can contend for it. Each entry point decides ONCE and passes the result to
+ * malloc_unlock(), so a lock is released only if it was taken. */
 static inline int malloc_lock(void)
 {
 	if (_libc_isMultithreaded() == 0) {
 		return 0;
 	}
 
-	mutexLock(malloc_common.mutex);
+	_ulock_lock(&malloc_common.lock);
 	return 1;
 }
 
@@ -2722,7 +2724,33 @@ static inline int malloc_lock(void)
 static inline void malloc_unlock(int locked)
 {
 	if (locked != 0) {
-		mutexUnlock(malloc_common.mutex);
+		(void)_ulock_unlock(&malloc_common.lock);
+	}
+}
+
+
+/* fork() keeps the heap consistent across the copy: the lock is held while the
+ * address space is copied, so no other thread is half-way through an update,
+ * and the child -- whose only thread is the one that took it -- starts with it
+ * free. Without this, a child forked while another thread held the lock would
+ * inherit it locked by a thread that does not exist in the child. */
+void _malloc_forkPrepare(void)
+{
+	malloc_common.forkLocked = malloc_lock();
+}
+
+
+void _malloc_forkParent(void)
+{
+	malloc_unlock(malloc_common.forkLocked);
+}
+
+
+void _malloc_forkChild(void)
+{
+	if (malloc_common.forkLocked != 0) {
+		/* Sleepers recorded in the word belong to the parent */
+		__atomic_store_n(&malloc_common.lock, ULOCK_FREE, __ATOMIC_RELEASE);
 	}
 }
 
@@ -3308,7 +3336,8 @@ void _malloc_init(void)
 		lib_rbInit(&malloc_common.lbins[i], malloc_cmp, NULL);
 	}
 
-	mutexCreate(&malloc_common.mutex);
+	malloc_common.lock = ULOCK_FREE;
+	malloc_common.forkLocked = 0;
 }
 
 

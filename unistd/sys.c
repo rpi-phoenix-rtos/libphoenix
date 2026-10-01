@@ -30,6 +30,8 @@
 #include <pthread.h>
 #include <time.h>
 
+#include "../stdlib/malloc-internal.h"
+
 
 WRAP_ERRNO_DEF(int, setpgid, (pid_t pid, pid_t pgid), (pid, pgid))
 WRAP_ERRNO_DEF(int, setpgrp, (void), ())
@@ -405,11 +407,15 @@ pid_t fork(void)
 {
 	pid_t pid;
 	_pthread_atfork_prepare();
+	/* Last, after the prepare handlers, which may allocate */
+	_malloc_forkPrepare();
 	if (!(pid = sys_fork())) {
 		release();
+		_malloc_forkChild();
 		_pthread_atfork_child();
 	}
 	else {
+		_malloc_forkParent();
 		/* Also on failure: prepare handlers typically take locks that only the
 		 * parent handlers release, and the thread list is held until then. */
 		_pthread_atfork_parent();

@@ -13,6 +13,7 @@
  * %LICENSE%
  */
 
+#include <arch.h>
 #include <assert.h>
 #include <stdlib.h>
 #include <errno.h>
@@ -25,6 +26,7 @@
 #include <unistd.h>
 
 #include "../common/util.h"
+#include "../sys/ulock-internal.h"
 #ifdef PTHREAD_UNLOCK_TRACE
 #include <sys/debug.h>
 #endif
@@ -1081,86 +1083,337 @@ static int pthread_destroy_acquire_release(
 }
 
 
-static int pthread_mutex_init_cb(void *__restrict__ resource, const void *__restrict__ attr)
+/*
+ * Mutexes
+ *
+ * A mutex with protocol PTHREAD_PRIO_NONE that is not robust -- the default --
+ * is a user-space lock: uncontended, locking and unlocking it is one atomic
+ * operation each, and the kernel is entered only to sleep while another thread
+ * holds it (see sys/ulock-internal.h). Priority inheritance, priority ceilings
+ * and robustness need the kernel to know the owner, so a mutex asking for any
+ * of them is a kernel mutex, as all mutexes used to be; `lock` then holds its
+ * handle.
+ *
+ * `initialized` holds the RESOURCE_* state, the kind of the mutex and, for a
+ * recursive one, the depth beyond its first lock (changed only by the owner).
+ * The lock word of a recursive or error-checking user-space mutex holds its
+ * owner, pthread_mutexSelf() << 1, and in bit 0 the mark that a thread may be
+ * asleep on it; a normal one uses the ULOCK_* states.
+ */
+
+#define MUTEX_STATE_MASK    0x3U
+#define MUTEX_TYPE_SHIFT    2
+#define MUTEX_TYPE_MASK     (0x3U << MUTEX_TYPE_SHIFT)
+#define MUTEX_KERNEL        (1U << 4)
+#define MUTEX_DEPTH_ONE     (1U << 8)
+#define MUTEX_DEPTH_MASK    (~0U << 8)
+#define MUTEX_OWNED_WAITERS 1U
+
+/* Polls of a held recursive/error-checking mutex before sleeping, as ULOCK_SPIN */
+#define MUTEX_OWNED_SPIN 100U
+
+
+#ifdef __LIBPHOENIX_ARCH_TLS_SUPPORTED
+static __thread unsigned int pthread_mutexSelfId;
+static unsigned int pthread_mutexNextId;
+#endif
+
+
+/* A nonzero 31-bit number naming the calling thread as a mutex owner. Not the
+ * tid: the child of a fork() runs under a new tid, yet it owns the mutexes its
+ * forking thread held (POSIX), and its copy of this thread-local carries the
+ * number over. Numbers are never reused within a process. */
+static unsigned int pthread_mutexSelf(void)
 {
-	pthread_mutex_t *mutex = resource;
+#ifdef __LIBPHOENIX_ARCH_TLS_SUPPORTED
+	unsigned int id = pthread_mutexSelfId;
+
+	if (id == 0U) {
+		do {
+			id = __atomic_add_fetch(&pthread_mutexNextId, 1U, __ATOMIC_RELAXED) & 0x7fffffffU;
+		} while (id == 0U);
+		pthread_mutexSelfId = id;
+	}
+
+	return id;
+#else
+	return ((unsigned int)gettid() + 1U) & 0x7fffffffU;
+#endif
+}
+
+
+static int pthread_mutex_init_cb(pthread_mutex_t *mutex, const pthread_mutexattr_t *attr, unsigned int *kind)
+{
+	static const pthread_mutexattr_t defaultAttr = {
+		.type = PTHREAD_MUTEX_DEFAULT,
+		.protocol = PTHREAD_PRIO_NONE,
+		.robust = PTHREAD_MUTEX_STALLED,
+	};
+	handle_t h;
 	int err;
+
+	if (attr == NULL) {
+		attr = &defaultAttr;
+	}
+
+	*kind = ((unsigned int)attr->type << MUTEX_TYPE_SHIFT) & MUTEX_TYPE_MASK;
+
+	if ((attr->protocol == PTHREAD_PRIO_NONE) && (attr->robust == PTHREAD_MUTEX_STALLED)) {
+		__atomic_store_n(&mutex->lock, ULOCK_FREE, __ATOMIC_RELAXED);
+		return EOK;
+	}
+
+	err = mutexCreateWithAttr(&h, attr);
+	if (err < 0) {
+		return -err;
+	}
+
+	__atomic_store_n(&mutex->lock, (unsigned int)h, __ATOMIC_RELAXED);
+	*kind |= MUTEX_KERNEL;
+
+	return EOK;
+}
+
+
+/* Returns the mutex's `initialized` word in *flags, initializing a mutex set up
+ * with PTHREAD_MUTEX_INITIALIZER on its first use. */
+static int pthread_mutex_lazy_init(pthread_mutex_t *__restrict mutex, const pthread_mutexattr_t *__restrict attr, unsigned int *flags)
+{
+	unsigned int f, kind;
+	int expected, err;
 
 	if (mutex == NULL) {
 		return EINVAL;
 	}
 
-	if (attr == NULL) {
-		/*
-		 * POSIX-DEVIATION: POSIX says that mutexes should have PTHREAD_PRIO_NONE by
-		 * default. Phoenix has PTHREAD_PRIO_INHERIT instead.
-		 */
-		err = mutexCreate(&mutex->mutexh);
+	for (;;) {
+		f = (unsigned int)__atomic_load_n(&mutex->initialized, __ATOMIC_ACQUIRE);
+		if ((f & MUTEX_STATE_MASK) == RESOURCE_INITIALIZED) {
+			*flags = f;
+			return EOK;
+		}
+
+		if ((f & MUTEX_STATE_MASK) == RESOURCE_UNINITIALIZED) {
+			expected = (int)f;
+			if (__atomic_compare_exchange_n(&mutex->initialized, &expected, RESOURCE_INITIALIZING, false, __ATOMIC_ACQUIRE, __ATOMIC_ACQUIRE)) {
+				err = pthread_mutex_init_cb(mutex, attr, &kind);
+				f = (err == EOK) ? (RESOURCE_INITIALIZED | kind) : RESOURCE_UNINITIALIZED;
+				__atomic_store_n(&mutex->initialized, (int)f, __ATOMIC_RELEASE);
+				*flags = f;
+				return err;
+			}
+		}
+
+		(void)sched_yield();
 	}
-	else {
-		err = mutexCreateWithAttr(&mutex->mutexh, (const struct lockAttr *)attr);
+}
+
+
+/* pthread_mutex_lazy_init() with the common case, an initialized mutex, inline */
+static inline int pthread_mutex_flags(pthread_mutex_t *mutex, unsigned int *flags)
+{
+	unsigned int f;
+
+	if (mutex != NULL) {
+		f = (unsigned int)__atomic_load_n(&mutex->initialized, __ATOMIC_ACQUIRE);
+		if ((f & MUTEX_STATE_MASK) == RESOURCE_INITIALIZED) {
+			*flags = f;
+			return EOK;
+		}
 	}
 
-	return -err;
+	return pthread_mutex_lazy_init(mutex, NULL, flags);
+}
+
+
+/* Locks a recursive or error-checking user-space mutex; `try` = trylock */
+static int pthread_mutex_lockOwned(pthread_mutex_t *mutex, unsigned int flags, int try, time_t timeout, int clock)
+{
+	const unsigned int self = pthread_mutexSelf() << 1;
+	unsigned int v = 0U, i;
+	int err;
+
+	if (__atomic_compare_exchange_n(&mutex->lock, &v, self, false, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
+		return EOK;
+	}
+
+	if ((v & ~MUTEX_OWNED_WAITERS) == self) {
+		if ((flags & MUTEX_TYPE_MASK) != ((unsigned int)PTHREAD_MUTEX_RECURSIVE << MUTEX_TYPE_SHIFT)) {
+			return (try != 0) ? EBUSY : EDEADLK;
+		}
+
+		if ((flags & MUTEX_DEPTH_MASK) == MUTEX_DEPTH_MASK) {
+			return EAGAIN;
+		}
+
+		/* Only the owner changes the depth, and the other bits stay put */
+		(void)__atomic_fetch_add(&mutex->initialized, (int)MUTEX_DEPTH_ONE, __ATOMIC_RELAXED);
+		return EOK;
+	}
+
+	if (try != 0) {
+		return EBUSY;
+	}
+
+	for (i = 0U; i < MUTEX_OWNED_SPIN; i++) {
+		_ulock_cpuRelax();
+		v = 0U;
+		if ((__atomic_load_n(&mutex->lock, __ATOMIC_RELAXED) == 0U) &&
+				__atomic_compare_exchange_n(&mutex->lock, &v, self, false, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
+			return EOK;
+		}
+	}
+
+	for (;;) {
+		v = __atomic_load_n(&mutex->lock, __ATOMIC_RELAXED);
+		if (v == 0U) {
+			/* Others may still be asleep: keep the mark, so our unlock wakes one */
+			if (__atomic_compare_exchange_n(&mutex->lock, &v, self | MUTEX_OWNED_WAITERS, false, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
+				return EOK;
+			}
+			continue;
+		}
+
+		if ((v & MUTEX_OWNED_WAITERS) == 0U) {
+			if (!__atomic_compare_exchange_n(&mutex->lock, &v, v | MUTEX_OWNED_WAITERS, false, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {
+				continue;
+			}
+			v |= MUTEX_OWNED_WAITERS;
+		}
+
+		err = futexWait(&mutex->lock, v, timeout, clock);
+		if (err == -ETIME) {
+			return ETIMEDOUT;
+		}
+
+		if ((err != EOK) && (err != -EAGAIN) && (err != -EINTR)) {
+			/* Cannot sleep (a kernel without futexes, no memory): poll instead */
+			(void)usleep(0);
+		}
+	}
+}
+
+
+static int pthread_mutex_unlockOwned(pthread_mutex_t *mutex, unsigned int flags)
+{
+	const unsigned int self = pthread_mutexSelf() << 1;
+
+	if ((__atomic_load_n(&mutex->lock, __ATOMIC_RELAXED) & ~MUTEX_OWNED_WAITERS) != self) {
+		return EPERM;
+	}
+
+	if ((flags & MUTEX_DEPTH_MASK) != 0U) {
+		(void)__atomic_fetch_sub(&mutex->initialized, (int)MUTEX_DEPTH_ONE, __ATOMIC_RELAXED);
+		return EOK;
+	}
+
+	/* Nothing below touches the mutex's memory: the next owner may destroy it */
+	if ((__atomic_exchange_n(&mutex->lock, 0U, __ATOMIC_RELEASE) & MUTEX_OWNED_WAITERS) != 0U) {
+		(void)futexWake(&mutex->lock, 1);
+	}
+
+	return EOK;
+}
+
+
+/* `timeout` = 0: no limit. Returns EOK, ETIMEDOUT or an error. */
+static int pthread_mutex_lockInternal(pthread_mutex_t *mutex, unsigned int flags, time_t timeout, int clock)
+{
+	int err;
+
+	if ((flags & MUTEX_KERNEL) != 0U) {
+		err = (timeout == 0) ? -mutexLock((handle_t)mutex->lock) : -mutexLockClockWait((handle_t)mutex->lock, timeout, clock);
+		return (err == ETIME) ? ETIMEDOUT : err;
+	}
+
+	if ((flags & MUTEX_TYPE_MASK) == ((unsigned int)PTHREAD_MUTEX_NORMAL << MUTEX_TYPE_SHIFT)) {
+		if (_ulock_tryLock(&mutex->lock) == EOK) {
+			return EOK;
+		}
+		return (_ulock_lockSlow(&mutex->lock, timeout, clock) == -ETIME) ? ETIMEDOUT : EOK;
+	}
+
+	return pthread_mutex_lockOwned(mutex, flags, 0, timeout, clock);
+}
+
+
+static int pthread_mutex_unlockInternal(pthread_mutex_t *mutex, unsigned int flags)
+{
+	if ((flags & MUTEX_KERNEL) != 0U) {
+		return -mutexUnlock((handle_t)mutex->lock);
+	}
+
+	if ((flags & MUTEX_TYPE_MASK) == ((unsigned int)PTHREAD_MUTEX_NORMAL << MUTEX_TYPE_SHIFT)) {
+		return -_ulock_unlock(&mutex->lock);
+	}
+
+	return pthread_mutex_unlockOwned(mutex, flags);
 }
 
 
 int pthread_mutex_getprioceiling(const pthread_mutex_t *__restrict mutex, int *__restrict prioceiling)
 {
-	if (prioceiling == NULL) {
+	unsigned int f;
+
+	if (prioceiling == NULL || mutex == NULL) {
 		return EINVAL;
 	}
 
-	if (mutex == NULL || __atomic_load_n(&mutex->initialized, __ATOMIC_ACQUIRE) != RESOURCE_INITIALIZED) {
+	f = (unsigned int)__atomic_load_n(&mutex->initialized, __ATOMIC_ACQUIRE);
+	if (((f & MUTEX_STATE_MASK) != RESOURCE_INITIALIZED) || ((f & MUTEX_KERNEL) == 0U)) {
 		/*
-		 * Makes no sense to lazy initialize - mutexes are not PTHREAD_PRIO_PROTECT
-		 * by default, so this call would lead to EINVAL anyways.
+		 * Only a PTHREAD_PRIO_PROTECT mutex has a ceiling, and such a mutex is a
+		 * kernel mutex. Makes no sense to lazy initialize - mutexes are not
+		 * PTHREAD_PRIO_PROTECT by default, so this call would lead to EINVAL anyways.
 		 */
 		return EINVAL;
 	}
 
-	return -mutexPrioCeiling(mutex->mutexh, PH_GET_PRIO, prioceiling);
-}
-
-
-static int pthread_mutex_lazy_init(pthread_mutex_t *__restrict mutex, const pthread_mutexattr_t *__restrict attr)
-{
-	return pthread_initialize_acquire_release(&mutex->initialized, mutex, attr, pthread_mutex_init_cb);
+	return -mutexPrioCeiling((handle_t)mutex->lock, PH_GET_PRIO, prioceiling);
 }
 
 
 int pthread_mutex_setprioceiling(pthread_mutex_t *__restrict mutex, int prioceiling, int *__restrict old_ceiling)
 {
+	unsigned int f;
+
 	/* POSIX-DEVIATION: SCHED_RR priorities used instead of SCHED_FIFO. See note in pthread_mutexattr_setprioceiling() */
 	if (old_ceiling == NULL || prioceiling > pthread_common.pthread_max_prio_rr || prioceiling < pthread_common.pthread_min_prio_rr) {
 		return EINVAL;
 	}
 
-	int err = pthread_mutex_lazy_init(mutex, NULL);
+	int err = pthread_mutex_lazy_init(mutex, NULL, &f);
 	if (err != EOK) {
 		return err;
 	}
 
-	return -mutexPrioCeiling(mutex->mutexh, prioceiling, old_ceiling);
+	if ((f & MUTEX_KERNEL) == 0U) {
+		return EINVAL;
+	}
+
+	return -mutexPrioCeiling((handle_t)mutex->lock, prioceiling, old_ceiling);
 }
 
 
 int pthread_mutex_init(pthread_mutex_t *__restrict mutex, const pthread_mutexattr_t *__restrict attr)
 {
+	unsigned int f;
+
 	if (mutex == NULL) {
 		return EINVAL;
 	}
 	__atomic_store_n(&mutex->initialized, RESOURCE_UNINITIALIZED, __ATOMIC_RELAXED);
-	return pthread_mutex_lazy_init(mutex, attr);
+	return pthread_mutex_lazy_init(mutex, attr, &f);
 }
 
 
 int pthread_mutex_lock(pthread_mutex_t *mutex)
 {
-	int err = pthread_mutex_lazy_init(mutex, NULL);
+	unsigned int f;
+	int err = pthread_mutex_flags(mutex, &f);
 
 	if (err == EOK) {
-		err = -mutexLock(mutex->mutexh);
+		err = pthread_mutex_lockInternal(mutex, f, 0, PH_CLOCK_RELATIVE);
 	}
 
 	return err;
@@ -1184,6 +1437,7 @@ static int pthread_clock_id_to_phx_clock(clockid_t clock_id)
 static int pthread_mutex_clocklock_phx(pthread_mutex_t *__restrict mutex,
 		int clock, const struct timespec *__restrict abstime)
 {
+	unsigned int f;
 	int err = pthread_mutex_trylock(mutex);
 	if (err != EBUSY) {
 		return err;
@@ -1195,15 +1449,14 @@ static int pthread_mutex_clocklock_phx(pthread_mutex_t *__restrict mutex,
 
 	time_t abstime_us = __timespecToUs(abstime);
 
-	/* check timeout as mutexLockClockWait with timeout 0 will wait indefinitely */
+	/* check timeout as a timeout of 0 means waiting indefinitely */
 	if (abstime_us <= 0) {
 		return ETIMEDOUT;
 	}
 
-	err = -mutexLockClockWait(mutex->mutexh, abstime_us, clock);
-
-	if (err == ETIME) {
-		err = ETIMEDOUT;
+	err = pthread_mutex_lazy_init(mutex, NULL, &f);
+	if (err == EOK) {
+		err = pthread_mutex_lockInternal(mutex, f, abstime_us, clock);
 	}
 
 	return err;
@@ -1230,10 +1483,19 @@ int pthread_mutex_timedlock(pthread_mutex_t *__restrict mutex,
 
 int pthread_mutex_trylock(pthread_mutex_t *mutex)
 {
-	int err = pthread_mutex_lazy_init(mutex, NULL);
+	unsigned int f;
+	int err = pthread_mutex_flags(mutex, &f);
 
 	if (err == EOK) {
-		err = -mutexTry(mutex->mutexh);
+		if ((f & MUTEX_KERNEL) != 0U) {
+			err = -mutexTry((handle_t)mutex->lock);
+		}
+		else if ((f & MUTEX_TYPE_MASK) == ((unsigned int)PTHREAD_MUTEX_NORMAL << MUTEX_TYPE_SHIFT)) {
+			err = (_ulock_tryLock(&mutex->lock) == EOK) ? EOK : EBUSY;
+		}
+		else {
+			err = pthread_mutex_lockOwned(mutex, f, 1, 0, PH_CLOCK_RELATIVE);
+		}
 	}
 
 	return err;
@@ -1242,10 +1504,11 @@ int pthread_mutex_trylock(pthread_mutex_t *mutex)
 
 int pthread_mutex_unlock(pthread_mutex_t *mutex)
 {
-	int err = pthread_mutex_lazy_init(mutex, NULL);
+	unsigned int f;
+	int err = pthread_mutex_flags(mutex, &f);
 
 	if (err == EOK) {
-		err = -mutexUnlock(mutex->mutexh);
+		err = pthread_mutex_unlockInternal(mutex, f);
 #ifdef PTHREAD_UNLOCK_TRACE
 		/* DIAGNOSTIC (-DPTHREAD_UNLOCK_TRACE): find who unlocks a mutex they do
 		 * not hold. The kernel reports `_proc_lockClear: unlock on not locked
@@ -1280,19 +1543,34 @@ int pthread_mutex_unlock(pthread_mutex_t *mutex)
 }
 
 
-static int pthread_mutex_destroy_cb(void *resource)
-{
-	pthread_mutex_t *mutex = resource;
-	return -resourceDestroy(mutex->mutexh);
-}
-
-
 int pthread_mutex_destroy(pthread_mutex_t *mutex)
 {
+	unsigned int f;
+	int expected;
+
 	if (mutex == NULL) {
 		return EINVAL;
 	}
-	return pthread_destroy_acquire_release(&mutex->initialized, mutex, pthread_mutex_destroy_cb);
+
+	for (;;) {
+		f = (unsigned int)__atomic_load_n(&mutex->initialized, __ATOMIC_ACQUIRE);
+		if ((f & MUTEX_STATE_MASK) == RESOURCE_UNINITIALIZED) {
+			return EOK;
+		}
+
+		if ((f & MUTEX_STATE_MASK) == RESOURCE_INITIALIZED) {
+			if (((f & MUTEX_KERNEL) == 0U) && (__atomic_load_n(&mutex->lock, __ATOMIC_RELAXED) != 0U)) {
+				return EBUSY;
+			}
+
+			expected = (int)f;
+			if (__atomic_compare_exchange_n(&mutex->initialized, &expected, RESOURCE_UNINITIALIZED, false, __ATOMIC_ACQUIRE, __ATOMIC_ACQUIRE)) {
+				return ((f & MUTEX_KERNEL) != 0U) ? -resourceDestroy((handle_t)mutex->lock) : EOK;
+			}
+		}
+
+		(void)sched_yield();
+	}
 }
 
 
@@ -1310,11 +1588,9 @@ int pthread_mutexattr_init(pthread_mutexattr_t *attr)
 
 	attr->type = PTHREAD_MUTEX_DEFAULT;
 	attr->robust = PTHREAD_MUTEX_STALLED;
-	/*
-	 * POSIX-DEVIATION: POSIX says that mutexes should have PTHREAD_PRIO_NONE by
-	 * default. Phoenix has PTHREAD_PRIO_INHERIT instead. (Same as in pthread_mutex_init())
-	 */
-	attr->protocol = PTHREAD_PRIO_INHERIT;
+	/* As POSIX says. It is also what makes a mutex a user-space one: one asking
+	 * for PTHREAD_PRIO_INHERIT is a kernel mutex (see "Mutexes" above). */
+	attr->protocol = PTHREAD_PRIO_NONE;
 
 	/*
 	 * Set prioceiling to the LOWEST criticality to force the caller to explicitly
@@ -1436,10 +1712,12 @@ int pthread_mutexattr_settype(pthread_mutexattr_t *attr, int type)
 
 int pthread_mutex_consistent(pthread_mutex_t *mutex)
 {
-	int err = pthread_mutex_lazy_init(mutex, NULL);
+	unsigned int f;
+	int err = pthread_mutex_lazy_init(mutex, NULL, &f);
 
 	if (err == EOK) {
-		err = -mutexConsistent(mutex->mutexh);
+		/* Only a robust mutex can be inconsistent, and it is a kernel mutex */
+		err = ((f & MUTEX_KERNEL) != 0U) ? -mutexConsistent((handle_t)mutex->lock) : EINVAL;
 	}
 
 	return err;
@@ -1615,31 +1893,46 @@ int pthread_condattr_getclock(const pthread_condattr_t *__restrict attr, clockid
 }
 
 
-static int pthread_condattr_to_condAttr(const pthread_condattr_t *pattr, struct condAttr *attr)
-{
-	int clock = pthread_clock_id_to_phx_clock(pattr->clock_id);
-	if (clock < 0) {
-		return -clock;
-	}
-	attr->type = PH_COND_NORMAL;
-	attr->clock = clock;
-	return EOK;
-}
+/*
+ * Condition variables
+ *
+ * `seq` is a futex word with three fields: the number of threads inside a wait
+ * (bits 0-13), the clock of the condition variable (bits 14-15) and a sequence
+ * number that every signal and broadcast advances (bits 16-31). A waiter
+ * registers itself and samples the sequence in one atomic add while it still
+ * holds the mutex, unlocks the mutex and sleeps until the sequence moves, then
+ * takes the mutex again. A signal that finds no waiters is a single atomic add.
+ * This works with any mutex, user-space or kernel.
+ */
+
+#define COND_WAITER       1U
+#define COND_WAITERS_MASK 0x3fffU
+#define COND_CLOCK_SHIFT  14
+#define COND_CLOCK_MASK   (0x3U << COND_CLOCK_SHIFT)
+#define COND_SEQ_ONE      (1U << 16)
+#define COND_SEQ_MASK     (~0U << 16)
 
 
 static int pthread_cond_init_cb(void *__restrict resource, const void *__restrict attr)
 {
 	pthread_cond_t *cond = resource;
-	struct condAttr cattr;
-	if (pthread_condattr_to_condAttr((const pthread_condattr_t *)attr, &cattr) != 0) {
+	int clock = pthread_clock_id_to_phx_clock(((const pthread_condattr_t *)attr)->clock_id);
+
+	if (clock < 0) {
 		return EINVAL;
 	}
-	return -condCreateWithAttr(&cond->condh, &cattr);
+
+	__atomic_store_n(&cond->seq, ((unsigned int)clock << COND_CLOCK_SHIFT) & COND_CLOCK_MASK, __ATOMIC_RELAXED);
+
+	return EOK;
 }
 
 
 static int pthread_cond_lazy_init(pthread_cond_t *cond, const pthread_condattr_t *__restrict attr)
 {
+	if (cond == NULL) {
+		return EINVAL;
+	}
 	if (attr == NULL) {
 		attr = &pthread_condattr_default;
 	}
@@ -1659,8 +1952,9 @@ int pthread_cond_init(pthread_cond_t *__restrict cond, const pthread_condattr_t 
 
 static int pthread_cond_destroy_cb(void *resource)
 {
-	pthread_cond_t *cond = resource;
-	return -resourceDestroy(cond->condh);
+	(void)resource;
+
+	return EOK;
 }
 
 
@@ -1669,45 +1963,101 @@ int pthread_cond_destroy(pthread_cond_t *cond)
 	if (cond == NULL) {
 		return EINVAL;
 	}
+
+	if ((__atomic_load_n(&cond->seq, __ATOMIC_RELAXED) & COND_WAITERS_MASK) != 0U) {
+		return EBUSY;
+	}
+
 	return pthread_destroy_acquire_release(&cond->initialized, cond, pthread_cond_destroy_cb);
+}
+
+
+static int pthread_cond_wake(pthread_cond_t *cond, unsigned int count)
+{
+	int err = pthread_cond_lazy_init(cond, NULL);
+
+	if (err == EOK) {
+		/* Ordered with the waiters' registration: both are RMWs of this word, so
+		 * either we see the waiter here or it sees the new sequence. */
+		if ((__atomic_fetch_add(&cond->seq, COND_SEQ_ONE, __ATOMIC_SEQ_CST) & COND_WAITERS_MASK) != 0U) {
+			(void)futexWake(&cond->seq, count);
+		}
+	}
+
+	return err;
 }
 
 
 int pthread_cond_signal(pthread_cond_t *cond)
 {
-	int err = pthread_cond_lazy_init(cond, NULL);
-
-	if (err == 0) {
-		err = condSignal(cond->condh);
-	}
-	return -err;
+	return pthread_cond_wake(cond, 1U);
 }
 
 
 int pthread_cond_broadcast(pthread_cond_t *cond)
 {
-	int err = pthread_cond_lazy_init(cond, NULL);
+	return pthread_cond_wake(cond, ~0U);
+}
 
-	if (err == 0) {
-		err = condBroadcast(cond->condh);
+
+/* `timeout` = 0: no limit; `clock` = -1: the clock of the condition variable */
+static int pthread_cond_waitInternal(pthread_cond_t *__restrict cond, pthread_mutex_t *__restrict mutex, time_t timeout, int clock)
+{
+	unsigned int flags, v, seq;
+	int err, werr = EOK;
+
+	err = pthread_cond_lazy_init(cond, NULL);
+	if (err == EOK) {
+		err = pthread_mutex_flags(mutex, &flags);
 	}
-	return -err;
+	if (err != EOK) {
+		return err;
+	}
+
+	/* Still holding the mutex: a signal sent after the unlock below finds us */
+	v = __atomic_add_fetch(&cond->seq, COND_WAITER, __ATOMIC_SEQ_CST);
+	seq = v & COND_SEQ_MASK;
+	if (clock < 0) {
+		clock = (int)((v & COND_CLOCK_MASK) >> COND_CLOCK_SHIFT);
+	}
+
+	err = pthread_mutex_unlockInternal(mutex, flags);
+	if (err != EOK) {
+		(void)__atomic_fetch_sub(&cond->seq, COND_WAITER, __ATOMIC_RELAXED);
+		return err;
+	}
+
+	/* -EAGAIN: the word changed before we slept -- maybe only the waiter count,
+	 * so look at the sequence again. EOK with an unchanged sequence is a stale
+	 * wake-up; -EINTR a signal handler that has run. Wait on in all three. */
+	while ((v & COND_SEQ_MASK) == seq) {
+		werr = futexWait(&cond->seq, v, timeout, clock);
+		if (werr == -ETIME) {
+			break;
+		}
+
+		if ((werr != EOK) && (werr != -EAGAIN) && (werr != -EINTR)) {
+			/* Cannot sleep (a kernel without futexes, no memory): poll instead */
+			(void)usleep(0);
+		}
+
+		v = __atomic_load_n(&cond->seq, __ATOMIC_RELAXED);
+	}
+
+	(void)__atomic_fetch_sub(&cond->seq, COND_WAITER, __ATOMIC_RELAXED);
+
+	err = pthread_mutex_lockInternal(mutex, flags, 0, PH_CLOCK_RELATIVE);
+	if ((err == EOK) && (werr == -ETIME) && ((v & COND_SEQ_MASK) == seq)) {
+		err = ETIMEDOUT;
+	}
+
+	return err;
 }
 
 
 int pthread_cond_wait(pthread_cond_t *__restrict cond, pthread_mutex_t *__restrict mutex)
 {
-	int err = pthread_cond_lazy_init(cond, NULL);
-
-	if (err == EOK) {
-		err = pthread_mutex_lazy_init(mutex, NULL);
-	}
-
-	if (err == EOK) {
-		err = -condWait(cond->condh, mutex->mutexh, 0);
-	}
-
-	return err;
+	return pthread_cond_waitInternal(cond, mutex, 0, -1);
 }
 
 
@@ -1719,26 +2069,12 @@ static int pthread_cond_clockwait_phx(pthread_cond_t *__restrict cond, pthread_m
 
 	time_t abstime_us = __timespecToUs(abstime);
 
-	/* check timeout as condClockWait with timeout 0 will wait indefinitely */
+	/* check timeout as a timeout of 0 means waiting indefinitely */
 	if (abstime_us <= 0) {
 		return ETIMEDOUT;
 	}
 
-	int err = pthread_cond_lazy_init(cond, NULL);
-
-	if (err == EOK) {
-		err = pthread_mutex_lazy_init(mutex, NULL);
-	}
-
-	if (err == EOK) {
-		err = -condClockWait(cond->condh, mutex->mutexh, abstime_us, clock);
-	}
-
-	if (err == ETIME) {
-		err = ETIMEDOUT;
-	}
-
-	return err;
+	return pthread_cond_waitInternal(cond, mutex, abstime_us, clock);
 }
 
 

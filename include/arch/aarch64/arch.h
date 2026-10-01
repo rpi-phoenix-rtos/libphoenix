@@ -18,6 +18,7 @@
 
 #define __ARCH_STDINT <arch/aarch64/stdint.h>
 #define __ARCH_LIMITS <arch/aarch64/limits.h>
+#define __ARCH_FENV   <arch/aarch64/fenv.h>
 
 #define __MEMCPY
 #define __MEMSET

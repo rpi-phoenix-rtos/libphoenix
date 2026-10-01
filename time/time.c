@@ -61,6 +61,7 @@
 
 #define TZ_NAME_MAX  15  /* longest zone name kept, POSIX requires at least 6 */
 #define TZ_CACHE_LEN 128 /* longest TZ value that is not parsed again on every call */
+#define TZ_ZONES     32  /* zone names tm_zone can point to, see tz_intern() */
 
 
 enum { tzrule_jday, tzrule_yday, tzrule_mweek };
@@ -80,6 +81,7 @@ struct tzinfo {
 	int hasdst;
 	struct tzrule rule[2]; /* the change to DST [0] and back to standard time [1] */
 	char name[2][TZ_NAME_MAX + 1];
+	const char *zone[2];   /* name, as kept for tm_zone */
 };
 
 
@@ -88,7 +90,9 @@ static struct {
 	int cached;            /* tz holds the TZ value info was parsed from */
 	char tz[TZ_CACHE_LEN];
 	struct tzinfo info;
-} tz_common = { .info = { .name = { "UTC", "UTC" } } };
+	int nzones, nextZone;
+	char zones[TZ_ZONES][TZ_NAME_MAX + 1];
+} tz_common = { .info = { .name = { "UTC", "UTC" }, .zone = { "UTC", "UTC" } } };
 
 
 char *tzname[2] = { tz_common.info.name[0], tz_common.info.name[1] };
@@ -354,6 +358,31 @@ static void tz_parse(const char *tz, struct tzinfo *info)
 }
 
 
+/* A copy of a zone name that stays valid when TZ changes, for tm_zone, which
+ * callers keep (glibc's tm_zone also outlives any TZ change). Called with
+ * tz_common.lock held. Should a process go through more than TZ_ZONES zone
+ * names, the oldest slot is reused. */
+static const char *tz_intern(const char *name)
+{
+	int i;
+
+	for (i = 0; i < tz_common.nzones; i++) {
+		if (strcmp(tz_common.zones[i], name) == 0) {
+			return tz_common.zones[i];
+		}
+	}
+
+	i = tz_common.nextZone;
+	tz_common.nextZone = (i + 1) % TZ_ZONES;
+	if (tz_common.nzones < TZ_ZONES) {
+		tz_common.nzones++;
+	}
+	strcpy(tz_common.zones[i], name);
+
+	return tz_common.zones[i];
+}
+
+
 /* Brings the parsed rules up to date with TZ, called with tz_common.lock held */
 static void tz_update(void)
 {
@@ -369,6 +398,8 @@ static void tz_update(void)
 	}
 
 	tz_parse(tz, &info);
+	info.zone[0] = tz_intern(info.name[0]);
+	info.zone[1] = tz_intern(info.name[1]);
 	tz_common.info = info;
 
 	if (strlen(tz) < sizeof(tz_common.tz)) {
@@ -658,6 +689,8 @@ struct tm *gmtime_r(const time_t *timep, struct tm *res)
 	res->tm_mon = month;
 	res->tm_mday = days + 1;
 	res->tm_isdst = 0;
+	res->tm_gmtoff = 0;
+	res->tm_zone = "GMT"; /* as glibc */
 
 	return res;
 }
@@ -767,6 +800,8 @@ static struct tm *tz_localtime(const struct tzinfo *info, time_t t, struct tm *r
 	}
 
 	res->tm_isdst = isdst;
+	res->tm_gmtoff = offset;
+	res->tm_zone = info->zone[isdst];
 
 	return res;
 }

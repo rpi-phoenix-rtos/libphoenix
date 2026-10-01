@@ -124,9 +124,10 @@ extern "C" {
  * source trees rather than guessed — see
  * docs/misc/2026-09-10-posix-option-macros-blast-radius.md in the coordination
  * repo. Only claim one here when libphoenix really implements the group; the
- * groups deliberately NOT claimed (no sem_*, no pthread_barrier_*, no
- * posix_spawn, no shm_open, no sigqueue, no mq_*, no clock_getcpuclockid) are
- * left undefined so portable code keeps taking its fallback.
+ * groups deliberately NOT claimed (no sem_open, only unnamed semaphores; no
+ * shm_open, no sigqueue, no mq_*, no clock_getcpuclockid) are left undefined
+ * so portable code keeps taking its fallback. pthread_barrier_* and posix_spawn() exist, but claiming
+ * _POSIX_BARRIERS or _POSIX_SPAWN is a separate decision.
  */
 #define _POSIX_SPIN_LOCKS 202405L
 
@@ -340,6 +341,10 @@ off_t lseek(int fildes, off_t offset, int whence);
 
 
 int pipe(int fildes[2]);
+
+
+/* pipe() with O_CLOEXEC and/or O_NONBLOCK set on both ends */
+int pipe2(int fildes[2], int flags);
 
 
 int truncate(const char *path, off_t length);

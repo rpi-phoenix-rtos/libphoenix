@@ -18,6 +18,7 @@
 #define SECS_TO_USECS_T(secs)   (1000000ULL * (secs))
 #define MSECS_TO_USECS_T(msecs) (1000ULL * (msecs))
 
+#include <sys/_locale_t.h>
 #include <sys/types.h>
 
 
@@ -49,6 +50,8 @@ struct tm {
 	int tm_wday;
 	int tm_yday;
 	int tm_isdst;
+	long tm_gmtoff;      /* seconds east of UTC (BSD, glibc) */
+	const char *tm_zone; /* time zone abbreviation (BSD, glibc) */
 };
 
 
@@ -113,6 +116,10 @@ extern time_t time(time_t *tp);
 
 
 extern size_t strftime(char *__restrict s, size_t maxsize, const char *__restrict format, const struct tm *__restrict timeptr);
+
+
+extern size_t strftime_l(char *__restrict s, size_t maxsize, const char *__restrict format, const struct tm *__restrict timeptr,
+		locale_t locale);
 
 
 extern clock_t clock(void);

@@ -42,6 +42,7 @@ extern int sys_unlink(const char *path);
 extern int sys_pipe(int fildes[2]);
 extern int sys_fstat(int fd, struct stat *buf);
 extern int sys_lseek(int fildes, off_t *offset, int whence);
+extern int sys_fcntl(int fd, int cmd, unsigned long val);
 
 WRAP_ERRNO_DEF(int, close, (int fildes), (fildes))
 WRAP_ERRNO_DEF(int, ftruncate, (int fildes, off_t length), (fildes, length))
@@ -280,6 +281,46 @@ int pipe(int fildes[2])
 	while ((err = sys_pipe(fildes)) == -EINTR)
 		;
 	return SET_ERRNO(err);
+}
+
+
+/* Linux/BSD pipe2(), now also POSIX.1-2024. The kernel has no flags argument
+ * for pipes, so the flags are set on the new descriptors afterwards: a fork()
+ * and exec in another thread in between still inherits an O_CLOEXEC pipe. */
+int pipe2(int fildes[2], int flags)
+{
+	int fds[2], i, err = 0;
+
+	if ((flags & ~(O_CLOEXEC | O_NONBLOCK)) != 0) {
+		return SET_ERRNO(-EINVAL);
+	}
+
+	if (pipe(fds) < 0) {
+		return -1;
+	}
+
+	for (i = 0; (i < 2) && (err == 0); i++) {
+		if ((flags & O_CLOEXEC) != 0) {
+			err = sys_fcntl(fds[i], F_SETFD, FD_CLOEXEC);
+		}
+		if ((err == 0) && ((flags & O_NONBLOCK) != 0)) {
+			err = sys_fcntl(fds[i], F_GETFL, 0);
+			if (err >= 0) {
+				err = sys_fcntl(fds[i], F_SETFL, (unsigned long)err | O_NONBLOCK);
+			}
+		}
+	}
+
+	if (err < 0) {
+		(void)close(fds[0]);
+		(void)close(fds[1]);
+		return SET_ERRNO(err);
+	}
+
+	fildes[0] = fds[0];
+	fildes[1] = fds[1];
+
+	return 0;
 }
 
 
@@ -770,9 +811,6 @@ int destroy_dev(const char *path)
 
 	return msg.o.err;
 }
-
-
-extern int sys_fcntl(int fd, int cmd, unsigned long val);
 
 
 int fcntl(int fd, int cmd, ...)

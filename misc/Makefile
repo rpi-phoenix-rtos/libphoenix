@@ -4,4 +4,4 @@
 # Copyright 2021 Phoenix Systems
 #
 
-OBJS += $(addprefix $(PREFIX_O)misc/, execinfo.o init.o setjmp.o stack_chk.o)
+OBJS += $(addprefix $(PREFIX_O)misc/, execinfo.o fenv.o init.o setjmp.o stack_chk.o)

@@ -14,6 +14,8 @@
  */
 
 #include <stddef.h>
+#include <stdint.h>
+#include <limits.h>
 #include <sys/types.h>
 #include <sys/mman.h>
 #include <errno.h>
@@ -68,4 +70,63 @@ int mlockall(int flags)
 int munlockall(void)
 {
 	return 0;
+}
+
+
+/* Shared argument check: 0, or the error number (see <sys/mman.h>) */
+static int madvise_check(const void *addr, size_t len)
+{
+	if (((uintptr_t)addr & (PAGE_SIZE - 1u)) != 0u) {
+		return EINVAL;
+	}
+
+	if (len > (UINTPTR_MAX - (uintptr_t)addr)) {
+		return EINVAL;
+	}
+
+	return 0;
+}
+
+
+int posix_madvise(void *addr, size_t len, int advice)
+{
+	switch (advice) {
+		case POSIX_MADV_NORMAL:
+		case POSIX_MADV_RANDOM:
+		case POSIX_MADV_SEQUENTIAL:
+		case POSIX_MADV_WILLNEED:
+		case POSIX_MADV_DONTNEED:
+			break;
+
+		default:
+			return EINVAL;
+	}
+
+	/* Every advice is a hint, so none needs doing */
+	return madvise_check(addr, len);
+}
+
+
+int madvise(void *addr, size_t len, int advice)
+{
+	int err;
+
+	switch (advice) {
+		case MADV_NORMAL:
+		case MADV_RANDOM:
+		case MADV_SEQUENTIAL:
+		case MADV_WILLNEED:
+		case MADV_FREE:
+			err = madvise_check(addr, len);
+			break;
+
+		case MADV_DONTNEED:
+			/* Promises zero-filled pages on the next access, which needs the
+			 * kernel to drop them; it cannot */
+		default:
+			err = EINVAL;
+			break;
+	}
+
+	return (err == 0) ? 0 : SET_ERRNO(-err);
 }

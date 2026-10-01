@@ -16,6 +16,8 @@
 #ifndef _LANGINFO_H_
 #define _LANGINFO_H_
 
+#include <sys/_locale_t.h>
+
 
 typedef int nl_item;
 
@@ -55,6 +57,9 @@ extern "C" {
 
 
 extern char *nl_langinfo(nl_item item);
+
+
+extern char *nl_langinfo_l(nl_item item, locale_t locale);
 
 
 #ifdef __cplusplus

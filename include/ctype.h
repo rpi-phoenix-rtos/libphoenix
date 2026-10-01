@@ -16,6 +16,8 @@
 #ifndef _LIBPHOENIX_CTYPES_H_
 #define _LIBPHOENIX_CTYPES_H_
 
+#include <sys/_locale_t.h>
+
 
 #ifdef __cplusplus
 extern "C" {
@@ -154,6 +156,23 @@ static inline int __isascii(int c)
 	return ((((c) < 0) || ((c) > 0x7f)) ? 0 : 1);
 }
 #define isascii(c)   __isascii(c)
+
+
+/* The same in a given locale (see <locale.h>) */
+int isalnum_l(int c, locale_t locale);
+int isalpha_l(int c, locale_t locale);
+int isblank_l(int c, locale_t locale);
+int iscntrl_l(int c, locale_t locale);
+int isdigit_l(int c, locale_t locale);
+int isgraph_l(int c, locale_t locale);
+int islower_l(int c, locale_t locale);
+int isprint_l(int c, locale_t locale);
+int ispunct_l(int c, locale_t locale);
+int isspace_l(int c, locale_t locale);
+int isupper_l(int c, locale_t locale);
+int isxdigit_l(int c, locale_t locale);
+int tolower_l(int c, locale_t locale);
+int toupper_l(int c, locale_t locale);
 
 
 #ifdef __cplusplus

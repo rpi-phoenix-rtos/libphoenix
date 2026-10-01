@@ -16,6 +16,8 @@
 #ifndef _LIBPHOENIX_LOCALE_H
 #define _LIBPHOENIX_LOCALE_H
 
+#include <sys/_locale_t.h>
+
 
 #ifdef __cplusplus
 extern "C" {
@@ -28,6 +30,22 @@ extern "C" {
 #define LC_MONETARY 3
 #define LC_NUMERIC  4
 #define LC_TIME     5
+#define LC_MESSAGES 6
+
+
+/* Locale objects (POSIX.1-2008). Phoenix has only the C/POSIX locale, so
+ * newlocale() accepts "C", "POSIX" and "" (which names it here) for any
+ * categories, and every locale object is that locale: the *_l() functions
+ * behave exactly as their plain counterparts. uselocale() is per thread. */
+#define LC_COLLATE_MASK  (1 << LC_COLLATE)
+#define LC_CTYPE_MASK    (1 << LC_CTYPE)
+#define LC_MONETARY_MASK (1 << LC_MONETARY)
+#define LC_NUMERIC_MASK  (1 << LC_NUMERIC)
+#define LC_TIME_MASK     (1 << LC_TIME)
+#define LC_MESSAGES_MASK (1 << LC_MESSAGES)
+#define LC_ALL_MASK      (LC_COLLATE_MASK | LC_CTYPE_MASK | LC_MONETARY_MASK | LC_NUMERIC_MASK | LC_TIME_MASK | LC_MESSAGES_MASK)
+
+#define LC_GLOBAL_LOCALE ((locale_t)-1)
 
 
 struct lconv {
@@ -62,6 +80,18 @@ extern char *setlocale(int category, const char *locale);
 
 
 extern struct lconv *localeconv(void);
+
+
+extern locale_t newlocale(int categoryMask, const char *locale, locale_t base);
+
+
+extern locale_t duplocale(locale_t locobj);
+
+
+extern void freelocale(locale_t locobj);
+
+
+extern locale_t uselocale(locale_t newloc);
 
 
 #ifdef __cplusplus

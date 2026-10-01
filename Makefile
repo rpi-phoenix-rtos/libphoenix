@@ -116,11 +116,15 @@ SRCHEADERS := $(shell find include -name \*.h)
 
 install: install-headers install-libs
 
+# libmcs' fenv.h is a placeholder that #errors (its fenv.c is not built, see
+# libm/Makefile); include/fenv.h is the implementation, so it must not be
+# overwritten
+
 install-headers: $(SRCHEADERS)
 	@echo INSTALL "$(HEADERS_INSTALL_DIR)/*"; \
 	mkdir -p "$(HEADERS_INSTALL_DIR)"; \
 	cp -a include/* "$(HEADERS_INSTALL_DIR)"; \
-	cp -a libm/libmcs/libm/include/* "$(HEADERS_INSTALL_DIR)";
+	cp -a $(filter-out %/fenv.h,$(wildcard libm/libmcs/libm/include/*)) "$(HEADERS_INSTALL_DIR)";
 
 # TODO: remove `rm crt0.o` when we will be sure it's not a symlink to libphoenix.a anymore
 install-libs: $(LIB_TARGETS)

@@ -343,6 +343,10 @@ off_t lseek(int fildes, off_t offset, int whence);
 int pipe(int fildes[2]);
 
 
+/* pipe() with O_CLOEXEC and/or O_NONBLOCK set on both ends */
+int pipe2(int fildes[2], int flags);
+
+
 int truncate(const char *path, off_t length);
 
 

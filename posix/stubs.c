@@ -41,6 +41,7 @@ char* setlocale(int category, const char* locale)
 	if (category != LC_ALL &&
 		category != LC_COLLATE &&
 		category != LC_CTYPE &&
+		category != LC_MESSAGES &&
 		category != LC_MONETARY &&
 		category != LC_NUMERIC &&
 		category != LC_TIME) {

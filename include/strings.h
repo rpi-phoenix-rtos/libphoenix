@@ -18,6 +18,7 @@
 
 
 #include <stddef.h>
+#include <sys/_locale_t.h>
 
 
 #ifdef __cplusplus
@@ -31,6 +32,13 @@ extern int strcasecmp(const char *str1, const char *str2);
 
 /* Compares at most the first n bytes of str1 and str2 case-insensitively. */
 extern int strncasecmp(const char *s1, const char *s2, size_t n);
+
+
+/* The same in a given locale (see <locale.h>) */
+extern int strcasecmp_l(const char *s1, const char *s2, locale_t locale);
+
+
+extern int strncasecmp_l(const char *s1, const char *s2, size_t n, locale_t locale);
 
 
 /* Find first set bit */

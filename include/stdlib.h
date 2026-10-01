@@ -17,6 +17,7 @@
 #define _LIBPHOENIX_STDLIB_H_
 
 
+#include <sys/_locale_t.h>
 #include <sys/cdefs.h>
 #include <sys/wait.h>
 #include <stddef.h>
@@ -97,6 +98,16 @@ long long int strtoll(const char *nptr, char **endptr, int base);
 
 /* Converts the string pointed to by the argument nptr to an unsigned long long integer (type unsigned long long int). */
 unsigned long long int strtoull(const char *nptr, char **endptr, int base);
+
+
+/* The strto*() conversions in a given locale (BSD, glibc; see <locale.h>) */
+float strtof_l(const char *__restrict str, char **__restrict endptr, locale_t locale);
+double strtod_l(const char *__restrict str, char **__restrict endptr, locale_t locale);
+long double strtold_l(const char *__restrict str, char **__restrict endptr, locale_t locale);
+long int strtol_l(const char *nptr, char **endptr, int base, locale_t locale);
+unsigned long int strtoul_l(const char *nptr, char **endptr, int base, locale_t locale);
+long long int strtoll_l(const char *nptr, char **endptr, int base, locale_t locale);
+unsigned long long int strtoull_l(const char *nptr, char **endptr, int base, locale_t locale);
 
 
 /* Allocates the requested memory and returns a pointer to it. */

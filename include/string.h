@@ -20,6 +20,7 @@
 #include <sys/cdefs.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <sys/_locale_t.h>
 
 
 /* Included for compability reason */
@@ -89,6 +90,9 @@ extern int strncmp(const char *str1, const char *str2, size_t n);
 extern int strcoll(const char *str1, const char *str2);
 
 
+extern int strcoll_l(const char *str1, const char *str2, locale_t locale);
+
+
 /* Copies the string pointed to by src to dest. Returns a pointer to the destination string dest */
 extern char *strcpy(char *dest, const char *src);
 
@@ -125,6 +129,9 @@ extern size_t strcspn(const char *str1, const char *str2);
 
 /* Searches an internal array for the error number errnum and returns a pointer to an error message string. */
 extern char *strerror(int errnum);
+
+
+extern char *strerror_l(int errnum, locale_t locale);
 
 
 /* Thread-safe strerror. */
@@ -175,6 +182,9 @@ extern char *strtok_r(char *str, const char *delim, char **saveptr);
 
 /* Transforms the first n characters of the string src into corrent locale and places them in the string dest. */
 extern size_t strxfrm(char *dest, const char *src, size_t n);
+
+
+extern size_t strxfrm_l(char *dest, const char *src, size_t n, locale_t locale);
 
 
 extern char *strchrnul(const char *str, int z);

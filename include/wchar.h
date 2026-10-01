@@ -17,6 +17,7 @@
 #define _LIBPHOENIX_WCHAR_H_
 
 
+#include <sys/_locale_t.h>
 #include <stdarg.h>
 #include <stddef.h>
 
@@ -89,6 +90,9 @@ extern int wcswidth(const wchar_t *pwcs, size_t n);
 
 
 extern int wcscoll(const wchar_t *ws1, const wchar_t *ws2);
+
+
+extern int wcscoll_l(const wchar_t *ws1, const wchar_t *ws2, locale_t locale);
 
 
 extern int wctob(wint_t c);

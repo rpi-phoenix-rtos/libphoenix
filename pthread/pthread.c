@@ -16,6 +16,7 @@
 #include <assert.h>
 #include <stdlib.h>
 #include <errno.h>
+#include <fenv.h>
 #include <limits.h>
 #include <stdint.h>
 #include <sys/list.h>
@@ -69,6 +70,7 @@ typedef struct pthread_ctx {
 	int cancelstate;
 	int canceltype;
 	int cancelled;
+	fenv_t fenv; /* the creator's, which the thread starts with */
 	struct __errno_t e;
 	int refcount;
 	struct pthread_key_data_t *key_data_list;
@@ -229,6 +231,10 @@ static void pthread_start_point(void *args)
 	pthread_ctx *ctx = (pthread_ctx *)args;
 
 	_errno_new(&ctx->e);
+
+	/* POSIX: the floating-point environment is inherited from the creator. The
+	 * kernel starts every thread with the default one. */
+	(void)fesetenv(&ctx->fenv);
 
 	void *retval = (void *)(ctx->start_routine(ctx->arg));
 
@@ -391,6 +397,7 @@ int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
 	ctx->canceltype = PTHREAD_CANCEL_DEFERRED;
 	ctx->cancelled = 0;
 	ctx->cleanup_list = NULL;
+	(void)fegetenv(&ctx->fenv);
 	*thread = (pthread_t)ctx;
 
 	mutexLock(pthread_common.pthread_list_lock);

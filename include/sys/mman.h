@@ -63,6 +63,44 @@ extern int mlockall(int flags);
 extern int munlockall(void);
 
 
+/* Memory advice.
+ *
+ * The kernel has no way to drop the pages of a range: anonymous memory stays
+ * backed from mmap() to munmap(). Advice that only describes the expected
+ * access pattern is therefore accepted and ignored, and advice whose effect a
+ * caller may depend on is refused rather than faked:
+ *
+ * - posix_madvise(): all of POSIX_MADV_* succeed. They are hints by
+ *   definition (POSIX_MADV_DONTNEED included: the contents are kept).
+ * - madvise(): MADV_NORMAL, MADV_RANDOM, MADV_SEQUENTIAL and MADV_WILLNEED
+ *   succeed, as does MADV_FREE, which lets the system discard the contents
+ *   and so also allows it to keep them. MADV_DONTNEED fails with EINVAL:
+ *   on Linux it discards a private range, which then reads back as zeros,
+ *   and allocators rely on that to skip zeroing memory they reuse. A caller
+ *   that gets an error falls back to clearing the memory itself.
+ *
+ * The range must start on a page boundary (EINVAL). Whether it is mapped is
+ * not checked. */
+#define POSIX_MADV_NORMAL     0
+#define POSIX_MADV_RANDOM     1
+#define POSIX_MADV_SEQUENTIAL 2
+#define POSIX_MADV_WILLNEED   3
+#define POSIX_MADV_DONTNEED   4
+
+#define MADV_NORMAL     POSIX_MADV_NORMAL
+#define MADV_RANDOM     POSIX_MADV_RANDOM
+#define MADV_SEQUENTIAL POSIX_MADV_SEQUENTIAL
+#define MADV_WILLNEED   POSIX_MADV_WILLNEED
+#define MADV_DONTNEED   POSIX_MADV_DONTNEED
+#define MADV_FREE       8
+
+
+extern int posix_madvise(void *addr, size_t len, int advice);
+
+
+extern int madvise(void *addr, size_t len, int advice);
+
+
 extern addr_t va2pa(void *va);
 
 

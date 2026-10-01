@@ -160,6 +160,14 @@ int pthread_attr_getstack(const pthread_attr_t *attr, void **stackaddr, size_t *
 int pthread_getattr_np(pthread_t thread, pthread_attr_t *attr);
 
 
+/* GNU extension: a thread's name, at most 15 characters (ERANGE otherwise),
+ * as on Linux. The kernel does not show it. */
+int pthread_setname_np(pthread_t thread, const char *name);
+
+
+int pthread_getname_np(pthread_t thread, char *name, size_t len);
+
+
 int pthread_attr_setschedparam(pthread_attr_t *attr, const struct sched_param *param);
 
 

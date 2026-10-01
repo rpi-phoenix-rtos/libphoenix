@@ -19,6 +19,7 @@
 #include <fenv.h>
 #include <limits.h>
 #include <stdint.h>
+#include <string.h>
 #include <sys/list.h>
 #include <sys/mman.h>
 #include <sys/minmax.h>
@@ -36,6 +37,7 @@
 #define PTHREAD_ONCE_DONE          0
 #define PTHREAD_ONCE_IN_PROGRESS   2
 #define PTHREAD_COND_CLOCK_DEFAULT CLOCK_MONOTONIC
+#define PTHREAD_NAME_LEN           16 /* with the NUL, as Linux */
 
 #define RESOURCE_UNINITIALIZED 0
 #define RESOURCE_INITIALIZING  1
@@ -71,6 +73,7 @@ typedef struct pthread_ctx {
 	int canceltype;
 	int cancelled;
 	fenv_t fenv; /* the creator's, which the thread starts with */
+	char name[PTHREAD_NAME_LEN]; /* pthread_setname_np(), "" if none */
 	struct __errno_t e;
 	int refcount;
 	struct pthread_key_data_t *key_data_list;
@@ -303,6 +306,7 @@ static int pthread_create_main(void)
 	ctx->stackaddr = NULL;
 	ctx->stackusable = 0;
 	ctx->guardsize = 0;
+	ctx->name[0] = '\0';
 	ctx->is_detached = (pthread_attr_default.detachstate == PTHREAD_CREATE_DETACHED) ? 1 : 0;
 	ctx->cancelstate = PTHREAD_CANCEL_ENABLE;
 	ctx->canceltype = PTHREAD_CANCEL_DEFERRED;
@@ -392,6 +396,7 @@ int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
 	ctx->stackaddr = (stack == NULL) ? attrs->stackaddr : (char *)stack + guardsize;
 	ctx->stackusable = stacksize - guardsize;
 	ctx->guardsize = guardsize;
+	ctx->name[0] = '\0';
 	ctx->key_data_list = NULL;
 	ctx->cancelstate = PTHREAD_CANCEL_ENABLE;
 	ctx->canceltype = PTHREAD_CANCEL_DEFERRED;
@@ -733,6 +738,49 @@ int pthread_getattr_np(pthread_t thread, pthread_attr_t *attr)
 	}
 
 	return 0;
+}
+
+
+/* The name is kept by this library only: the kernel has no thread names */
+int pthread_setname_np(pthread_t thread, const char *name)
+{
+	pthread_ctx *ctx = (pthread_ctx *)thread;
+	size_t len = strlen(name);
+
+	if (len >= PTHREAD_NAME_LEN) {
+		return ERANGE;
+	}
+
+	mutexLock(pthread_common.pthread_list_lock);
+	if (_pthread_isLive(ctx) == 0) {
+		mutexUnlock(pthread_common.pthread_list_lock);
+		return ESRCH;
+	}
+	memcpy(ctx->name, name, len + 1);
+	mutexUnlock(pthread_common.pthread_list_lock);
+
+	return 0;
+}
+
+
+int pthread_getname_np(pthread_t thread, char *name, size_t len)
+{
+	pthread_ctx *ctx = (pthread_ctx *)thread;
+	int err = 0;
+
+	mutexLock(pthread_common.pthread_list_lock);
+	if (_pthread_isLive(ctx) == 0) {
+		err = ESRCH;
+	}
+	else if (strlen(ctx->name) >= len) {
+		err = ERANGE;
+	}
+	else {
+		strcpy(name, ctx->name);
+	}
+	mutexUnlock(pthread_common.pthread_list_lock);
+
+	return err;
 }
 
 

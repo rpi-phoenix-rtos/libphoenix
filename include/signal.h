@@ -17,6 +17,7 @@
 #define _LIBPHOENIX_SIGNAL_H_
 
 
+#include <stddef.h> /* size_t, for stack_t */
 #include <phoenix/signal.h>
 
 

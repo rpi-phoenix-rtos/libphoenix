@@ -395,6 +395,12 @@ extern pid_t sys_fork(void);
 extern void release(void);
 
 
+/* The child runs under a new tid; _pthread_atfork_child() re-keys the calling
+ * thread's pthread record to it before any child handler runs.
+ *
+ * vfork() is a bare syscall and gets none of this: its child shares the
+ * parent's memory, so re-keying would corrupt the PARENT's records. It may only
+ * call _exit() or an exec function (POSIX), which need none of them. */
 pid_t fork(void)
 {
 	pid_t pid;
@@ -403,11 +409,13 @@ pid_t fork(void)
 		release();
 		_pthread_atfork_child();
 	}
-	else if (pid < 0) {
-		return SET_ERRNO(pid);
-	}
 	else {
+		/* Also on failure: prepare handlers typically take locks that only the
+		 * parent handlers release, and the thread list is held until then. */
 		_pthread_atfork_parent();
+		if (pid < 0) {
+			return SET_ERRNO(pid);
+		}
 	}
 	return pid;
 }

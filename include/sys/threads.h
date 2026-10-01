@@ -194,6 +194,16 @@ int condSignal(handle_t h);
 int condBroadcast(handle_t h);
 
 
+/* Sleeps while *addr == val, for at most `timeout` (`clock` as in phMutexLock(),
+ * timeout 0 = no limit). Returns EOK when woken (wake-ups may be spurious),
+ * -EAGAIN if *addr did not hold val, -ETIME or -EINTR. */
+int futexWait(volatile unsigned int *addr, unsigned int val, time_t timeout, int clock);
+
+
+/* Wakes up to `count` threads sleeping in futexWait() on addr, returns how many */
+int futexWake(volatile unsigned int *addr, unsigned int count);
+
+
 int resourceDestroy(handle_t h);
 
 

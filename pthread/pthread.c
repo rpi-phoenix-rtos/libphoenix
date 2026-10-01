@@ -617,7 +617,7 @@ int pthread_detach(pthread_t thread)
 static int pthread_stackLookup(const void *hint, void **addr, size_t *size)
 {
 	meminfo_t info;
-	entryinfo_t one, *map = &one;
+	entryinfo_t one = { 0 }, *map = &one;
 	int mapsz = 1, count, i, err = ESRCH;
 
 	for (;;) {
@@ -639,7 +639,9 @@ static int pthread_stackLookup(const void *hint, void **addr, size_t *size)
 			free(map);
 		}
 		mapsz = count + 16;
-		map = malloc((size_t)mapsz * sizeof(*map));
+		/* Zeroed: should the kernel reject the request it leaves the entries as
+		 * they are, and no zero-sized entry holds the hint */
+		map = calloc((size_t)mapsz, sizeof(*map));
 		if (map == NULL) {
 			return ENOMEM;
 		}

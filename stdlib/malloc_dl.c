@@ -44,6 +44,21 @@
 #define CHUNK_MIN_SIZE          CEIL(__builtin_offsetof(chunk_t, node) + sizeof(size_t), 8U)
 #define CHUNK_SMALLBIN_MAX_SIZE (256U - CHUNK_OVERHEAD)
 
+/* A heap that becomes entirely free is kept mapped, up to these limits, and
+ * reused by the next allocation it can serve (see malloc_heapRetain()). Without
+ * it a program that allocates and frees a large block per frame -- a decoder's
+ * output buffer, say -- pays a fresh mmap(), a page fault per page and a
+ * munmap() every frame, and a batch of small blocks pays the same for each heap
+ * it fills. NOMMU targets keep the old behaviour: memory there is shared with
+ * every other process, so a freed heap goes back at once. */
+#ifndef NOMMU
+#define MALLOC_RETAIN_MAX   64U
+#define MALLOC_RETAIN_BYTES (16U * 1024U * 1024U)
+#else
+#define MALLOC_RETAIN_MAX   1U
+#define MALLOC_RETAIN_BYTES 0U
+#endif
+
 
 typedef struct {
 	size_t size;
@@ -88,6 +103,14 @@ struct {
 	 * plausibility filter for a wild pointer, not exact membership. */
 	uintptr_t heapLo;
 	uintptr_t heapHi;
+
+	/* Fully free heaps kept for reuse, oldest first, and their total size. Each
+	 * one's single chunk stays in its free bin. Plain state under the heap lock,
+	 * so fork() needs nothing extra: _malloc_forkPrepare() holds the lock across
+	 * the copy, and the child's list names the child's copies of those heaps. */
+	heap_t *retained[MALLOC_RETAIN_MAX];
+	unsigned int nretained;
+	size_t retainedsz;
 
 	volatile unsigned int lock; /* the heap lock, see malloc_lock() */
 	int forkLocked;             /* malloc_forkPrepare() took the lock */
@@ -937,6 +960,88 @@ static void malloc_heapInit(heap_t *heap, size_t size)
 }
 
 
+/* Return a fully free heap to the system. Its single chunk must still be in its
+ * free bin. Returns 0 if the heap was unmapped, -1 if it had to be leaked. */
+static int malloc_heapRelease(heap_t *heap)
+{
+	/* Only release if the chunk really left its bin. _malloc_chunkRemove()
+	 * ABANDONS the bin when a link fails validation, and unmapping anyway would
+	 * leave that bin pointing into memory we gave back -- which mmap then reuses,
+	 * so the entry later reads as a sane header belonging to the NEXT heap.
+	 * Leaking one heap is strictly better. */
+	if (_malloc_chunkRemove((chunk_t *)heap->space) == 0) {
+		debug("malloc: heap release ABANDONED -- chunk still binned; leaking the heap\n");
+		malloc_debugHex("malloc:   heap = ", (uintptr_t)heap);
+		return -1;
+	}
+
+	malloc_common.released[malloc_common.relIdx & 7u].base = (uintptr_t)heap;
+	malloc_common.released[malloc_common.relIdx & 7u].size = heap->size;
+	++malloc_common.relIdx;
+
+	/* A failed munmap leaves the region mapped while released[] already says it
+	 * is gone, so malloc_chunkValid() would reject every later block in it. The
+	 * kernel is not expected to fail here, but say so if it does. */
+	malloc_common.mapsz -= heap->size;
+	if (munmap(heap, heap->size) < 0) {
+		debug("malloc: munmap of a released heap FAILED -- released[] now lies\n");
+		malloc_debugHex("malloc:   heap  = ", (uintptr_t)heap);
+		malloc_debugHex("malloc:   hsize = ", (uintptr_t)heap->size);
+	}
+
+	return 0;
+}
+
+
+static void malloc_heapUnretainAt(unsigned int i)
+{
+	malloc_common.retainedsz -= malloc_common.retained[i]->size;
+	malloc_common.nretained--;
+	memmove(&malloc_common.retained[i], &malloc_common.retained[i + 1U],
+		(malloc_common.nretained - i) * sizeof(malloc_common.retained[0]));
+}
+
+
+/* A heap has just become entirely free: keep it for the next request it can
+ * serve instead of unmapping it. Its chunk is already in a free bin, so the
+ * ordinary bin search finds it; nothing else changes. The oldest kept heaps are
+ * released to stay within MALLOC_RETAIN_MAX heaps and MALLOC_RETAIN_BYTES
+ * bytes, and a heap larger than the byte limit is released at once. */
+static void malloc_heapRetain(heap_t *heap)
+{
+	if (heap->size > MALLOC_RETAIN_BYTES) {
+		(void)malloc_heapRelease(heap);
+		return;
+	}
+
+	while ((malloc_common.nretained >= MALLOC_RETAIN_MAX) ||
+			((malloc_common.retainedsz + heap->size) > MALLOC_RETAIN_BYTES)) {
+		heap_t *oldest = malloc_common.retained[0];
+
+		malloc_heapUnretainAt(0);
+		(void)malloc_heapRelease(oldest);
+	}
+
+	malloc_common.retained[malloc_common.nretained++] = heap;
+	malloc_common.retainedsz += heap->size;
+}
+
+
+/* A kept heap is about to hold a block, so it may no longer be released. */
+static void malloc_heapUnretain(const heap_t *heap)
+{
+	unsigned int i;
+
+	/* Newest first: the heap freed last is the likeliest to be reused */
+	for (i = malloc_common.nretained; i > 0U; i--) {
+		if (malloc_common.retained[i - 1U] == heap) {
+			malloc_heapUnretainAt(i - 1U);
+			return;
+		}
+	}
+}
+
+
 static heap_t *_malloc_heapAlloc(size_t size)
 {
 	chunk_t *chunk;
@@ -1038,6 +1143,14 @@ static inline void *_malloc_allocFrom(chunk_t *chunk, size_t size)
 		malloc_debugHex("malloc:   heapLo= ", malloc_common.heapLo);
 		malloc_debugHex("malloc:   heapHi= ", malloc_common.heapHi);
 		_exit(EX_SOFTWARE);
+	}
+
+	/* An entirely free heap may be one kept by malloc_heapRetain(); once it holds
+	 * this block it must leave that list. Tested before the split and the freesz
+	 * update below, while "entirely free" is still visible. A fresh heap from
+	 * _malloc_heapAlloc() passes the test too and is simply not found. */
+	if (chunk->heap->freesz == (chunk->heap->size - sizeof(heap_t))) {
+		malloc_heapUnretain(chunk->heap);
 	}
 
 	if (malloc_chunkCanSplit(chunk, size)) {
@@ -1553,36 +1666,7 @@ void free(void *ptr)
 			malloc_debugHex("malloc:   csize = ", (uintptr_t)malloc_chunkSize(chunk));
 		}
 		else {
-			/* Only release if the chunk really left its bin. _malloc_chunkRemove()
-			 * ABANDONS the bin when a link fails validation, and unmapping anyway
-			 * leaves that bin pointing into memory we just gave back -- which mmap
-			 * then reuses, so the entry later reads as a sane header belonging to
-			 * the NEXT heap. That is the dangling entry this allocator has been
-			 * chasing; it faulted inside malloc_chunkValid() on a canonical,
-			 * page-aligned chunk that sat inside the range the stale header
-			 * claimed. Leaking one heap is strictly better, which is the same
-			 * trade the size check above already makes. */
-			if (_malloc_chunkRemove(chunk) == 0) {
-				debug("malloc: heap release ABANDONED -- chunk still binned; leaking the heap\n");
-				malloc_debugHex("malloc:   heap = ", (uintptr_t)heap);
-				malloc_unlock(locked);
-				return;
-			}
-			malloc_common.released[malloc_common.relIdx & 7u].base = (uintptr_t)heap;
-			malloc_common.released[malloc_common.relIdx & 7u].size = heap->size;
-			++malloc_common.relIdx;
-			/* A failed munmap leaves the region mapped while released[] already says
-			 * it is gone, so malloc_chunkValid() would reject every later block in it
-			 * and the address never comes back through mmap. The kernel's aarch64
-			 * pmap_remove() cannot fail, and _vm_munmap() leaves un-processed entries
-			 * in the tree when it gives up, so this is not expected -- but it was
-			 * discarded, which is why nobody could have known. */
-			malloc_common.mapsz -= heap->size;
-			if (munmap(heap, heap->size) < 0) {
-				debug("malloc: munmap of a released heap FAILED -- released[] now lies\n");
-				malloc_debugHex("malloc:   heap  = ", (uintptr_t)heap);
-				malloc_debugHex("malloc:   hsize = ", (uintptr_t)heap->size);
-			}
+			malloc_heapRetain(heap);
 		}
 	}
 
@@ -1861,6 +1945,27 @@ void mallocInfo(mallocInfo_t *info)
 	info->freesz = malloc_common.freesz;
 	info->maxalloc = malloc_common.maxalloc;
 	malloc_unlock(locked);
+}
+
+
+int malloc_trim(size_t pad)
+{
+	int released = 0;
+	const int locked = malloc_lock();
+
+	/* Oldest first, until at most `pad` bytes of kept heaps remain */
+	while ((malloc_common.nretained > 0U) && (malloc_common.retainedsz > pad)) {
+		heap_t *heap = malloc_common.retained[0];
+
+		malloc_heapUnretainAt(0);
+		if (malloc_heapRelease(heap) == 0) {
+			released = 1;
+		}
+	}
+
+	malloc_unlock(locked);
+
+	return released;
 }
 
 

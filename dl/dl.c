@@ -97,6 +97,7 @@ typedef struct {
 #define EM_AARCH64   183
 #define PT_LOAD      1
 #define PT_DYNAMIC   2
+#define PT_TLS       7
 #define PF_X         0x1
 #define PF_W         0x2
 #define SHT_SYMTAB   2
@@ -127,6 +128,10 @@ typedef struct {
 #define R_AARCH64_GLOB_DAT     1025
 #define R_AARCH64_JUMP_SLOT    1026
 #define R_AARCH64_RELATIVE     1027
+#define R_AARCH64_TLS_DTPMOD64 1028
+#define R_AARCH64_TLS_DTPREL64 1029
+#define R_AARCH64_TLS_TPREL64  1030
+#define R_AARCH64_TLSDESC      1031
 
 #define PAGE_SZ 0x1000UL
 #define PAGE_DOWN(x) ((x) & ~(PAGE_SZ - 1UL))
@@ -478,6 +483,10 @@ void *dlopen(const char *filename, int flags)
 		else if (ph[i].p_type == PT_DYNAMIC) {
 			dyn_vaddr = ph[i].p_vaddr;
 		}
+		else if (ph[i].p_type == PT_TLS) {
+			dl_seterr("dlopen: thread-local storage in a loaded object is not supported", filename);
+			goto fail;
+		}
 	}
 	if (vmin == ~0ULL || dyn_vaddr == 0) {
 		dl_seterr("dlopen: no PT_LOAD/PT_DYNAMIC", filename);
@@ -594,6 +603,12 @@ void *dlopen(const char *filename, int flags)
 					}
 					*where = val + r->r_addend;
 					break;
+				case R_AARCH64_TLS_DTPMOD64:
+				case R_AARCH64_TLS_DTPREL64:
+				case R_AARCH64_TLS_TPREL64:
+				case R_AARCH64_TLSDESC:
+					dl_seterr("dlopen: thread-local storage in a loaded object is not supported", filename);
+					goto fail;
 				default:
 					dl_seterr("dlopen: unsupported reloc type", filename);
 					goto fail;

@@ -1565,6 +1565,7 @@ void free(void *ptr)
 			if (_malloc_chunkRemove(chunk) == 0) {
 				debug("malloc: heap release ABANDONED -- chunk still binned; leaking the heap\n");
 				malloc_debugHex("malloc:   heap = ", (uintptr_t)heap);
+				malloc_unlock(locked);
 				return;
 			}
 			malloc_common.released[malloc_common.relIdx & 7u].base = (uintptr_t)heap;

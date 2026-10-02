@@ -6,9 +6,12 @@
  * dlfcn.h — in-process dynamic loading (dlopen/dlsym/dlclose/dlerror)
  *
  * Loads a -fPIC ET_DYN shared object into the running process and resolves its
- * undefined symbols against the host executable's symbol table. Phase A of
- * dynamic-linking support (no kernel change); see the dynamic-linking design
- * doc in the coordination repo.
+ * undefined symbols against the symbols the program exports: its dynamic symbol
+ * table, which a static program gets by linking with
+ *     -Wl,--no-dynamic-linker -Wl,--dynamic-list=<file>  (or -Wl,--export-dynamic),
+ * or, for a program without one, the .symtab of the unstripped program file.
+ * Phase A of dynamic-linking support (no kernel change); see dl/dl.c and the
+ * dynamic-linking design doc in the coordination repo.
  *
  * Copyright 2026 Phoenix Systems
  * Author: Phoenix-RTOS RPi4 port

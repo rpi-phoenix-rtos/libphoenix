@@ -896,14 +896,16 @@ static void pthread_key_cleanup(pthread_ctx *ctx)
 	}
 
 	pthread_key_data_t *key_data = ctx->key_data_list;
+	ctx->key_data_list = NULL;
+
+	mutexUnlock(pthread_common.pthread_key_lock);
+
+	/* Freed with the lock released: the allocator may re-enter the key functions */
 	while (key_data != NULL) {
 		pthread_key_data_t *curr = key_data;
 		key_data = key_data->next;
 		free(curr);
 	}
-	ctx->key_data_list = NULL;
-
-	mutexUnlock(pthread_common.pthread_key_lock);
 }
 
 
@@ -2365,6 +2367,7 @@ int pthread_key_create(pthread_key_t *key, void (*destructor)(void *))
 int pthread_key_delete(pthread_key_t key)
 {
 	int err = EINVAL;
+	pthread_key_data_t *unlinked = NULL;
 	mutexLock(pthread_common.pthread_list_lock);
 
 	pthread_ctx *first = pthread_common.pthread_list, *curr = pthread_common.pthread_list;
@@ -2384,7 +2387,8 @@ int pthread_key_delete(pthread_key_t key)
 						else {
 							prev->next = head->next;
 						}
-						free(head);
+						head->next = unlinked;
+						unlinked = head;
 					}
 					else {
 						/* Prevent further calls to destructor. */
@@ -2400,8 +2404,28 @@ int pthread_key_delete(pthread_key_t key)
 		mutexUnlock(pthread_common.pthread_key_lock);
 	}
 	mutexUnlock(pthread_common.pthread_list_lock);
+
+	/* Freed with the locks released, as in pthread_setspecific() */
+	while (unlinked != NULL) {
+		pthread_key_data_t *next = unlinked->next;
+		free(unlinked);
+		unlinked = next;
+	}
 	free(key);
 	return err;
+}
+
+
+/* Caller holds pthread_key_lock */
+static pthread_key_data_t *pthread_key_find(pthread_ctx *ctx, pthread_key_t key)
+{
+	pthread_key_data_t *head = ctx->key_data_list;
+
+	while ((head != NULL) && (head->key != key)) {
+		head = head->next;
+	}
+
+	return head;
 }
 
 
@@ -2426,29 +2450,39 @@ int pthread_setspecific(pthread_key_t key, const void *value)
 
 	pthread_ctx_get(ctx);
 	mutexLock(pthread_common.pthread_key_lock);
-	pthread_key_data_t *head = ctx->key_data_list;
-
-	while (head != NULL) {
-		if (head->key == key) {
-			head->value = (void *)value;
-			break;
-		}
-		head = head->next;
-	}
+	pthread_key_data_t *head = pthread_key_find(ctx, key), *node = NULL;
 
 	if (head == NULL) {
-		head = (pthread_key_data_t *)malloc(sizeof(pthread_key_data_t));
-		if (head == NULL) {
-			err = ENOMEM;
-		}
-		else {
-			head->key = key;
-			head->value = (void *)value;
-			head->next = ctx->key_data_list;
-			ctx->key_data_list = head;
+		/* A new entry: allocate it with pthread_key_lock RELEASED. The allocator
+		 * may itself call pthread_setspecific() -- mimalloc does, on a thread's
+		 * first allocation (_mi_prim_thread_associate_default_heap) -- and
+		 * pthread_key_lock is not recursive, so allocating under it deadlocked
+		 * that thread on itself and then every thread after it on the lock (the
+		 * WPE WebKit start hang, 2026-10-02). The allocation may also have added
+		 * entries to this thread's list, so look again before inserting. */
+		mutexUnlock(pthread_common.pthread_key_lock);
+		node = (pthread_key_data_t *)malloc(sizeof(pthread_key_data_t));
+		mutexLock(pthread_common.pthread_key_lock);
+		head = pthread_key_find(ctx, key);
+		if ((head == NULL) && (node != NULL)) {
+			node->key = key;
+			node->next = ctx->key_data_list;
+			ctx->key_data_list = node;
+			head = node;
+			node = NULL;
 		}
 	}
+
+	if (head != NULL) {
+		head->value = (void *)value;
+	}
+	else {
+		err = ENOMEM;
+	}
 	mutexUnlock(pthread_common.pthread_key_lock);
+
+	/* Not inserted: the entry appeared while the lock was released */
+	free(node);
 
 	pthread_ctx_put(ctx);
 	return err;

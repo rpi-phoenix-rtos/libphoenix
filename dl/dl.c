@@ -18,6 +18,7 @@
  * Handles the relocation types a PIC .so emits on aarch64 (RELATIVE, GLOB_DAT,
  * JUMP_SLOT, ABS64). A loaded object's undefined symbols are resolved against
  * (1) its own defined symbols, then (2) the symbols the HOST executable exports.
+ * An undefined weak symbol that neither defines resolves to 0.
  *
  * What the host exports, in order of preference:
  *
@@ -101,6 +102,7 @@ typedef struct {
 #define SHT_SYMTAB   2
 #define SHN_UNDEF    0
 #define STB_LOCAL    0
+#define STB_WEAK     2
 #define STT_OBJECT   1
 #define STT_FUNC     2
 #define ELF64_ST_BIND(i) ((i) >> 4)
@@ -120,6 +122,7 @@ typedef struct {
 #define ELF64_R_SYM(i)  ((uint32_t)((i) >> 32))
 #define ELF64_R_TYPE(i) ((uint32_t)((i) & 0xffffffffU))
 
+#define R_AARCH64_NONE         0
 #define R_AARCH64_ABS64        257
 #define R_AARCH64_GLOB_DAT     1025
 #define R_AARCH64_JUMP_SLOT    1026
@@ -386,11 +389,15 @@ static const Elf64_Sym *dl_hostLookup(const char *name)
 
 
 /* Resolve symbol symidx of object o to its runtime address: the object's own definition,
- * else the host's export. */
+ * else the host's export. An undefined weak symbol nobody defines is 0. */
 static int dl_resolve(dl_obj_t *o, uint32_t symidx, uint64_t *val)
 {
 	const Elf64_Sym *s, *hs;
 
+	if (symidx == 0) {
+		*val = 0; /* no symbol: the relocation is the addend alone */
+		return 0;
+	}
 	s = &o->dyn.sym[symidx];
 	if (s->st_shndx != SHN_UNDEF) {
 		*val = (uint64_t)o->bias + s->st_value;
@@ -399,6 +406,10 @@ static int dl_resolve(dl_obj_t *o, uint32_t symidx, uint64_t *val)
 	hs = dl_hostLookup(o->dyn.str + s->st_name);
 	if (hs != NULL) {
 		*val = hs->st_value;
+		return 0;
+	}
+	if (ELF64_ST_BIND(s->st_info) == STB_WEAK) {
+		*val = 0;
 		return 0;
 	}
 	return -1;
@@ -568,6 +579,8 @@ void *dlopen(const char *filename, int flags)
 			uint64_t val;
 
 			switch (type) {
+				case R_AARCH64_NONE:
+					break;
 				case R_AARCH64_RELATIVE:
 					*where = (uint64_t)bias + r->r_addend;
 					break;

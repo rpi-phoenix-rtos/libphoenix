@@ -66,8 +66,8 @@ typedef uint64_t uint_least64_t;
 #define INT32_MAX (2147483647)
 #define INT64_MAX (INT64_C(9223372036854775807))
 
-#define UINT8_MAX  (0xffU)
-#define UINT16_MAX (0xffffU)
+#define UINT8_MAX  (255)
+#define UINT16_MAX (65535)
 #define UINT32_MAX (0xffffffffU)
 #define UINT64_MAX (UINT64_C(0xffffffffffffffff))
 

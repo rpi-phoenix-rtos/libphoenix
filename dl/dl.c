@@ -39,6 +39,9 @@
  * DT_GNU_HASH-only objects (link them with -Wl,--hash-style=sysv or =both),
  * symbol preemption by the host of an object's own definitions, DT_NEEDED.
  *
+ * Setting LD_DEBUG in the environment prints one line per host export table
+ * and per loaded object to stderr.
+ *
  * Copyright 2026 Phoenix Systems
  * Author: Phoenix-RTOS RPi4 port
  *
@@ -196,6 +199,14 @@ static void dl_seterr(const char *msg, const char *arg)
 		(void)snprintf(dl_errbuf, sizeof(dl_errbuf), "%s", msg);
 	}
 	dl_haveErr = 1;
+}
+
+
+static int dl_debug(void)
+{
+	const char *v = getenv("LD_DEBUG");
+
+	return ((v != NULL) && (*v != '\0')) ? 1 : 0;
 }
 
 
@@ -383,6 +394,13 @@ static void dl_hostInit(void)
 		dl_progInit();
 		dl_host.tab = dl_prog.symtab;
 	}
+
+	if (dl_debug() != 0) {
+		fprintf(stderr, "dl: host %s exports %s, %u symbols\n",
+			(argv_progname != NULL) ? argv_progname : "?",
+			(dl_host.fromDynsym != 0) ? ".dynsym" : ((dl_host.tab.sym != NULL) ? ".symtab (file)" : "nothing"),
+			(dl_host.tab.nsym != 0) ? (unsigned int)(dl_host.tab.nsym - 1) : 0U); /* index 0 is the null symbol */
+	}
 }
 
 
@@ -432,7 +450,7 @@ void *dlopen(const char *filename, int flags)
 	uint64_t vmin = ~0ULL, vmax = 0, dyn_vaddr = 0;
 	const Elf64_Dyn *dyn;
 	uint64_t rela = 0, relasz = 0, jmprel = 0, pltrelsz = 0, hashv = 0;
-	uint64_t ia = 0, iasz = 0, k;
+	uint64_t ia = 0, iasz = 0, k, nreloc = 0;
 	uintptr_t bias;
 
 	(void)flags; /* relocation is always eager */
@@ -587,6 +605,7 @@ void *dlopen(const char *filename, int flags)
 			uint64_t *where = (uint64_t *)(bias + r->r_offset);
 			uint64_t val;
 
+			nreloc++;
 			switch (type) {
 				case R_AARCH64_NONE:
 					break;
@@ -624,6 +643,12 @@ void *dlopen(const char *filename, int flags)
 				fns[k]();
 			}
 		}
+	}
+
+	if (dl_debug() != 0) {
+		fprintf(stderr, "dl: loaded %s base=%p symbols=%u relocs=%u init=%u\n", filename,
+			(void *)o->map_base, (unsigned int)(o->dyn.nsym - 1), (unsigned int)nreloc,
+			(unsigned int)(iasz / sizeof(void *)));
 	}
 
 	free(fbuf);

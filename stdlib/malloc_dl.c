@@ -44,6 +44,21 @@
 #define CHUNK_MIN_SIZE          CEIL(__builtin_offsetof(chunk_t, node) + sizeof(size_t), 8U)
 #define CHUNK_SMALLBIN_MAX_SIZE (256U - CHUNK_OVERHEAD)
 
+/* A heap that becomes entirely free is kept mapped, up to these limits, and
+ * reused by the next allocation it can serve (see malloc_heapRetain()). Without
+ * it a program that allocates and frees a large block per frame -- a decoder's
+ * output buffer, say -- pays a fresh mmap(), a page fault per page and a
+ * munmap() every frame, and a batch of small blocks pays the same for each heap
+ * it fills. NOMMU targets keep the old behaviour: memory there is shared with
+ * every other process, so a freed heap goes back at once. */
+#ifndef NOMMU
+#define MALLOC_RETAIN_MAX   64U
+#define MALLOC_RETAIN_BYTES (16U * 1024U * 1024U)
+#else
+#define MALLOC_RETAIN_MAX   1U
+#define MALLOC_RETAIN_BYTES 0U
+#endif
+
 
 typedef struct {
 	size_t size;
@@ -75,87 +90,27 @@ struct {
 	size_t maxalloc;
 
 	/* The last few heaps handed back to the kernel, newest at `relIdx - 1`.
-	 *
-	 * Diagnostic, not bookkeeping: a free-bin entry must never point into a heap
-	 * we have released, so if a rejected link falls inside one of these the entry
-	 * is a STALE POINTER INTO RECYCLED MEMORY -- proven, not inferred. That is
-	 * the reading the field data points at: one report's chunk decoded as a fresh
-	 * heap header (hbase?=1) while another at the same stride decoded as live
-	 * 16-bit GPU index data (0,1,2,3,...), which is what recycled memory looks
-	 * like when you read it as a chunk. mmap reuses addresses, so "looks sane"
-	 * and "looks like garbage" are the same defect seen at different moments. */
+	 * A chunk pointer into one of them is a stale pointer into memory mmap may
+	 * already have reused, so malloc_chunkValidWhy() rejects it (code 2). */
 	struct {
 		uintptr_t base;
 		size_t size;
 	} released[8];
 	unsigned int relIdx;
 
-	/* Base addresses of heaps currently mmap'd, newest wrapping at 16.
-	 *
-	 * Settles the one reading `hbase?=` cannot: that test is a value test, so a
-	 * LIVE allocated block whose payload happens to begin with a size-like word
-	 * and a self-pointer -- a perfectly ordinary embedded list head -- would also
-	 * satisfy it. If the rejected address instead matches a base we actually
-	 * mmap'd, it IS a heap base and no coincidence is involved. Paired with
-	 * `freed?=` (which reads 0 on every event so far, i.e. the heap was never
-	 * released) this says whether a LIVE heap's base is sitting in a free bin. */
-	/* 256 slots, not 16: SuperTuxKart gives almost every large allocation its own
-	 * mmap'd heap, so a 16-entry ring evicts a base long before a bin entry
-	 * pointing at it is rejected -- which makes `lheap?=0` mean "evicted" rather
-	 * than "never a heap" and renders the field useless. Measured: 3 events all
-	 * read lheap?=0 while hbase?=1, with no way to tell the readings apart.
-	 * 2 KiB of BSS is a fair price for a verdict that discriminates. */
-	uintptr_t live[256];
-	/* The size each entry was created with, recorded at insert. Two jobs:
-	 * malloc_liveOverlap() can then do a PURE VALUE test with no dereference at
-	 * all (the strongest form of the 2026-09-25 fix -- it removes the unsafe read
-	 * rather than guarding it), and an entry that turns out to name an unmapped
-	 * page can report the size it was born with, which says whether the slot was
-	 * ever an honest heap or is simply corrupt. */
-	size_t liveSize[256];
-	unsigned int liveIdx;
-	unsigned int liveOverflow;
-
 	/* Address window of every heap this allocator has ever mmap'd. Only ever
-	 * widened, so a munmap'd heap leaves its range inside the window -- that is
-	 * fine, this is a plausibility filter, not exact membership, and it costs two
-	 * comparisons on a path that already holds the mutex.
-	 *
-	 * It exists because malloc_chunkValid() could not tell a real header from a
-	 * fabricated one. On 2026-09-09 a child in the AF_UNIX liveness test called
-	 * free() on a garbage pointer (0x25e0); the allocator read chunk->heap =
-	 * 0x2000 out of low memory, and that "heap" passed every existing check --
-	 * 0x2000 IS page-aligned, its "size" 0x1000 IS a page multiple, and 0x25e0 IS
-	 * inside 0x2000..0x3000. So the block looked valid, its in-use bit was clear,
-	 * and the allocator reported a DOUBLE FREE and exited EX_SOFTWARE.
-	 *
-	 * ⚠ CORRECTION (measured 2026-09-09, later): the first version of this comment
-	 * argued the pointer must be garbage because "no mmap returns page 2". That is
-	 * FALSE on this port -- a real STK process reports heapLo=0x2000, so the very
-	 * first heap does live at page 2. The window is still worth having as a cheap
-	 * plausibility filter for a WILD pointer, but it does not prove anything about
-	 * that earlier report, and the stray-free conclusion drawn from it does not
-	 * stand on this evidence. */
+	 * widened, so a munmap'd heap leaves its range inside the window: this is a
+	 * plausibility filter for a wild pointer, not exact membership. */
 	uintptr_t heapLo;
 	uintptr_t heapHi;
 
-	/* TODO(C1-hunt): remove with the rest of the C1 instrument once the stray
-	 * write is named. Every archived C1 fire smashes a heap whose size is
-	 * 0xd000, while the ordinary heap here is 0x2000 -- so the victim is always
-	 * whatever single large request created that heap, and naming the request
-	 * names the code that owns the memory on either side of the smashed header.
-	 * lastCaller is set by malloc() alone, from __builtin_return_address(0),
-	 * which is the only level this build can trust (-fomit-frame-pointer). An
-	 * allocation arriving through calloc()/realloc() therefore names THEM, not
-	 * the application -- which is still a useful answer, just read it as one. */
-	uintptr_t lastCaller;
-	unsigned int bigHeapReports;
-
-	/* TODO(C1-hunt): remove with the rest of the C1 instrument. Sweep state for
-	 * malloc_c1Scan() -- see it for why WHEN is worth more than WHO here. */
-	unsigned int scanTick;
-	unsigned int scanReports;
-	uintptr_t scanLastBase;
+	/* Fully free heaps kept for reuse, oldest first, and their total size. Each
+	 * one's single chunk stays in its free bin. Plain state under the heap lock,
+	 * so fork() needs nothing extra: _malloc_forkPrepare() holds the lock across
+	 * the copy, and the child's list names the child's copies of those heaps. */
+	heap_t *retained[MALLOC_RETAIN_MAX];
+	unsigned int nretained;
+	size_t retainedsz;
 
 	volatile unsigned int lock; /* the heap lock, see malloc_lock() */
 	int forkLocked;             /* malloc_forkPrepare() took the lock */
@@ -241,33 +196,15 @@ static inline bool malloc_chunkIsFirst(chunk_t *chunk)
 static void malloc_reportBadHeapSize(const char *where, const heap_t *heap);
 
 
-/* The missing UPPER bound on heap->size.
+/* Is heap->size plausible for this heap? Page-aligned, at least a header, and
+ * not reaching past the window mmap has handed us (heapHi), so a corrupted size
+ * (e.g. a garbage high half over a legal low half) cannot send a chunk walk to a
+ * wild address. Wrap is tested separately so `base + size` cannot pass by
+ * overflowing.
  *
- * Measured (2026-09-12, three separate boots across two builds): a LIVE heap whose
- * ->size reads 0x80000001_0000d000 when the real size is 0xd000 -- the low 32 bits
- * intact, garbage in the high half. That value is page-aligned and far larger than
- * sizeof(heap_t), so it satisfied every test malloc_chunkValid() applied, and the
- * walk then evaluated `heap + heap->size` into a wild address and dereferenced it.
- * The report prints heapEnd = 0x80000001_0ccad000 and heapEnd - size is exactly the
- * heap base, so the faulting pointer is that arithmetic and nothing else.
- *
- * A heap cannot extend past the window mmap has actually handed us, so heapHi bounds
- * it exactly. Wrap is tested separately: base + size overflowing would otherwise make
- * the range test below pass by accident.
- *
- * ⚠ CORRECTED 2026-09-25: this comment used to end "Safe to call on the paths where
- * ->heap may itself be wrong -- it vets the pointer before dereferencing it, which is
- * the whole reason it exists." That is FALSE, and it contradicted the note on the
- * heapLo/heapHi fields themselves, which states plainly that the window is "only ever
- * widened", that a munmap'd heap therefore "leaves its range inside the window", and is
- * "a plausibility filter, not exact membership". A released heap leaves a hole inside
- * the window, so a page-aligned value sitting in one passes every test here and then
- * FAULTS at the read below. Measured: /bin/ntpclient died at this line with
- * far=0x5000 while the window ran [0x2000, ~0x43c000) (run c1hpa01, 2026-09-25) --
- * the guard meant to make a bad pointer safe was itself the faulting instruction.
- *
- * So this returns "plausible", NOT "safe to dereference". A caller that may hold an
- * unmapped address must establish mapping separately -- see malloc_heapMapped(). */
+ * This answers "plausible", NOT "safe to dereference": a released heap leaves
+ * a hole inside the window, so a page-aligned pointer into that hole passes the
+ * window test and then faults on the read of ->size. */
 static int malloc_heapSizeValid(const heap_t *heap)
 {
 	uintptr_t base = (uintptr_t)heap;
@@ -294,32 +231,6 @@ static int malloc_heapSizeValid(const heap_t *heap)
 	}
 
 	return 1;
-}
-
-
-/* Is this page actually mapped right now? The only test in reach that answers the
- * question malloc_heapSizeValid() cannot: va2pa() is pmap_resolve(), which returns 0
- * for an invalid descriptor, so 0 means "no translation" rather than "physical page
- * zero". Kept OUT of malloc_heapSizeValid() deliberately -- that runs on the coalesce
- * path for every free, and a syscall there would trade a rare fault for a permanent
- * slowdown on the hottest path in the allocator.
- *
- * ⚠ It reports the PAGE TABLE, not the VMA, so a reserved-but-never-touched page reads
- * as unmapped. That is not a concern for the live[] ring: _malloc_heapAlloc() writes
- * heap->size immediately after mmap(), so a live heap's header page is always resident.
- * Do not reuse this as a general "is this address legal" test.
- *
- * ⚠ PRECONDITION: `base` MUST be page-aligned. va2pa() is
- * (pmap_resolve(va & ~0xfff) & ~0xfff) + (va & 0xfff), so on an unmapped page it
- * returns the in-page OFFSET -- non-zero for any unaligned address. Probing with
- * an unaligned pointer therefore answers "mapped" for memory that is not mapped
- * at all, which is the exact failure this function exists to prevent, inverted.
- * The only caller checks alignment first; the target test
- * (libc/misc/va2pa.c, unmapped_unaligned_returns_the_offset_not_zero) pins the
- * behaviour down so this cannot regress silently. */
-static int malloc_heapMapped(uintptr_t base)
-{
-	return (va2pa((void *)base) != 0u) ? 1 : 0;
 }
 
 
@@ -419,311 +330,6 @@ static void malloc_debugHex(const char *label, uintptr_t v)
 	buf[n++] = '\n';
 	buf[n] = '\0';
 	debug(buf);
-}
-
-
-/* The live[] ring carries a stated invariant -- "a non-zero entry is a heap we believe
- * is mapped and its header is safe to read" -- and on 2026-09-25 that invariant was
- * observed to be false. Report a violation rather than skipping it silently: the whole
- * point of the ring is to know which heaps are live, so an entry naming an unmapped
- * page is a bookkeeping defect worth a tagged line, not noise to swallow. A silent skip
- * would also have hidden the very crash that motivated this function.
- *
- * Bounded so a wrong entry cannot storm the UART and drown the C1 signature it sits
- * next to -- malloc_c1Scan() walks all 256 slots on a timer, so an unbounded report
- * here would repeat every scan tick.
- *
- * Placed below malloc_debugHex() because it uses it; C has no forward use of a static. */
-static unsigned int malloc_liveUnmappedReports = 0u;
-
-/* Line budgets for the C1_HEAP_TRACE_ALL physical-page trace. It emits one line
- * per PAGE of every heap (see the note at the emit site), so a 13-page heap costs
- * 13 blocking UART writes -- bounded here rather than per-heap, because it is the
- * total UART cost that matters, not how it is distributed across heaps. */
-static unsigned int caPaLines = 0u;
-static unsigned int caRelLines = 0u;
-
-/* Heap-growth pacing counters. Bumped unconditionally in _malloc_heapAlloc() --
- * see the long note there for why they are not env-gated -- and read back through
- * malloc_c1Pacing() by whoever wants to place an event on the heap-growth axis.
- * Kept at file scope rather than inside malloc_common: C1 is layout-sensitive, and
- * there is no reason to disturb the hot struct for a counter nothing reads on the
- * allocation path. */
-static unsigned long malloc_c1Heaps = 0u;
-static unsigned long malloc_c1HeapBytes = 0u;
-/* How many heap creations had their physical page checked against the v3d
- * closed-BO ring, and how many of those pages HAD been a BO. The probe count is
- * reported alongside the hit count on purpose: "0 hits" means nothing without it,
- * and a probe count of 0 would mean va2pa never resolved rather than that the
- * route is clean. */
-static unsigned long malloc_c1HeapProbes = 0u;
-static unsigned long malloc_c1HeapFromBo = 0u;
-
-/* Where heaps are landing PHYSICALLY, which the `capa` trace cannot say: it is
- * capped at 64 heaps and therefore only ever samples process startup. Every C1
- * victim so far sits in a ~5 MiB physical band, but every victim is also a LATE
- * heap -- and if physical allocation advances roughly monotonically as a process
- * runs, every late heap would be in a narrow band and the clustering would mean
- * nothing. lo/hi/last make a fire's neighbouring pace lines answer that directly.
- *
- * Three values rather than just `last`, because `last` alone cannot distinguish
- * "heaps march upward" from "heaps are scattered and this one happened to be
- * here": the SPAN is the discriminator. */
-static unsigned long malloc_c1HeapPaLo = 0u;
-static unsigned long malloc_c1HeapPaHi = 0u;
-static unsigned long malloc_c1HeapPaLast = 0u;
-
-
-/* Read the pacing counters. Either pointer may be NULL.
- *
- * The v3d winsys declares this WEAK and prints it next to its `flipstat` line, so
- * a binary linked without this allocator still links; the weak-symbol direction is
- * the mirror image of v3d_c1_lookup_pa() below, which malloc declares weak for the
- * same reason. Exported unconditionally so it can never be the silently-absent
- * half of a pair. */
-void malloc_c1Pacing(unsigned long *heaps, unsigned long *bytes);
-void malloc_c1Pacing(unsigned long *heaps, unsigned long *bytes)
-{
-	if (heaps != NULL) {
-		*heaps = malloc_c1Heaps;
-	}
-	if (bytes != NULL) {
-		*bytes = malloc_c1HeapBytes;
-	}
-}
-
-
-/* How many heaps landed on a page the v3d driver had closed, and how many were
- * checked at all. Separate from malloc_c1Pacing() so the older two-value call
- * keeps working; both are weak-linked by the winsys. */
-/* Physical span of every heap this process has created, plus the most recent.
- * Separate function so the existing weak pair keeps its signature: a weak extern
- * declared with the wrong prototype is undefined behaviour, not a link error. */
-void malloc_c1HeapPaRange(unsigned long *lo, unsigned long *hi, unsigned long *last);
-void malloc_c1HeapPaRange(unsigned long *lo, unsigned long *hi, unsigned long *last)
-{
-	if (lo != NULL) {
-		*lo = malloc_c1HeapPaLo;
-	}
-	if (hi != NULL) {
-		*hi = malloc_c1HeapPaHi;
-	}
-	if (last != NULL) {
-		*last = malloc_c1HeapPaLast;
-	}
-}
-
-
-void malloc_c1HeapBoHits(unsigned long *hits, unsigned long *probes);
-void malloc_c1HeapBoHits(unsigned long *hits, unsigned long *probes)
-{
-	if (hits != NULL) {
-		*hits = malloc_c1HeapFromBo;
-	}
-	if (probes != NULL) {
-		*probes = malloc_c1HeapProbes;
-	}
-}
-
-
-/* Is the all-heap physical-page trace armed? Cached, and deliberately shared by
- * both call sites.
- *
- * getenv() is a linear scan of environ (libphoenix stdlib/env.c: _env_find), so
- * it allocates nothing and cannot deadlock against the lock this runs under --
- * checked, because a probe that allocated inside the allocator would be a hang,
- * and a fix that turns a fast failure into a hang is worse than the bug. It is
- * still a scan per call, so calling it on every heap release (up to 256 times)
- * would be pure waste; the rest of this file caches such lookups in a static and
- * this now does the same, once per process. */
-static int malloc_caTraceOn(void)
-{
-	static int caTrace = -1;
-
-	if (caTrace < 0) {
-		const char *e = getenv("C1_HEAP_TRACE_ALL");
-
-		caTrace = ((e != NULL) && (*e == '1')) ? 1 : 0;
-	}
-	return caTrace;
-}
-
-
-static int malloc_liveEntryReadable(uintptr_t base, size_t recorded)
-{
-	/* ⚠ THE ORDER OF THESE TESTS IS LOAD-BEARING. malloc_heapSizeValid() reads
-	 * heap->size -- it IS the instruction that faulted in c1hpa01 -- so it must not
-	 * run until the mapping is established. The first draft of this function called
-	 * it first and would have reproduced the exact crash it exists to prevent, while
-	 * looking like a fix. Only the non-dereferencing checks may precede the probe. */
-	if ((base == 0u) || ((base & (uintptr_t)(_PAGE_SIZE - 1)) != 0u)) {
-		return 0;
-	}
-	if (malloc_heapMapped(base) != 0) {
-		/* Mapped: now the header is safe to read, so apply the full test. */
-		return (malloc_heapSizeValid((const heap_t *)base) != 0) ? 1 : 0;
-	}
-	if (malloc_liveUnmappedReports < 8u) {
-		++malloc_liveUnmappedReports;
-		debug("malloc: C1-hunt: live[] entry is NOT MAPPED -- ring says live, pmap says gone\n");
-		malloc_debugHex("malloc:   lubase = ", base);
-		/* Evidence, but NOT a decisive discriminator -- do not over-read it.
-		 * A zero or nonsense size does point at a corrupt slot. The converse does
-		 * NOT hold: if something overwrote the base of an entry that was still
-		 * OCCUPIED, liveSize[] still holds the previous honest occupant's size, so
-		 * a legal page-multiple here is consistent with BOTH "an honest heap whose
-		 * mapping vanished" and "a corrupted base in a live slot". Only an
-		 * overwrite of an empty slot yields lusize=0.
-		 *
-		 * The test that would actually settle it is whether `base` was ever an
-		 * mmap() return in this process, which needs the heap trace armed for THIS
-		 * binary (it is env-gated per process, so another process's trace says
-		 * nothing) and its size filter widened to cover small heaps. */
-		malloc_debugHex("malloc:   lusize = ", (uintptr_t)recorded);
-		malloc_debugHex("malloc:   luhlo  = ", malloc_common.heapLo);
-		malloc_debugHex("malloc:   luhhi  = ", malloc_common.heapHi);
-		malloc_debugHex("malloc:   luovfl = ", (uintptr_t)malloc_common.liveOverflow);
-	}
-	return 0;
-}
-
-
-/* Report a heap's size the way C1 needs it read.
- *
- * Every field fire of that defect has the same shape: the LOW 32 bits of
- * heap->size are a legal size and only the high half is wrong
- * (0x80000000_0000d000 and 0x80000001_0000d000, two heaps in one run). Printing
- * the raw 64-bit word alone makes every reader re-derive that, so split it here
- * and say whether the heap would validate with the high half cleared:
- *
- *   hlo32  the surviving low half
- *   hhi32  the corrupting value, as the 32-bit word it probably was when written
- *   hfixed 1 = a single stray 4-byte write into an otherwise intact live heap,
- *          0 = the single-write story does not hold for this one
- *
- * Used by every reporter that prints a heap size, so whichever guard fires
- * first is decisive -- the corrupt-header path is not the only one that can.
- *
- * The hfixed test repeats malloc_heapSizeValid()'s size checks against the REAL
- * base rather than calling it: that function also tests its argument for page
- * alignment and window membership, so handing it a fixed-up copy would return 0
- * every time and this field would look like evidence while being a constant. */
-/* Was this PHYSICAL frame inside a buffer object the v3d driver CLOSED?
- *
- * Separate from v3d_c1_lookup_page() above, and deliberately keyed on the PHYSICAL
- * address, because the two answer different questions. A recycled frame reaches
- * malloc at a DIFFERENT virtual address, so a VA-keyed lookup cannot see the
- * recycling case at all -- it matches only when the VA itself is reused. What
- * survives a trip through the kernel's free pool is the frame, and the frame is
- * what this reporter already prints as hpa.
- *
- * Not behind V3D_C1_HUNT: its table is ~4 KiB (closed BOs only, {frame, count,
- * ordinal}), where the hunt build's is 96 KiB -- and a passive 96 KiB table is on
- * record in this project as SUPPRESSING C1. An instrument that silences the event
- * cannot measure it, so this one is sized to stay out of the way.
- *
- * Weak: a binary with no v3d driver links fine and reports the page as
- * unattributable rather than assuming either answer. */
-extern int v3d_c1_lookup_pa(unsigned long pa, unsigned int *npages, unsigned int *ord,
-	unsigned int *total) __attribute__((weak));
-
-
-#ifdef V3D_C1_HUNT
-/* Declared HERE, ahead of both call sites. It used to sit further down, next to the
- * poison-break path that was its only user -- so wiring it into the corrupt-header
- * reporter above broke the -DV3D_C1_HUNT build with an implicit declaration, which
- * the default build could not see because the whole block compiles out. Check a
- * compile-guarded change with the guard BOTH ways. */
-extern int v3d_c1_lookup_page(unsigned long page, unsigned int *handle, unsigned long *off,
-	int *closed, unsigned int *total) __attribute__((weak));
-#endif /* V3D_C1_HUNT */
-
-
-static void malloc_reportHeapSize(const heap_t *heap)
-{
-	uintptr_t hbase = (uintptr_t)heap;
-	size_t lo = (size_t)(heap->size & 0xffffffffu);
-	int ok = (((hbase & (uintptr_t)(_PAGE_SIZE - 1)) == 0u)
-			&& (lo >= sizeof(heap_t))
-			&& ((lo & (size_t)(_PAGE_SIZE - 1)) == 0u)
-			&& ((hbase + lo) >= hbase)
-			&& ((malloc_common.heapHi == 0u) || ((hbase + lo) <= malloc_common.heapHi)))
-			? 1 : 0;
-
-	/* The heap's PHYSICAL page. Measured 2026-09-25 (run c1pa1 @22:22): a heavily
-	 * firing run gave 139 corrupt-header fires and 273 hfixed=1 readings but ZERO
-	 * poison breaks -- so p4pa, which only prints on a break, never ran and the
-	 * mailbox-PA comparison had nothing to work with. The header path is where
-	 * the events actually are, so it has to carry the physical address too, or
-	 * the decisive comparison depends on the rarer signature.
-	 *
-	 * Free on a healthy run: this whole reporter is fire-only. */
-	malloc_debugHex("malloc:   hpa   = ",
-		(uintptr_t)va2pa((void *)((uintptr_t)heap & ~(uintptr_t)(_PAGE_SIZE - 1))));
-	malloc_debugHex("malloc:   hsize = ", (uintptr_t)heap->size);
-	malloc_debugHex("malloc:   hlo32 = ", (uintptr_t)lo);
-	malloc_debugHex("malloc:   hhi32 = ", (uintptr_t)(heap->size >> 32));
-	malloc_debugHex("malloc:   hfixed= ", (uintptr_t)ok);
-
-	/* TODO(C1-hunt): was this FRAME a closed buffer object?
-	 *
-	 * This is the measurement that separates the two live readings of the
-	 * KEEP_CLOSED_BO result. Under "recycling is merely necessary" the victim
-	 * frame is ordinary pool churn and was never a BO; under "recycling is the
-	 * TRIGGER" it was one. hbopa > 0 says it was, and hboord says how many closes
-	 * ago -- which also bounds the close-to-fire latency that nothing currently
-	 * measures. hbopa == 0 with hbotot > 0 is a real answer, not a missing
-	 * instrument: the driver was present, it had closed hbotot BOs, and this frame
-	 * was not among them. */
-	if (v3d_c1_lookup_pa != NULL) {
-		unsigned int np = 0u, ord = 0u, tot = 0u;
-		uintptr_t pa = (uintptr_t)va2pa((void *)((uintptr_t)heap & ~(uintptr_t)(_PAGE_SIZE - 1)));
-		int n = v3d_c1_lookup_pa((unsigned long)pa, &np, &ord, &tot);
-
-		malloc_debugHex("malloc:   hbopa = ", (uintptr_t)(unsigned)n);
-		malloc_debugHex("malloc:   hbotot= ", (uintptr_t)tot);
-		if (n > 0) {
-			malloc_debugHex("malloc:   hbonpg= ", (uintptr_t)np);
-			malloc_debugHex("malloc:   hboord= ", (uintptr_t)ord);
-		}
-	}
-
-	/* TODO(C1-hunt): was this page a BUFFER OBJECT, and had it been closed?
-	 *
-	 * This is the question the strongest evidence in the whole hunt points at:
-	 * V3D_KEEP_CLOSED_BO=1 (never return a closed BO's pages to the kernel) gives
-	 * 0 fires in 12 runs against 7 in 19, Fisher one-tailed p = 0.019, all 31 runs
-	 * in one byte-identical binary. The lever is measured; what lands on those
-	 * pages after recycling is what is unidentified.
-	 *
-	 * The attribution table already exists (v3d_c1_lookup_page, answered in-process
-	 * from c1_seen[] with NO UART output, built precisely because every noisy
-	 * instrument suppressed the event). It was only ever wired to the POISON-BREAK
-	 * path -- which is the same mistake hpa fixed twenty lines up: the header path
-	 * carries substantially all the events, and run c1coin produced 107 header
-	 * fires against 4 breaks. Asking it here is free and fire-only.
-	 *
-	 * Reading: hbon>0 means this page WAS inside a BO; hbocl is that BO's close
-	 * ordinal (0 = still open at the time). hbon=0 with hbotot>0 means the driver
-	 * was present and this page was simply never a BO -- which is a real answer,
-	 * not a missing one. */
-#ifdef V3D_C1_HUNT
-	if (v3d_c1_lookup_page != NULL) {
-		unsigned int h = 0u, tot = 0u;
-		unsigned long off = 0u;
-		int closed = 0, n;
-
-		n = v3d_c1_lookup_page((unsigned long)heap & ~(unsigned long)(_PAGE_SIZE - 1),
-			&h, &off, &closed, &tot);
-		malloc_debugHex("malloc:   hbon   = ", (uintptr_t)(unsigned)n);
-		malloc_debugHex("malloc:   hbotot = ", (uintptr_t)tot);
-		if (n > 0) {
-			malloc_debugHex("malloc:   hboh   = ", (uintptr_t)h);
-			malloc_debugHex("malloc:   hbooff = ", (uintptr_t)off);
-			malloc_debugHex("malloc:   hbocl  = ", (uintptr_t)(unsigned)closed);
-		}
-	}
-#endif /* V3D_C1_HUNT */
 }
 
 
@@ -828,10 +434,7 @@ static int malloc_chunkValidWhy(chunk_t *chunk, const heap_t *heap)
 	 * inside the range the stale header claimed.
 	 *
 	 * This is a "known bad" test, not a "known good" one: it can only miss, never
-	 * false-reject, so it is safe to act on. (The live[] ring is NOT usable for
-	 * the opposite test -- it is a 256-entry diagnostic with a documented
-	 * overflow counter, so once it wraps a "not live" answer would reject VALID
-	 * heaps and stop coalescing altogether.) */
+	 * false-reject, so it is safe to act on. */
 	if (malloc_wasReleased(chunk) != 0) {
 		return 2;
 	}
@@ -887,492 +490,8 @@ static void malloc_chunkInit(chunk_t *chunk, heap_t *heap, size_t size)
 }
 
 
-static int malloc_isLiveHeapBase(const chunk_t *chunk);
-
-
-/* TODO(C1-hunt): recent LARGE frees, so a page+4 break can name the block that
- * was freed and is still being written.
- *
- * The page dump proved the class: a page inside a free chunk still held live
- * vertex/material data (1.0f, 0.99999f, a white RGBA, an alpha byte) with
- * 0x80000001 among it. What is left is to name the buffer, and the freeing call
- * site is the direct route -- so remember where recent large blocks were freed
- * from, and on a break print every logged block whose extent covers the page. */
-#define C1_FREELOG_N 256u   /* 6 KB; the break is detected when the chunk is REUSED, which can be many frees after the free itself, so keep the ring deep */
-
-static struct {
-	uintptr_t base;
-	size_t size;
-	uintptr_t caller;
-} c1FreeLog[C1_FREELOG_N];
-static unsigned int c1FreeLogIdx;
-
-
-static void malloc_c1FreeLog(uintptr_t base, size_t size, uintptr_t caller)
-{
-	unsigned int i;
-
-	/* Only blocks big enough to span a page boundary can contain a poisoned
-	 * page+4 word, so smaller ones would only crowd the ring out. */
-	if (size < (size_t)_PAGE_SIZE) {
-		return;
-	}
-
-	i = c1FreeLogIdx % C1_FREELOG_N;
-	c1FreeLog[i].base = base;
-	c1FreeLog[i].size = size;
-	c1FreeLog[i].caller = caller;
-	c1FreeLogIdx++;
-}
-
-
-static void malloc_c1FreeLogReport(uintptr_t addr)
-{
-	unsigned int i;
-	unsigned int hits = 0;
-
-	for (i = 0; (i < C1_FREELOG_N) && (hits < 3u); i++) {
-		if ((c1FreeLog[i].size != 0u) && (addr >= c1FreeLog[i].base)
-				&& (addr < (c1FreeLog[i].base + c1FreeLog[i].size))) {
-			hits++;
-			malloc_debugHex("malloc:   fbase = ", c1FreeLog[i].base);
-			malloc_debugHex("malloc:   fsize = ", (uintptr_t)c1FreeLog[i].size);
-			malloc_debugHex("malloc:   fcall = ", c1FreeLog[i].caller);
-			malloc_debugHex("malloc:   fcalx = ", ~c1FreeLog[i].caller);
-		}
-	}
-
-	if (hits == 0u) {
-		debug("malloc:   (no logged large free covers this page)\n");
-	}
-}
-
-
-/* TODO(C1-hunt): page+4 poison for LARGE free chunks.
- *
- * C1's write lands at PAGE + 4. Both observed victims -- a heap header and a
- * page-aligned chunk header -- carry `size` at offset 0, so the corrupted word is
- * its high half at +4. tools/memtrip covers page+4 across 64 MiB of anonymous
- * pages and has never seen it, so the writer is not scattering at random: it hits
- * pages the system already knows about. These are those pages.
- *
- * One 32-bit word per 4 KiB, so the cost is negligible even for a 50 KiB chunk,
- * and the coverage is exactly the offset the defect uses. Large chunks only -- a
- * small-bin chunk is <= 240 bytes and rarely spans a page boundary at all.
- *
- * [chunk + sizeof(chunk_t), chunk + size - 8) is ours for a large chunk:
- * size/heap/next/prev/node all live inside the first sizeof(chunk_t), and the
- * footer is at size-8. ⚠ A page-aligned chunk's OWN +4 is the live size field and
- * is deliberately NOT poisoned -- malloc_chunkValidWhy() already judges that. */
-#define C1_P4_MAGIC 0x7e57ed00u
-
-/* Compiled out unless the C1 hunt build defines V3D_C1_HUNT: C1 is sensitive to
- * binary layout, and the driver-side table this talks to costs 96 KB of BSS,
- * which alone was enough to stop the bug reproducing. See docs/KNOWN-ISSUES.md.
- */
-#ifdef V3D_C1_HUNT
-/* Defined by the V3D winsys when this binary contains the GPU driver, so a page
- * that the allocator finds corrupted can be attributed: was it ever a buffer
- * object, and had that BO been closed? Weak, because most binaries have no driver
- * and must still link -- the call site reports the absence rather than assuming.
- * Declared here rather than in a header to keep libphoenix free of any build-time
- * dependency on the driver. */
-#endif /* V3D_C1_HUNT */
-
-
-/* Probe offsets within each poisoned page.
- *
- * ⛔ THE REASON THIS IS NO LONGER A SINGLE OFFSET. Until now exactly ONE word per
- * 4 KiB page was poisoned, at +4 -- so the instrument was blind to 1023/1024 of
- * every page, and "the corruption always lands at page+4" was unfalsifiable: +4 is
- * simply where we looked. That unexamined premise is what made a device writing a
- * FIXED offset look compelling, and it is the argument that ruled out genet, xHCI
- * and the SD ADMA2 descriptors on the grounds that "their writes vary in offset" --
- * a property we had no way to observe.
- *
- * Three of the four probes are deliberately NOT at page+4, so the question becomes
- * answerable: if only the +4 probe ever fires, the writer really is offset-specific;
- * if all four fire at comparable rates, the writer scribbles broadly and the whole
- * fixed-offset framing (and the exclusions built on it) is wrong. */
-/* ⚠ OPT-IN, and this default is a measured requirement, not caution. Arming all
- * four probes appeared to SUPPRESS the event: 0 fires in 6 runs where one probe
- * was believed to reproduce it about 1 run in 3.
- *
- * ↩ RETRACTED 2026-09-26, and the retraction matters more than the claim did.
- * That "1 run in 3" baseline is not in the archive: counting every STK-class run
- * by day gives 30 fires / 276 runs = 10.9 % (range 0-22 %). At the real rate,
- * "0 fires in 6" has probability 0.50 -- a coin flip, not suppression. The same
- * arithmetic dissolves the other four arms this claim was built on (0 in 5, 7, 8
- * and 12 give p = 0.56, 0.45, 0.40, 0.25).
- *
- * This comment used to conclude that C1 "cannot currently be studied by ADDING
- * instrumentation, because any change to the binary's write pattern or layout
- * stops it happening". That is DISPROVED by a positive result: a build carrying
- * capa, carel, hbopa, p4bopa and a 4 KiB closed-BO table -- changing both write
- * pattern and layout -- fired 2 times in 11 runs (18 %) on 2026-09-26, one of
- * them halting the kernel. Instruments can be added.
- *
- * What survives: V3D_KEEP_CLOSED_BO, whose arm is PAIRED (0/12 vs 7/19, Fisher
- * p = 0.019) and therefore assumes no baseline. And the narrower possibility
- * that some SPECIFIC heavy instrument suppresses -- tonight's is mostly
- * fire-only, so it does not test a 96 KiB table.
- *
- * So the default stays at the single historical probe, which keeps master
- * reproducing the bug. -DC1_P4_WIDE arms all four to ask where the writes land,
- * accepting that the answer may simply be "nothing fires". */
-#ifdef C1_P4_WIDE
-#define C1_P4_NPROBE 4u
-static const uint32_t c1P4Off[C1_P4_NPROBE] = { 4u, 0x404u, 0x804u, 0xc04u };
-
-/* ↩ A dedicated marker string was tried here and REMOVED: it does not survive.
- *
- * `__attribute__((used))` stops the COMPILER discarding an unreferenced object;
- * it does not stop the LINKER. This target builds with -ffunction-sections
- * -fdata-sections and links with -Wl,--gc-sections, which collected the marker's
- * section outright -- 0 occurrences in both loader.disk and the shipped binary,
- * while the arm itself was correctly compiled in.
- *
- * ⚠ And the host harness could not catch that, because it does not link with
- * --gc-sections. Verifying a marker against a host proxy proves nothing about the
- * target image.
- *
- * The strings-verifiable artifact is therefore the ARM BANNER below, whose text
- * is referenced by a live debug() call and so cannot be collected. It is also the
- * same string the per-trial log guard looks for, so one artifact serves both. */
-#else
-#define C1_P4_NPROBE 1u
-static const uint32_t c1P4Off[C1_P4_NPROBE] = { 4u };
-#endif
-
-
-/* Keyed on the PROBE address, not the page, so the four probes in a page hold
- * different values and a block copy cannot alias one onto another. */
-/* ★ HOW LONG DID THE CHUNK SIT POISONED BEFORE THE BREAK WAS NOTICED?
- *
- * Every "C1 fires at ~90 s" measured so far is a DETECTION time, not a
- * corruption time: the poison is written when a chunk is FREED and only read
- * when the allocator next WALKS it, so the write can have happened any time in
- * between. That matters because the 90 s anchor coincides with the end of heap
- * growth -- which is also exactly when the allocator stops taking fresh heaps
- * and starts reusing free chunks, i.e. when it first CHECKS them. Without an
- * age, "the fire lands at the plateau" and "checking begins at the plateau" are
- * the same observation.
- *
- * So: stamp each poisoned page with the tick at which it was poisoned, and
- * report the delta at the break. A hash-indexed table, because the probe poisons
- * many pages and the only one that matters is the one that breaks.
- *
- * ⚠ DELIBERATELY NOT stored in the chunk. The poison word itself must not change
- * size or position: C1 is layout-sensitive, the victim offset IS the finding, and
- * widening the write to 8 bytes would alter what sits at page+8. A side table
- * cannot perturb the thing it measures.
- *
- * ⚠ A miss is reported as AGED OUT, never as zero. An entry evicted by a later
- * page is indistinguishable from "poisoned at tick 0" unless the two are printed
- * apart, and "the corruption is older than 256 poisoned pages" is itself the
- * answer to the question being asked. */
-#define C1_P4AGE_N 256u
-
-static struct {
-	uint32_t pfn;   /* page >> 12, 0 = slot never used */
-	uint32_t tick;
-} c1P4Age[C1_P4AGE_N];
-
-
-static void malloc_c1P4AgeStamp(uintptr_t page)
-{
-	uint32_t pfn = (uint32_t)(page >> 12);
-	uint32_t i = pfn % C1_P4AGE_N;
-
-	c1P4Age[i].pfn = pfn;
-	c1P4Age[i].tick = malloc_common.scanTick;
-}
-
-
-/* Ticks elapsed since this page was poisoned, or 0xffffffff if the slot has been
- * taken by another page (aged out). */
-static uint32_t malloc_c1P4AgeOf(uintptr_t page)
-{
-	uint32_t pfn = (uint32_t)(page >> 12);
-	uint32_t i = pfn % C1_P4AGE_N;
-
-	if (c1P4Age[i].pfn != pfn) {
-		return 0xffffffffu;
-	}
-	return malloc_common.scanTick - c1P4Age[i].tick;
-}
-
-
-static uint32_t malloc_c1P4Word(uintptr_t q)
-{
-	return C1_P4_MAGIC ^ (uint32_t)(q >> 2);
-}
-
-
-/* TODO(C1-hunt): a checksum over the head of each poisoned page.
- *
- * The open question is whether the vertex-shaped data around the corrupted word
- * is LIVE or merely stale contents of a previously-freed block. Poisoning the
- * whole body answered it in principle but appeared to suppress the event -- it
- * bulk-wrote the very pages the corruption lands in, on every free. This is the
- * cheap version: 13 reads and ONE extra word written per page, so the pages are
- * barely disturbed, and a mismatch still proves the page head changed while the
- * chunk was free.
- *
- * Words 3..15 only: word 0 may be a chunk's own size field, whose flag bits
- * legitimately change; word 1 is the page+4 poison; word 2 holds this checksum. */
-static uint32_t malloc_c1PageCk(uintptr_t p, uintptr_t lo, uintptr_t hi)
-{
-	uint32_t ck = 0x9e3779b9u;
-	uintptr_t q;
-
-	for (q = p + 12u; (q + 4u) <= (p + 64u); q += 4u) {
-		if ((q >= lo) && ((q + 4u) <= hi)) {
-			ck ^= *(uint32_t *)q;
-			ck = (ck << 1) | (ck >> 31);
-		}
-	}
-
-	return ck;
-}
-
-
-static void malloc_c1P4Poison(chunk_t *chunk, size_t chunksz)
-{
-	uintptr_t lo = (uintptr_t)chunk + sizeof(chunk_t);
-	uintptr_t hi = (uintptr_t)chunk + chunksz - 8u;
-	uintptr_t p = ((uintptr_t)chunk + (uintptr_t)_PAGE_SIZE - 1u) & ~((uintptr_t)_PAGE_SIZE - 1u);
-
-#ifdef C1_P4_WIDE
-	/* Announce the arm ONCE, so the log itself says how many offsets were probed.
-	 *
-	 * Without this, "only +4 broke" is UNINTERPRETABLE: it is the expected result
-	 * both when the writer is offset-specific AND when only +4 was armed, and
-	 * those are opposite conclusions. The binary carries a strings marker for the
-	 * same reason, but a log read months later will not have the binary.
-	 *
-	 * Wide arm only, so the default build gains no output at all. */
-	{
-		static int armAnnounced = 0;
-
-		if (armAnnounced == 0) {
-			armAnnounced = 1;
-			debug("malloc: C1-hunt: p4 probe arm = WIDE (4 offsets: 4, 0x404, 0x804, 0xc04)\n");
-		}
-	}
-#endif
-
-	for (; (p + 8u) <= hi; p += (uintptr_t)_PAGE_SIZE) {
-		unsigned int k;
-
-		for (k = 0u; k < C1_P4_NPROBE; k++) {
-			uintptr_t q = p + (uintptr_t)c1P4Off[k];
-
-			if ((q >= lo) && ((q + 4u) <= hi)) {
-				*(uint32_t *)q = malloc_c1P4Word(q);
-			}
-		}
-		malloc_c1P4AgeStamp(p);
-		/* TODO(C1-hunt): A/B ARM -- checksum store still disabled; see the note on
-		 * malloc_c1PageCk. Four probe words per 4 KiB page is still a very light
-		 * touch compared with the body poison that suppressed the event. */
-	}
-
-}
-
-
-static void malloc_c1P4Verify(chunk_t *chunk, size_t chunksz)
-{
-	uintptr_t lo = (uintptr_t)chunk + sizeof(chunk_t);
-	uintptr_t hi = (uintptr_t)chunk + chunksz - 8u;
-	uintptr_t p = ((uintptr_t)chunk + (uintptr_t)_PAGE_SIZE - 1u) & ~((uintptr_t)_PAGE_SIZE - 1u);
-
-	for (; (p + 8u) <= hi; p += (uintptr_t)_PAGE_SIZE) {
-		unsigned int k;
-
-		for (k = 0u; k < C1_P4_NPROBE; k++) {
-			uintptr_t q = p + (uintptr_t)c1P4Off[k];
-			uint32_t want, got;
-
-			if ((q < lo) || ((q + 4u) > hi)) {
-				continue;
-			}
-			want = malloc_c1P4Word(q);
-			got = *(uint32_t *)q;
-
-			if (got != want) {
-				static int p4Reported = 0;
-
-				if (p4Reported < 4) {
-					p4Reported++;
-					debug("malloc: C1-hunt: PAGE POISON BROKEN in a free chunk\n");
-					/* Which probe: 4 means the historical page+4, anything else
-					 * means the write was NOT offset-specific after all. */
-					malloc_debugHex("malloc:   p4off  = ", (uintptr_t)c1P4Off[k]);
-					malloc_debugHex("malloc:   p4addr = ", q);
-					malloc_debugHex("malloc:   p4page = ", p);
-					/* Ticks between the poison write and this read. A small value
-					 * means the corruption landed in a chunk the allocator was
-					 * about to touch anyway; a large one means it sat unseen and
-					 * the fire time says nothing about when the write happened. */
-					malloc_debugHex("malloc:   p4age  = ", (uintptr_t)malloc_c1P4AgeOf(p));
-					malloc_debugHex("malloc:   p4tick = ", (uintptr_t)malloc_common.scanTick);
-					/* The PHYSICAL address of the broken page.
-					 *
-					 * This is the sharpest test of the standing model. The
-					 * signature says a DEVICE writes a physical address: the
-					 * corrupting word is the VideoCore property-mailbox response
-					 * code, and one recorded victim was a kernel zone-list link,
-					 * which no userspace use-after-free can reach. If that is
-					 * right, the writer keeps hitting ONE physical page and the 25
-					 * different virtual addresses in the archive are just that page
-					 * being recycled -- so p4pa should repeat while p4page does not.
-					 * If p4pa is as scattered as p4page, the device-write reading is
-					 * wrong and the hunt goes back to a virtual-address writer.
-					 * Either answer is worth more than another rare-event run. */
-					malloc_debugHex("malloc:   p4pa   = ", (uintptr_t)va2pa((void *)p));
-
-					/* TODO(C1-hunt): the SAME physical-frame BO attribution as the
-					 * corrupt-header path.
-					 *
-					 * Wiring it only to the header path was the mirror image of the
-					 * mistake that path was fixing. Run c1pfn1 fired with TWO poison
-					 * breaks and ZERO header reports, so the attribution never ran at
-					 * all -- a fire spent for no answer. Both detectors see the same
-					 * defect and both know a physical page; both must ask. */
-					if (v3d_c1_lookup_pa != NULL) {
-						unsigned int pnp = 0u, pord = 0u, ptot = 0u;
-						int pn = v3d_c1_lookup_pa(
-							(unsigned long)va2pa((void *)(p & ~(uintptr_t)(_PAGE_SIZE - 1))),
-							&pnp, &pord, &ptot);
-
-						malloc_debugHex("malloc:   p4bopa= ", (uintptr_t)(unsigned)pn);
-						malloc_debugHex("malloc:   p4botl= ", (uintptr_t)ptot);
-						if (pn > 0) {
-							malloc_debugHex("malloc:   p4bonp= ", (uintptr_t)pnp);
-							malloc_debugHex("malloc:   p4bord= ", (uintptr_t)pord);
-						}
-					}
-					malloc_debugHex("malloc:   p4want = ", (uintptr_t)want);
-					malloc_debugHex("malloc:   p4got  = ", (uintptr_t)got);
-					malloc_debugHex("malloc:   p4chunk= ", (uintptr_t)chunk);
-					/* Identify the victim HEAP directly instead of hoping the
-					 * creation trace happened to cover it. The break path already
-					 * holds the chunk, and chunk->heap is right there -- two lines
-					 * here beat any amount of speculative creation tracing, which
-					 * covered only 1 heap in the victim window under a count budget
-					 * and 5 under an address window.
-					 *
-					 * ⚠ chunk->heap is itself one of C1's victims (a corrupted
-					 * heap POINTER with 0x80000001 in the high half is on record),
-					 * so read these two as evidence, not as ground truth: if
-					 * p4heap has a garbage high half that is itself a finding. */
-					malloc_debugHex("malloc:   p4heap = ", (uintptr_t)chunk->heap);
-					malloc_debugHex("malloc:   p4hsize= ",
-						(chunk->heap != NULL) ? (uintptr_t)chunk->heap->size : (uintptr_t)0);
-					malloc_debugHex("malloc:   p4csize= ", (uintptr_t)chunksz);
-					malloc_debugHex("malloc:   p4call = ", malloc_common.lastCaller);
-					malloc_debugHex("malloc:   p4calx = ", ~malloc_common.lastCaller);
-
-					/* Was this page ever a V3D buffer object? The winsys runs in
-					 * this same process, so ask it rather than reconstructing the
-					 * answer from a UART trace -- tracing perturbs this bug badly
-					 * enough to hide it. p4bon is the number of BOs whose mapping
-					 * covered the page (>1 means the address was recycled between
-					 * BOs), p4boh the most recent one's handle, p4bocl its close
-					 * ordinal (0 = it was still open), and p4bon = 0 with a
-					 * non-zero p4botot means the driver was loaded and this page
-					 * was simply never a BO. */
-#ifdef V3D_C1_HUNT
-					if (v3d_c1_lookup_page != NULL) {
-						unsigned int h = 0u, tot = 0u;
-						unsigned long off = 0u;
-						int closed = 0, n;
-
-						n = v3d_c1_lookup_page((unsigned long)p, &h, &off, &closed, &tot);
-						malloc_debugHex("malloc:   p4bon  = ", (uintptr_t)(unsigned)n);
-						malloc_debugHex("malloc:   p4botot= ", (uintptr_t)tot);
-						if (n > 0) {
-							malloc_debugHex("malloc:   p4boh  = ", (uintptr_t)h);
-							malloc_debugHex("malloc:   p4booff= ", (uintptr_t)off);
-							malloc_debugHex("malloc:   p4bocl = ", (uintptr_t)(unsigned)closed);
-						}
-					}
-					else {
-						debug("malloc:   p4bo   = no v3d driver in this binary\n");
-					}
-#endif /* V3D_C1_HUNT */
-
-					malloc_c1FreeLogReport(q);
-
-					/* Did anything ELSE in this page head change while the chunk was
-					 * free? p4ckOK=1 means only page+4 moved -- an isolated stray
-					 * store into otherwise stale memory. p4ckOK=0 means the page was
-					 * still being written, i.e. a live buffer the allocator believes
-					 * is free. That is the live-vs-stale answer. */
-					/* Only meaningful for the +4 probe: this checksums the PAGE
-					 * HEAD, which has nothing to do with a fire further in. */
-					if ((c1P4Off[k] == 4u) && ((p + 8u) >= lo) && ((p + 12u) <= hi)) {
-						uint32_t ckNow = malloc_c1PageCk(p, lo, hi);
-						uint32_t ckThen = *(uint32_t *)(p + 8u);
-
-						malloc_debugHex("malloc:   p4ckOK = ", (uintptr_t)((ckNow == ckThen) ? 1u : 0u));
-						malloc_debugHex("malloc:   p4ckNow= ", (uintptr_t)ckNow);
-						malloc_debugHex("malloc:   p4ckThn= ", (uintptr_t)ckThen);
-					}
-
-
-					/* Whoever keeps writing here very likely writes more than one
-					 * field, so the page should still hold their live structure.
-					 * Dump its head: recognisable contents name the owner outright,
-					 * and an otherwise-pristine page says the write really is a
-					 * single isolated word. */
-					{
-						unsigned int w;
-
-						const uint32_t *base = (const uint32_t *)(q - 4u);
-
-						for (w = 0; w < 16u; w++) {
-							malloc_debugHex("malloc:   p4w= ", (uintptr_t)base[w]);
-						}
-					}
-				}
-				return;
-			}
-		}
-	}
-}
-
-
 static void _malloc_chunkAdd(chunk_t *chunk)
 {
-	/* Catch a HEAP BASE being put into a free bin -- the first cause we have not
-	 * been able to name. Every corrupt bin entry on record decodes as a heap_t
-	 * rather than a chunk_t: `size` reads the heap size (0xd000) and `heap` reads
-	 * its freesz, and the coalesce walk then steps to base+0xd000, that heap's
-	 * END, which is where it faults.
-	 *
-	 * No code inserts a heap base: all five conversion sites use heap->space, so
-	 * a real chunk starts at heap+sizeof(heap_t) and can never BE the base. If
-	 * this fires, the bad entry is being inserted here and we have the moment it
-	 * happens; if it never fires, the entry arrives by some other route (a stale
-	 * pointer into a region mmap recycled) and the search moves elsewhere.
-	 *
-	 * The ring scan is 256 entries, so it is gated behind a page-aligned test
-	 * first: a heap base always is, a real chunk almost never is, and that keeps
-	 * this off the hot path. */
-	if ((((uintptr_t)chunk & (uintptr_t)(_PAGE_SIZE - 1)) == 0u)
-			&& (malloc_isLiveHeapBase(chunk) != 0)) {
-		static int addReported = 0;
-		if (addReported == 0) {
-			addReported = 1;
-			debug("malloc: a LIVE HEAP BASE is being added to a free bin -- this is the first cause\n");
-			malloc_debugHex("malloc:   chunk = ", (uintptr_t)chunk);
-			malloc_debugHex("malloc:   size  = ", (uintptr_t)chunk->size);
-			malloc_debugHex("malloc:   heap  = ", (uintptr_t)chunk->heap);
-		}
-	}
-
 	unsigned int idx;
 	size_t chunksz = malloc_chunkSize(chunk);
 	chunk_t *exist;
@@ -1381,43 +500,9 @@ static void _malloc_chunkAdd(chunk_t *chunk)
 	if (chunksz <= CHUNK_SMALLBIN_MAX_SIZE) {
 		idx = malloc_getsidx(chunksz);
 		LIST_ADD(&malloc_common.sbins[idx], chunk);
-		/* Poison the first word past the free-list links. Everything else has been
-		 * eliminated -- the bad bin entry is not inserted (25 abandons, 0 catches),
-		 * is not a stale pointer into a RELEASED heap (it decodes as a LIVE heap_t),
-		 * and cannot come from an intra-struct overflow. What is left is that the
-		 * links get OVERWRITTEN while the chunk sits free, and next/prev live in the
-		 * chunk's payload where a stray write lands.
-		 *
-		 * `node` is unused for a small-bin chunk and a chunk is always at least
-		 * CHUNK_MIN_SIZE, so offset 32 is ours. XOR with the address so a block
-		 * copied somewhere else does not validate by accident. */
-		/* >= 48, not >= CHUNK_MIN_SIZE (40): malloc_chunkSetFooter() writes the size
-		 * at chunk+size-8, which for a 40-byte chunk IS offset 32 -- so the poison
-		 * would be clobbered legitimately and report a false positive. Measured: it
-		 * fired 7 times in a clean libc run that passed 305 tests with 0 faults. */
-		if (chunksz >= 48u) {
-			/* TODO(C1-hunt): widened from ONE word to the whole free payload.
-			 * One word per free chunk is a tiny cross-section, and C1's stray write
-			 * has to be caught somewhere: this is the in-process counterpart to
-			 * tools/memtrip, which being a separate process can only ever see a
-			 * writer that reaches memory by physical address.
-			 *
-			 * [chunk+32, chunk+size-8) is ours for a small-bin chunk: `node` is
-			 * unused there, and the footer lives at size-8 (which is exactly why
-			 * the >= 48 floor exists -- at 40 bytes the footer IS offset 32). */
-			uintptr_t pw = (uintptr_t)chunk + 32u;
-			uintptr_t pend = (uintptr_t)chunk + chunksz - 8u;
-
-			while (pw < pend) {
-				*(size_t *)pw = (size_t)(0x5ee7ee7dee7ee7d5ull ^ (unsigned long long)pw);
-				pw += sizeof(size_t);
-			}
-		}
 		malloc_common.sbinmap |= (1U << idx);
 		return;
 	}
-
-	malloc_c1P4Poison(chunk, chunksz); /* TODO(C1-hunt) */
 
 	idx = malloc_getlidx(chunksz);
 	exist = lib_treeof(chunk_t, node, lib_rbInsert(&malloc_common.lbins[idx], &chunk->node));
@@ -1459,77 +544,6 @@ static int malloc_chunkInWindow(const chunk_t *chunk)
 		return 0;
 	}
 	return 1;
-}
-
-
-/* Is this address the base of a heap we actually mmap'd (and have not released)?
- * Pure value test over a small ring, safe on a pointer we will not dereference.
- * A hit removes the last alternative to the heap-base reading: that `hbase?=`
- * matched a live block whose payload merely looks like a heap header. */
-static int malloc_isLiveHeapBase(const chunk_t *chunk)
-{
-	uintptr_t p = (uintptr_t)chunk;
-	unsigned int i;
-
-	for (i = 0; i < 256u; i++) {
-		if ((malloc_common.live[i] != 0u) && (malloc_common.live[i] == p)) {
-			return 1;
-		}
-	}
-	return 0;
-}
-
-
-/* The base of a live heap whose extent overlaps [nbase, nbase + nsize), or 0 if none does.
- *
- * _malloc_heapAlloc() checked the address mmap returned against released[] and nothing
- * else, so a region handed back on top of a LIVE heap went straight into malloc_heapInit(),
- * which writes the new (smaller) size over that heap's header. Its chunks above the new end
- * stay mapped and in use, still naming that base in ->heap, and their frees then fail
- * malloc_chunkValidWhy() with code 6/8 -- an intact chunk grid outside the extent its heap
- * claims, which is the archive's residue signature
- * (docs/misc/2026-09-18-allocator-guard-residue.md).
- *
- * Note nbase is NOT yet in live[] when this runs -- the ring insert follows the call -- so
- * an entry equal to nbase means a live heap ALREADY sits at that address, i.e. the total
- * overlap, the most severe case there is. It must not be skipped.
- *
- * ↩ **The claim this loop used to rest on is RETRACTED** (2026-09-25). It read: "live[] is
- * cleared on release and both release refusals keep the heap mapped, so a non-zero entry is
- * a heap we believe is mapped and its header is safe to read." The reasoning is sound --
- * munmap() at the end of malloc_heapRelease() is the only return-to-OS in the file, and the
- * clear loop is unconditional, exhaustive over all 256 slots and runs BEFORE it -- yet the
- * conclusion is false in practice: /bin/ntpclient faulted reading exactly such an entry
- * (base 0x5000, run c1hpa01). Whether the slot was corrupted or the mapping vanished under
- * an honest entry is still open, which is why the entry's recorded size is now reported.
- *
- * So this loop no longer dereferences anything: lsize comes from liveSize[], recorded at
- * insert. A wrapped ring (see liveOverflow) can only make this MISS an overlap, never
- * invent one. */
-static uintptr_t malloc_liveOverlap(uintptr_t nbase, size_t nsize, size_t *lsizeOut)
-{
-	unsigned int i;
-
-	*lsizeOut = 0u;
-	for (i = 0; i < 256u; i++) {
-		uintptr_t lbase = malloc_common.live[i];
-		size_t lsize;
-
-		if (lbase == 0u) {
-			continue;
-		}
-		/* No dereference: the size comes from what we recorded at insert, so an
-		 * entry naming an unmapped page can no longer fault this loop. */
-		lsize = malloc_common.liveSize[i];
-		if (lsize == 0u) {
-			continue;
-		}
-		if ((nbase < (lbase + lsize)) && (lbase < (nbase + nsize))) {
-			*lsizeOut = lsize;
-			return lbase;
-		}
-	}
-	return 0u;
 }
 
 
@@ -1691,11 +705,6 @@ static int _malloc_chunkRemove(chunk_t *chunk)
 		malloc_debugHex("malloc:   hbase?= ", (uintptr_t)malloc_looksLikeHeapBase(chunk));
 		/* 1 here PROVES a stale pointer into a heap we already released. */
 		malloc_debugHex("malloc:   freed?= ", (uintptr_t)malloc_wasReleased(chunk));
-		/* 1 here is PROOF the bin held a heap base, not a look-alike payload. */
-		malloc_debugHex("malloc:   lheap?= ", (uintptr_t)malloc_isLiveHeapBase(chunk));
-		/* Non-zero means the live ring wrapped over still-live entries, so a
-		 * `lheap?=0` above may mean "evicted", not "not a heap". */
-		malloc_debugHex("malloc:   lovfl = ", (uintptr_t)malloc_common.liveOverflow);
 		if (chunksz <= CHUNK_SMALLBIN_MAX_SIZE) {
 			idx = malloc_getsidx(chunksz);
 			malloc_common.sbins[idx] = NULL;
@@ -1720,45 +729,6 @@ static int _malloc_chunkRemove(chunk_t *chunk)
 	malloc_common.freesz -= chunksz - CHUNK_OVERHEAD;
 
 	if (chunksz <= CHUNK_SMALLBIN_MAX_SIZE) {
-		/* Did anything write into this block while it was free? See the poison in
-		 * _malloc_chunkAdd(). A mismatch PROVES a write into freed memory, which is
-		 * the last standing explanation for the corrupt bin entries. */
-		if (chunksz >= 48u) {
-			/* TODO(C1-hunt): verify the whole poisoned payload, and report the FIRST
-			 * word that differs together with its offset -- the offset is the datum,
-			 * since a stray 4-byte store and a foreign structure look different. */
-			uintptr_t pw = (uintptr_t)chunk + 32u;
-			uintptr_t pend = (uintptr_t)chunk + chunksz - 8u;
-			size_t want = 0u;
-			size_t got = 0u;
-			uintptr_t bad = 0u;
-
-			while (pw < pend) {
-				want = (size_t)(0x5ee7ee7dee7ee7d5ull ^ (unsigned long long)pw);
-				got = *(size_t *)pw;
-				if (got != want) {
-					bad = pw;
-					break;
-				}
-				pw += sizeof(size_t);
-			}
-
-			if (bad != 0u) {
-				static int poisonReported = 0;
-				if (poisonReported == 0) {
-					poisonReported = 1;
-					debug("malloc: FREED BLOCK WAS WRITTEN TO while on a bin -- poison broken\n");
-					malloc_debugHex("malloc:   chunk = ", (uintptr_t)chunk);
-					malloc_debugHex("malloc:   at    = ", bad);
-					malloc_debugHex("malloc:   offs  = ", bad - (uintptr_t)chunk);
-					malloc_debugHex("malloc:   csize = ", (uintptr_t)chunksz);
-					malloc_debugHex("malloc:   want  = ", (uintptr_t)want);
-					malloc_debugHex("malloc:   got   = ", (uintptr_t)got);
-					malloc_debugHex("malloc:   next  = ", (uintptr_t)chunk->next);
-					malloc_debugHex("malloc:   prev  = ", (uintptr_t)chunk->prev);
-				}
-			}
-		}
 		idx = malloc_getsidx(chunksz);
 		LIST_REMOVE(&malloc_common.sbins[idx], chunk);
 		if (malloc_common.sbins[idx] == NULL) {
@@ -1767,8 +737,6 @@ static int _malloc_chunkRemove(chunk_t *chunk)
 
 		return 1;
 	}
-
-	malloc_c1P4Verify(chunk, chunksz); /* TODO(C1-hunt) */
 
 	idx = malloc_getlidx(chunksz);
 	LIST_REMOVE(&next, chunk);
@@ -1919,7 +887,7 @@ static void malloc_reportBadNeighbour(const char *where, chunk_t *it, chunk_t *s
 			&& ((malloc_common.heapHi == 0u)
 				|| (((uintptr_t)it->heap >= malloc_common.heapLo)
 					&& ((uintptr_t)it->heap < malloc_common.heapHi)))) {
-		malloc_reportHeapSize(it->heap);
+		malloc_debugHex("malloc:   hsize    = ", (uintptr_t)it->heap->size);
 		malloc_debugHex("malloc:   heapEnd  = ", (uintptr_t)it->heap + it->heap->size);
 	}
 	else {
@@ -1992,79 +960,82 @@ static void malloc_heapInit(heap_t *heap, size_t size)
 }
 
 
-/* TODO(C1-hunt): remove with the rest of the C1 instrument.
- *
- * Every C1 fire reads the SAME corrupt high half -- 0x80000001, 154 of 154
- * readings in one run -- in the size field of a page-aligned heap, with the low
- * half intact, on three heaps of different sizes scattered megabytes apart.
- * Guessing the writer from that constant has now failed four times (libstdc++'s
- * emergency pool, a Mesa gc_block_header, an allocator flag bit, a V3D PTE), so
- * stop guessing WHO and bound WHEN: sweep the live heaps every C1_SCAN_EVERY
- * allocator operations and report the first header that has gone bad.
- *
- * That is strictly more than the existing reports give. They fire whenever some
- * later free() happens to validate a chunk in an already-broken heap -- 79 times
- * in one run, all long after the fact. This bounds the corrupting write to the
- * preceding C1_SCAN_EVERY operations and stamps it with a tick, so it can be
- * placed against the run (startup? shader compile? mid-render?).
- *
- * ↩ RETRACTED 2026-09-25: "live[] is cleared on release, so every non-zero entry is a
- * heap we still have mapped and its header is safe to read." Disproved -- see
- * malloc_liveOverlap(). This scan reads headers by design, so unlike that function it
- * cannot drop the dereference; it goes through malloc_liveEntryReadable() instead, which
- * adds a real mapping test. It is also the more dangerous of the two callers: it walks
- * all 256 slots on a timer rather than only at heap creation. */
-#define C1_SCAN_EVERY 64u
-
-static void malloc_c1Scan(void)
+/* Return a fully free heap to the system. Its single chunk must still be in its
+ * free bin. Returns 0 if the heap was unmapped, -1 if it had to be leaked. */
+static int malloc_heapRelease(heap_t *heap)
 {
-	unsigned int i;
+	/* Only release if the chunk really left its bin. _malloc_chunkRemove()
+	 * ABANDONS the bin when a link fails validation, and unmapping anyway would
+	 * leave that bin pointing into memory we gave back -- which mmap then reuses,
+	 * so the entry later reads as a sane header belonging to the NEXT heap.
+	 * Leaking one heap is strictly better. */
+	if (_malloc_chunkRemove((chunk_t *)heap->space) == 0) {
+		debug("malloc: heap release ABANDONED -- chunk still binned; leaking the heap\n");
+		malloc_debugHex("malloc:   heap = ", (uintptr_t)heap);
+		return -1;
+	}
 
-	malloc_common.scanTick++;
-	if (((malloc_common.scanTick % C1_SCAN_EVERY) != 0u) || (malloc_common.scanReports >= 4u)) {
+	malloc_common.released[malloc_common.relIdx & 7u].base = (uintptr_t)heap;
+	malloc_common.released[malloc_common.relIdx & 7u].size = heap->size;
+	++malloc_common.relIdx;
+
+	/* A failed munmap leaves the region mapped while released[] already says it
+	 * is gone, so malloc_chunkValid() would reject every later block in it. The
+	 * kernel is not expected to fail here, but say so if it does. */
+	malloc_common.mapsz -= heap->size;
+	if (munmap(heap, heap->size) < 0) {
+		debug("malloc: munmap of a released heap FAILED -- released[] now lies\n");
+		malloc_debugHex("malloc:   heap  = ", (uintptr_t)heap);
+		malloc_debugHex("malloc:   hsize = ", (uintptr_t)heap->size);
+	}
+
+	return 0;
+}
+
+
+static void malloc_heapUnretainAt(unsigned int i)
+{
+	malloc_common.retainedsz -= malloc_common.retained[i]->size;
+	malloc_common.nretained--;
+	memmove(&malloc_common.retained[i], &malloc_common.retained[i + 1U],
+		(malloc_common.nretained - i) * sizeof(malloc_common.retained[0]));
+}
+
+
+/* A heap has just become entirely free: keep it for the next request it can
+ * serve instead of unmapping it. Its chunk is already in a free bin, so the
+ * ordinary bin search finds it; nothing else changes. The oldest kept heaps are
+ * released to stay within MALLOC_RETAIN_MAX heaps and MALLOC_RETAIN_BYTES
+ * bytes, and a heap larger than the byte limit is released at once. */
+static void malloc_heapRetain(heap_t *heap)
+{
+	if (heap->size > MALLOC_RETAIN_BYTES) {
+		(void)malloc_heapRelease(heap);
 		return;
 	}
 
-	for (i = 0; i < 256u; i++) {
-		uintptr_t base = malloc_common.live[i];
+	while ((malloc_common.nretained >= MALLOC_RETAIN_MAX) ||
+			((malloc_common.retainedsz + heap->size) > MALLOC_RETAIN_BYTES)) {
+		heap_t *oldest = malloc_common.retained[0];
 
-		if ((base == 0u) || (base == malloc_common.scanLastBase)) {
-			continue; /* already reported: spend the four slots on distinct heaps */
-		}
+		malloc_heapUnretainAt(0);
+		(void)malloc_heapRelease(oldest);
+	}
 
-		/* This read used to be COMPLETELY unguarded -- not even the page-alignment
-		 * test -- on the strength of the same "live[] is cleared on release" claim
-		 * that malloc_liveOverlap() relied on and that c1hpa01 disproved. It is the
-		 * more dangerous of the two, because the scan walks all 256 slots on a timer
-		 * rather than only at heap creation. */
-		if (malloc_liveEntryReadable(base, malloc_common.liveSize[i]) == 0) {
-			continue;
-		}
+	malloc_common.retained[malloc_common.nretained++] = heap;
+	malloc_common.retainedsz += heap->size;
+}
 
-		if ((((const heap_t *)base)->size >> 32) != 0u) {
-			malloc_common.scanReports++;
-			malloc_common.scanLastBase = base;
-			debug("malloc: C1-hunt: a live heap header has gone bad\n");
-			malloc_debugHex("malloc:   c1sbase= ", base);
-			malloc_debugHex("malloc:   c1ssize= ", (uintptr_t)((const heap_t *)base)->size);
-			malloc_debugHex("malloc:   c1stick= ", (uintptr_t)malloc_common.scanTick);
-			malloc_debugHex("malloc:   c1scall= ", malloc_common.lastCaller);
-			malloc_debugHex("malloc:   c1scalx= ", ~malloc_common.lastCaller);
 
-			/* The branch point for the whole hunt: is heap+4 an ISOLATED 4-byte
-			 * store, or did something write a foreign structure over the header?
-			 * Every reading so far is consistent with the former -- low half of
-			 * ->size intact, ->freesz plausible -- but that was inferred from two
-			 * fields. Dump the first 64 bytes and settle it. If only w1 is wrong
-			 * the writer stores one 32-bit word at a page+4; if the tail carries
-			 * recognisable foreign data, it names the writer outright. */
-			{
-				unsigned int w;
+/* A kept heap is about to hold a block, so it may no longer be released. */
+static void malloc_heapUnretain(const heap_t *heap)
+{
+	unsigned int i;
 
-				for (w = 0; w < 8u; w++) {
-					malloc_debugHex("malloc:   c1sw= ", (uintptr_t)((const uint64_t *)base)[w]);
-				}
-			}
+	/* Newest first: the heap freed last is the likeliest to be reused */
+	for (i = malloc_common.nretained; i > 0U; i--) {
+		if (malloc_common.retained[i - 1U] == heap) {
+			malloc_heapUnretainAt(i - 1U);
 			return;
 		}
 	}
@@ -2085,32 +1056,6 @@ static heap_t *_malloc_heapAlloc(size_t size)
 	if (heap == MAP_FAILED) {
 		return NULL;
 	}
-
-	/* ★ PACING COUNTERS -- two adds, no branch, no UART, never gated.
-	 *
-	 * WHY THEY ARE HERE. The archive says C1 fires ~90 s after the first rendered
-	 * frame, and that the frame count at the fire differs by 1.9x between two
-	 * groups of runs whose elapsed time agrees to 3%. So the event is paced by
-	 * TIME, not by the work the application is doing -- which is a strange result
-	 * that no suspect on the C1 list predicts, and it was reached entirely by
-	 * inference from a frame counter that happens to be logged.
-	 *
-	 * These make the same question answerable DIRECTLY on the next fire: the
-	 * winsys prints them next to `flipstat`, so a fire's position is readable on
-	 * the heap-growth axis as well as the time and frame axes, and whichever one
-	 * is invariant across runs is the anchor. Heap growth is the axis that matters
-	 * most here, because STK streams assets over NFS at a rate set by the network
-	 * rather than by the frame loop -- so "paced by time" and "paced by heap
-	 * growth" are NOT distinguishable from anything logged today, and they imply
-	 * completely different suspects.
-	 *
-	 * ⚠ DELIBERATELY NOT env-gated, unlike every other probe in this file. A gated
-	 * counter is a counter that can silently be zero -- this project has four
-	 * recorded ways for exactly that to happen -- and the cost here is two
-	 * increments per heap creation, a few hundred times per run. There is nothing
-	 * to save by making it conditional and a whole failure mode to buy. */
-	malloc_c1Heaps++;
-	malloc_c1HeapBytes += (unsigned long)heapSize;
 
 	/* This region may be one we released earlier: mmap reuses addresses. Drop any
 	 * released[] record that overlaps it, or malloc_chunkValid() would go on
@@ -2138,92 +1083,6 @@ static heap_t *_malloc_heapAlloc(size_t size)
 		}
 	}
 
-	/* ...and it must NOT be one that is still live. Nothing checked that until now:
-	 * the released[] sweep above is the only test the returned address ever faced, so
-	 * a mapping handed back on top of a live heap went straight into malloc_heapInit()
-	 * below, which writes the NEW (smaller) size over the live heap's header. Every
-	 * chunk of the old heap above the new end stays mapped and in use, still carrying
-	 * this base in ->heap, and each of their frees then fails malloc_chunkValidWhy()
-	 * with code 6/8 -- an intact chunk grid sitting outside the extent its heap claims.
-	 * That is exactly the archive's residue signature
-	 * (docs/misc/2026-09-18-allocator-guard-residue.md), so name it at the source
-	 * instead of 70 frees later.
-	 *
-	 * Report and carry on rather than failing the allocation: if this never fires the
-	 * hypothesis is dead, and if it does, returning NULL here would turn a contained
-	 * corruption into an immediate app crash. A wrapped ring can only miss an overlap,
-	 * never invent one.
-	 *
-	 * ↩ This comment also used to assert "live[] is cleared on release, so a non-zero
-	 * entry is a heap we believe is mapped and its header is safe to read" -- retracted
-	 * 2026-09-25, see malloc_liveOverlap(). The reported size now comes from liveSize[]
-	 * via the out-param rather than from a dereference of lbase, which was the last
-	 * read of a live[] entry's header on this path. */
-	{
-		size_t lsize = 0u;
-		uintptr_t lbase = malloc_liveOverlap((uintptr_t)heap, heapSize, &lsize);
-
-		if (lbase != 0u) {
-			debug("malloc: mmap returned a region OVERLAPPING a live heap\n");
-			malloc_debugHex("malloc:   new   = ", (uintptr_t)heap);
-			malloc_debugHex("malloc:   nsize = ", (uintptr_t)heapSize);
-			malloc_debugHex("malloc:   live  = ", lbase);
-			malloc_debugHex("malloc:   lsize = ", (uintptr_t)lsize);
-		}
-	}
-
-	if (malloc_common.live[malloc_common.liveIdx & 255u] != 0u) {
-		/* Overwriting a still-live entry: the ring is too small for this
-		 * workload and `lheap?=0` can no longer be trusted. Say so rather than
-		 * report a verdict that cannot discriminate. */
-		++malloc_common.liveOverflow;
-	}
-	malloc_common.live[malloc_common.liveIdx & 255u] = (uintptr_t)heap;
-	malloc_common.liveSize[malloc_common.liveIdx & 255u] = heapSize;
-	++malloc_common.liveIdx;
-
-	/* ★ THE ROUTE C1 ACTUALLY NEEDS, counted for the first time.
-	 *
-	 * C1's signature is a heap header corrupted at +4, so the page was under
-	 * malloc. For the BO hypothesis to work, a page the V3D driver closed has to
-	 * come back through the kernel and be handed to THIS allocator. Everything
-	 * measured so far counts the driver's half -- closes, unmaps, BO-to-BO reuse --
-	 * and none of it establishes that a BO page ever reaches malloc at all.
-	 *
-	 * This does: at every heap creation, ask the driver's PA-keyed closed-BO ring
-	 * whether this heap's physical page used to be a BO. The counter then has two
-	 * readings and both are worth having:
-	 *
-	 *   stays 0 all run  -> no BO page ever became a heap, and the whole BO route
-	 *                       is dead for the *heap-header* corruption. That would be
-	 *                       the largest single elimination the hunt has managed.
-	 *   first non-zero   -> a date. If it lands at the ~76 s where the fire window
-	 *                       opens, the onset has its mechanism.
-	 *
-	 * ⚠ Placed HERE, after the heap is live and its header written, not next to the
-	 * mmap: va2pa() on a page that has not been touched yet can read 0, which would
-	 * silently under-count and look like the "dead route" answer.
-	 *
-	 * v3d_c1_lookup_pa is weak (declared above) so a binary without the driver
-	 * simply never counts; cost is one 512-entry scan per heap creation. */
-	if (v3d_c1_lookup_pa != NULL) {
-		uintptr_t hpa = (uintptr_t)va2pa((void *)heap);
-
-		if (hpa != 0u) {
-			malloc_c1HeapProbes++;
-			malloc_c1HeapPaLast = (unsigned long)hpa;
-			if ((malloc_c1HeapPaLo == 0u) || ((unsigned long)hpa < malloc_c1HeapPaLo)) {
-				malloc_c1HeapPaLo = (unsigned long)hpa;
-			}
-			if ((unsigned long)hpa > malloc_c1HeapPaHi) {
-				malloc_c1HeapPaHi = (unsigned long)hpa;
-			}
-			if (v3d_c1_lookup_pa((unsigned long)hpa, NULL, NULL, NULL) > 0) {
-				malloc_c1HeapFromBo++;
-			}
-		}
-	}
-
 	if ((malloc_common.heapLo == 0u) || ((uintptr_t)heap < malloc_common.heapLo)) {
 		malloc_common.heapLo = (uintptr_t)heap;
 	}
@@ -2232,194 +1091,6 @@ static heap_t *_malloc_heapAlloc(size_t size)
 	}
 
 	chunk = (chunk_t *)heap->space;
-
-	/* TODO(C1-hunt): temporary, bounded to 16 reports.
-	 *
-	 * ⚠ CORRECTED 2026-09-25: this used to match ONLY 0xd000, on the belief that
-	 * "every archived fire's victim heap is 0xd000". Re-reading the archived fires
-	 * disproves it -- c1audit-t1 (2026-09-23) reports hsize=0x8000000100002000,
-	 * hlo32=0x2000, hfixed=1, i.e. a 0x2000 victim. A counter filtered to 0xd000
-	 * could never have seen it, which is exactly the kind of too-narrow selector
-	 * that has cost this hunt time before. Match every observed victim size and
-	 * print which one, so the log says what was counted instead of leaving the
-	 * reader to assume.
-	 *
-	 * 0x5000 is the third, and it is the one to watch: all 61 page-poison breaks
-	 * in the log archive report p4csize=0x4ff0 with p4chunk page-aligned+0x10 --
-	 * i.e. the whole free space of a 0x5000 heap (0x4ff0 + sizeof(heap_t)). The
-	 * address varies across 24 pages and 21 chunks, so the writer targets an
-	 * allocation SHAPE, not an address. c1call below names who asks for it.
-	 *
-	 * ⚠ OFF BY DEFAULT since 2026-09-25 -- arm it with C1_HEAP_TRACE=1.
-	 *
-	 * This is FOUR blocking debug() writes per creation, up to 16 times. At
-	 * 115200 baud that is on the order of 200 ms of UART inside heap creation,
-	 * for exactly the victim size, in every process. It was added AFTER the last
-	 * ⚠ CORRECTED 2026-09-25. An earlier version of this comment claimed the
-	 * trace was added AFTER the last observed fire and that no run carrying it
-	 * had ever fired. That was wrong: it came from globbing only *stk*.log, and
-	 * every firing run of the 2026-09-23/24 hunt is labelled c1audit/c1cx/c1armA/
-	 * c1master/c1off/c1smoke, so the glob silently skipped them all. Measured
-	 * properly across all 852 GPU-bearing logs (control: the log contains
-	 * "flipstat", i.e. a GPU run really happened):
-	 *
-	 *     trace PRESENT: 195 runs,  7 fired
-	 *     trace ABSENT : 657 runs,  1 fired
-	 *
-	 * C1 fired SEVEN times with this trace compiled in, most recently
-	 * 2026-09-24 16:00. So the trace is not shown to suppress anything -- the raw
-	 * association points the other way, and is itself confounded, since the trace
-	 * was enabled precisely during the hunt sessions whose workloads were chosen
-	 * to provoke the event.
-	 *
-	 * The gate therefore rests on its own merit, not on that claim: four blocking
-	 * debug() writes per creation, up to 16 times, is on the order of 200 ms of
-	 * UART inside heap creation in every process, which has no place in a default
-	 * build regardless of what it does or does not suppress.
-	 *
-	 * Env-selected rather than deleted, and read inside the one binary, because
-	 * that is the only measurement shape that has worked here: a compiled arm
-	 * makes the two sides different binaries and the comparison worthless.
-	 * getenv is safe from inside malloc -- _env_find is NULL-safe and never
-	 * allocates -- and it does not take the allocator lock. psh has `export`.
-	 *
-	 * ⚠ The arm latches at the FIRST 0xd000 creation. If a future change moves
-	 * that allocation before environ is populated (a C++ static constructor, say),
-	 * getenv returns NULL and the trace latches OFF for the process's lifetime --
-	 * silently, so the armed side of an A/B would just be a second copy of the
-	 * default side. Measured 2026-09-25 on SuperTuxKart f2efc4b0: armed gives
-	 * created=14, default 0, both 1772 frames, so today it latches late enough.
-	 * Always assert created >= 1 on the armed arm before believing an A/B. */
-	/* Trace EVERY heap big enough to hold the 0x4ff0 chunk the page-poison guard
-	 * keeps finding broken, not a hand-picked list of sizes.
-	 *
-	 * Measured 2026-09-25 (run c1gc): tracing 0xd000/0x5000/0x2000 exhaustively
-	 * -- budgets NOT exhausted -- still put 0 of the breaks inside a traced heap,
-	 * so the victim is a FRAGMENT of some larger heap whose size was never on the
-	 * list. The legal large sizes are 0x1000 0x2000 0x3000 0x4000 0x5000 0x7000
-	 * 0x9000 0xd000 0x11000 0x19000 0x21000; anything below 0x5000 cannot hold a
-	 * 0x4ff0 chunk, so >= 0x5000 is the exact filter.
-	 *
-	 * Budget 192, because 42 traced heaps of that class reached only 0x0847e000
-	 * while the victim was at 0x0b588000. Affordable: more of this trace has
-	 * consistently meant MORE events, not fewer (21 reports -> 52 signature hits,
-	 * 59 reports -> 308), so it is not perturbing the thing it measures. */
-	/* ADDRESS WINDOW, not a count budget.
-	 *
-	 * Measured 2026-09-25: all 25 distinct victim pages in the whole log archive
-	 * -- 19 logs, several days, two applications -- lie in 0x09a86000..0x0f9e8000.
-	 * A count budget cannot reach them: tracing every heap >= 0x5000 with budget
-	 * 192 covered only 0x0002b000..0x08a3f000, stopping just BELOW that window and
-	 * 43 MB short of a known victim, while costing a 16% UART corruption rate.
-	 *
-	 * So report only heaps that actually overlap the window where victims appear.
-	 * That is where the interesting creation happens, it is a small fraction of
-	 * the output, and the budget then lasts the whole run. */
-	if ((heapSize >= 0x5000u)
-			&& (((uintptr_t)heap + heapSize) > (uintptr_t)0x09000000u)
-			&& ((uintptr_t)heap < (uintptr_t)0x11000000u)) {
-		static int c1trace = -1;
-		/* Budget PER SIZE, not one shared pool. With a single 16-report cap the
-		 * first size to be created would consume the whole budget -- historical
-		 * runs already reported 13-16 creations with the 0xd000-only filter -- and
-		 * the size actually under investigation (0x5000) could go unreported in
-		 * every run. An experiment whose instrument can silently omit the thing it
-		 * was widened for is worse than no experiment. */
-		static unsigned int c1seen[1];
-		const unsigned int c1i = 0u;
-		/* 0xd000 gets a much larger budget than the rest: it is the size of every
-		 * archived hsize victim, and a budget of 8 demonstrably stops too early.
-		 * Measured 2026-09-25 on an armed run that DID reproduce the corruption:
-		 * the victim heap was 0x0b59a000 while the 8 traced 0xd000 heaps stopped
-		 * at 0x082b7000, so the heap that actually got corrupted was never traced.
-		 * The same run proves the cost is affordable -- it emitted 21 reports and
-		 * still fired 52 signature hits, so this trace does not suppress the
-		 * event. */
-		const unsigned int c1cap = 96u;
-
-		if (c1trace < 0) {
-			const char *e = getenv("C1_HEAP_TRACE");
-			c1trace = ((e != NULL) && (*e == '1')) ? 1 : 0;
-		}
-
-		if ((c1trace != 0) && (c1seen[c1i] < c1cap)) {
-			c1seen[c1i]++;
-			++malloc_common.bigHeapReports;
-			debug("malloc: C1-hunt: created a victim-size heap\n");
-			malloc_debugHex("malloc:   c1size = ", (uintptr_t)heapSize);
-			malloc_debugHex("malloc:   c1base = ", (uintptr_t)heap);
-			malloc_debugHex("malloc:   c1req  = ", (uintptr_t)size);
-			malloc_debugHex("malloc:   c1call = ", malloc_common.lastCaller);
-		}
-	}
-
-	/* A SECOND, independently armed trace: every heap, no size floor and no
-	 * address window. C1_HEAP_TRACE above is tuned for STK -- it reports only
-	 * heaps >= 0x5000 inside [0x09000000, 0x11000000), which is where that
-	 * workload's victims appear -- and those two filters make it blind to exactly
-	 * the question a small process raises. /bin/ntpclient faulted on a live[]
-	 * entry naming base 0x5000 (run c1hpa01): the STK trace could never report a
-	 * heap at that address, so arming it for ntpclient would print nothing at all
-	 * and the silence would look like an answer.
-	 *
-	 * Kept separate rather than widening the other filter, so the STK experiment
-	 * kept running under the conditions it was calibrated for. Distinct labels
-	 * (ca*) so the two traces can never be confused in a log. The cap is small
-	 * because the processes this is for are small -- it is not for STK.
-	 *
-	 * Purpose: answer "was this base EVER an mmap() return in THIS process?",
-	 * which is the test that separates a corrupt live[] slot from an honest heap
-	 * whose mapping vanished. Note the trace is per-process env-gated, so it must
-	 * be armed on the command that actually allocates. */
-	{
-		static unsigned int caSeen = 0u;
-		const unsigned int caCap = 64u;
-
-		if ((malloc_caTraceOn() != 0) && (caSeen < caCap)) {
-			caSeen++;
-			debug("malloc: C1-hunt: heap created (all-trace)\n");
-			malloc_debugHex("malloc:   casize = ", (uintptr_t)heapSize);
-			malloc_debugHex("malloc:   cabase = ", (uintptr_t)heap);
-			malloc_debugHex("malloc:   careq  = ", (uintptr_t)size);
-			/* The PHYSICAL page, which is the whole point of this trace being
-			 * unconditional.
-			 *
-			 * The standing C1 hypothesis is that a VideoCore mailbox response
-			 * lands at page+4 of a live heap, and the correlation that would
-			 * show it (heap PA vs the v3d driver's logged mailbox request-buffer
-			 * PA) has so far been FIRE-GATED: hpa/p4pa print only when a guard
-			 * trips, so five clean trials of series #3 produced 24 mailbox PAs
-			 * each and not one heap PA to compare them against.
-			 *
-			 * ⚠ This matters more than it looks. The archive says instruments
-			 * SUPPRESS C1 (five in a row drove the rate to 0), so an experiment
-			 * that needs the event to fire is fighting its own instrumentation.
-			 * Logging the PA on every heap creation turns the question into one
-			 * that needs no fire at all: does a mailbox buffer's physical page
-			 * EVER coincide with a live heap's? That is answerable on a clean
-			 * run, which removes suppression from the critical path entirely.
-			 *
-			 * Deliberately confined to this opt-in trace, never the default
-			 * build, so it cannot perturb the rate of the event it is studying.
-			 *
-			 * ⚠ EVERY page, not just the first. A heap's pages are separate
-			 * physical frames -- mmap makes no contiguity promise -- and C1
-			 * lands at page+4 of a CHUNK, which can sit in any page of the heap.
-			 * A 0xd000 heap is 13 pages, so logging only page 0 would give the
-			 * coincidence test ~1/13 of the coverage it claims and turn a
-			 * "no coincidence" into a statement about almost nothing. */
-			{
-				uintptr_t pg;
-
-				for (pg = (uintptr_t)heap & ~(uintptr_t)(_PAGE_SIZE - 1);
-						(pg < ((uintptr_t)heap + heapSize)) && (caPaLines < 512u);
-						pg += (uintptr_t)_PAGE_SIZE) {
-					caPaLines++;
-					malloc_debugHex("malloc:   capa   = ", (uintptr_t)va2pa((void *)pg));
-				}
-			}
-		}
-	}
 
 	malloc_heapInit(heap, heapSize);
 
@@ -2467,11 +1138,19 @@ static inline void *_malloc_allocFrom(chunk_t *chunk, size_t size)
 		malloc_debugHex("malloc:   size  = ", (uintptr_t)(chunk->size));
 		malloc_debugHex("malloc:   want  = ", (uintptr_t)size);
 		malloc_debugHex("malloc:   heap  = ", (uintptr_t)chunk->heap);
-		malloc_reportHeapSize(chunk->heap);
+		malloc_debugHex("malloc:   hsize = ", (uintptr_t)chunk->heap->size);
 		malloc_debugHex("malloc:   hfree = ", (uintptr_t)chunk->heap->freesz);
 		malloc_debugHex("malloc:   heapLo= ", malloc_common.heapLo);
 		malloc_debugHex("malloc:   heapHi= ", malloc_common.heapHi);
 		_exit(EX_SOFTWARE);
+	}
+
+	/* An entirely free heap may be one kept by malloc_heapRetain(); once it holds
+	 * this block it must leave that list. Tested before the split and the freesz
+	 * update below, while "entirely free" is still visible. A fresh heap from
+	 * _malloc_heapAlloc() passes the test too and is simply not found. */
+	if (chunk->heap->freesz == (chunk->heap->size - sizeof(heap_t))) {
+		malloc_heapUnretain(chunk->heap);
 	}
 
 	if (malloc_chunkCanSplit(chunk, size)) {
@@ -2598,23 +1277,9 @@ static void *_malloc_allocLarge(size_t size)
 		malloc_debugHex("malloc:   chunk = ", (uintptr_t)chunk);
 		malloc_debugHex("malloc:   want  = ", (uintptr_t)size);
 		malloc_debugHex("malloc:   hbase?= ", (uintptr_t)malloc_looksLikeHeapBase(chunk));
-		/* The discriminators this path was missing. _malloc_chunkTake()'s long
-		 * report already prints them, but THIS short one is the shape that
-		 * actually fires in the field (twice in 23 SuperTuxKart runs, 2026-09-14
-		 * and 09-15), so the report we get is the one that could not name its own
-		 * mechanism.
-		 *
-		 * What each answers: `freed?=1` would prove the entry points into a heap
-		 * we already released -- note the long path has read 0 for it on every
-		 * event so far, so agreement here would confirm that rather than break new
-		 * ground, and a 1 would be news. `lheap?=` plus the two header words
-		 * separate a real heap base from a payload that merely looks like one --
-		 * the ambiguity the comment on `live[]` above exists for.
-		 *
-		 * No new fault risk: these are value tests, or reads of a pointer that
-		 * malloc_chunkValid() has already dereferenced on the line above. */
+		/* `freed?=1` says the entry points into a heap we already released. Value
+		 * tests, or reads of a pointer malloc_chunkValid() has just dereferenced. */
 		malloc_debugHex("malloc:   freed?= ", (uintptr_t)malloc_wasReleased(chunk));
-		malloc_debugHex("malloc:   lheap?= ", (uintptr_t)malloc_isLiveHeapBase(chunk));
 		malloc_debugHex("malloc:   size  = ", (uintptr_t)chunk->size);
 		malloc_debugHex("malloc:   heap  = ", (uintptr_t)chunk->heap);
 		malloc_debugHex("malloc:   heapLo= ", malloc_common.heapLo);
@@ -2791,11 +1456,7 @@ void *malloc(size_t size)
 
 	size = CEIL(max(size + CHUNK_OVERHEAD, CHUNK_MIN_SIZE), 8U);
 
-	/* TODO(C1-hunt): see malloc_common.lastCaller. */
-	malloc_common.lastCaller = (uintptr_t)__builtin_return_address(0);
-
 	const int locked = malloc_lock();
-	malloc_c1Scan(); /* TODO(C1-hunt) */
 	if (size <= CHUNK_SMALLBIN_MAX_SIZE) {
 		ptr = _malloc_allocSmall(size);
 	}
@@ -2892,66 +1553,11 @@ void free(void *ptr)
 		 * it means a real block's header was smashed. */
 		malloc_debugHex("malloc:   heapLo= ", malloc_common.heapLo);
 		malloc_debugHex("malloc:   heapHi= ", malloc_common.heapHi);
-		/* ...and WHAT that heap pointer is, which is what separates the three
-		 * stories the codes above cannot on their own:
-		 *   lheap?=1            -> a live heap base; the chunk or its size is wrong
-		 *   freed?=1            -> a heap we released; this block outlived its heap
-		 *   both 0              -> not a heap at all: a stale pointer whose address
-		 *                          has since been reused, or a smashed ->heap field
-		 * (freed? only remembers the last 8 releases, so 0 there is weak evidence.) */
-		malloc_debugHex("malloc:   lheap?= ", (uintptr_t)malloc_isLiveHeapBase((const chunk_t *)heap));
 		malloc_debugHex("malloc:   freed?= ", (uintptr_t)malloc_wasReleased((const chunk_t *)heap));
-		/* Non-zero means the 256-entry live ring wrapped over still-live entries, so
-		 * `lheap?=0` may mean "evicted" rather than "not a heap" -- and the overlap
-		 * check in _malloc_heapAlloc() was blind for however many heaps it lost. The
-		 * host harness reaches 226 live heaps on a 100k-op seed, so this is not
-		 * hypothetical. Printed here for the same reason the bin-corruption branch
-		 * prints it: without it the verdicts above cannot be read. */
-		malloc_debugHex("malloc:   lovfl = ", (uintptr_t)malloc_common.liveOverflow);
-		/* For the extent codes (5, 6, 8) the chunk sits OUTSIDE the range its own heap
-		 * claims, and the codes alone cannot say which way that happened. Print the
-		 * extent itself. Safe to dereference here: reaching code >= 5 means the heap
-		 * pointer already passed the non-NULL, page-aligned and in-window tests, and
-		 * malloc_heapSizeValid() has read ->size.
-		 *
-		 * The archive's 99 events all show a coherent, non-overlapping, mostly
-		 * exactly-adjacent chunk grid running well past the reported end, i.e. blocks
-		 * this allocator really did carve. Two stories survive that, and hend? tells
-		 * them apart without any new bookkeeping:
-		 *   hend?=1  -> the next live heap begins exactly where this one now ends, so
-		 *               a smaller heap was mapped over a released larger one and the
-		 *               old grid above it is still mapped and unzeroed
-		 *   hend?=0  -> no heap starts there; the extent shrank in place under a live
-		 *               heap, and hfree should then disagree with hsize
-		 * Read hsize against the legal sizes in lookup[] (:1235): the four residue
-		 * heaps must all have been 0xd000, and 0x8000 is not a legal size at all. */
 		if (why >= 5) {
-			malloc_reportHeapSize(heap);
+			/* Codes 5, 6 and 8 passed the heap pointer tests, so its header is readable */
+			malloc_debugHex("malloc:   hsize = ", (uintptr_t)heap->size);
 			malloc_debugHex("malloc:   hfree = ", (uintptr_t)heap->freesz);
-			malloc_debugHex("malloc:   hend? = ",
-				(uintptr_t)malloc_isLiveHeapBase((const chunk_t *)((uintptr_t)heap + heap->size)));
-
-			/* Every code-5 event on record has the SAME shape: the low 32 bits of
-			 * heap->size are a legal size and only the high half is wrong --
-			 * 0x80000000_0000d000 and 0x80000001_0000d000, two different heaps in
-			 * one run (gate-stk, 2026-09-22). Mask the top half and the heap is
-			 * entirely self-consistent: legal size, chunk inside it, sane grid.
-			 *
-			 * So the question is no longer "is this heap corrupt" but "what wrote
-			 * FOUR BYTES at heap+4", and the two high words differ by one, which
-			 * reads like a refcount or lock word with a flag in the MSB rather
-			 * than a constant marker.
-			 *
-			 * These three fields decide it on the next occurrence:
-			 *   hlo32  -- the surviving low half, to confirm it is a legal size
-			 *   hhi32  -- the corrupting value itself, as the 32-bit word it
-			 *             probably was when it was written
-			 *   hfixed -- does the heap validate once the high half is cleared?
-			 *             1 = a single stray 4-byte write into a live, otherwise
-			 *             intact heap; 0 = something bigger is wrong and the
-			 *             single-write story is dead.
-			 * Costs nothing on a healthy run: this branch does not execute. */
-			malloc_reportHeapSize(heap);
 		}
 		malloc_unlock(locked);
 		return;
@@ -3010,8 +1616,6 @@ void free(void *ptr)
 		_exit(EX_SOFTWARE);
 	}
 
-	malloc_c1FreeLog((uintptr_t)ptr, malloc_chunkSize(chunk), (uintptr_t)caller); /* TODO(C1-hunt) */
-
 	chunk->size &= ~CHUNK_CUSED;
 	malloc_chunkSetFooter(chunk);
 
@@ -3062,71 +1666,7 @@ void free(void *ptr)
 			malloc_debugHex("malloc:   csize = ", (uintptr_t)malloc_chunkSize(chunk));
 		}
 		else {
-			/* Only release if the chunk really left its bin. _malloc_chunkRemove()
-			 * ABANDONS the bin when a link fails validation, and unmapping anyway
-			 * leaves that bin pointing into memory we just gave back -- which mmap
-			 * then reuses, so the entry later reads as a sane header belonging to
-			 * the NEXT heap. That is the dangling entry this allocator has been
-			 * chasing; it faulted inside malloc_chunkValid() on a canonical,
-			 * page-aligned chunk that sat inside the range the stale header
-			 * claimed. Leaking one heap is strictly better, which is the same
-			 * trade the size check above already makes. */
-			if (_malloc_chunkRemove(chunk) == 0) {
-				debug("malloc: heap release ABANDONED -- chunk still binned; leaking the heap\n");
-				malloc_debugHex("malloc:   heap = ", (uintptr_t)heap);
-				return;
-			}
-			malloc_common.released[malloc_common.relIdx & 7u].base = (uintptr_t)heap;
-			malloc_common.released[malloc_common.relIdx & 7u].size = heap->size;
-			++malloc_common.relIdx;
-			/* Drop it from the live ring, or `lheap?=` would keep claiming a
-			 * released heap is still live and invert the reading. */
-			{
-				unsigned int i;
-				for (i = 0; i < 256u; i++) {
-					if (malloc_common.live[i] == (uintptr_t)heap) {
-						malloc_common.live[i] = 0u;
-						/* Must clear in lockstep: malloc_liveOverlap() now
-						 * skips on liveSize==0, so a stale size would keep a
-						 * released heap in the overlap test. */
-						malloc_common.liveSize[i] = 0u;
-					}
-				}
-			}
-			/* A failed munmap leaves the region mapped while released[] already says
-			 * it is gone, so malloc_chunkValid() would reject every later block in it
-			 * and the address never comes back through mmap. The kernel's aarch64
-			 * pmap_remove() cannot fail, and _vm_munmap() leaves un-processed entries
-			 * in the tree when it gives up, so this is not expected -- but it was
-			 * discarded, which is why nobody could have known. */
-			/* Record the physical pages we are about to hand back, while they
-			 * are still mapped and va2pa() can still answer.
-			 *
-			 * Without this the coincidence test in c1-report is unsound. Phoenix
-			 * reuses physical frames across mmap/munmap constantly, so a heap
-			 * released and its frame later handed to the v3d driver for a mailbox
-			 * buffer yields capa == mbox_pa while the two NEVER coexisted -- a
-			 * perfectly benign reuse that would print as the strongest-worded
-			 * line in the report. A match only means anything if the heap was
-			 * still LIVE when the mailbox took the page, and these lines are what
-			 * let the report tell those apart. */
-			if ((caRelLines < 256u) && (malloc_caTraceOn() != 0)) {
-				uintptr_t pg;
-
-				for (pg = (uintptr_t)heap;
-						(pg < ((uintptr_t)heap + heap->size)) && (caRelLines < 256u);
-						pg += (uintptr_t)_PAGE_SIZE) {
-					caRelLines++;
-					malloc_debugHex("malloc:   carel  = ", (uintptr_t)va2pa((void *)pg));
-				}
-			}
-
-			malloc_common.mapsz -= heap->size;
-			if (munmap(heap, heap->size) < 0) {
-				debug("malloc: munmap of a released heap FAILED -- released[] now lies\n");
-				malloc_debugHex("malloc:   heap  = ", (uintptr_t)heap);
-				malloc_debugHex("malloc:   hsize = ", (uintptr_t)heap->size);
-			}
+			malloc_heapRetain(heap);
 		}
 	}
 
@@ -3405,6 +1945,27 @@ void mallocInfo(mallocInfo_t *info)
 	info->freesz = malloc_common.freesz;
 	info->maxalloc = malloc_common.maxalloc;
 	malloc_unlock(locked);
+}
+
+
+int malloc_trim(size_t pad)
+{
+	int released = 0;
+	const int locked = malloc_lock();
+
+	/* Oldest first, until at most `pad` bytes of kept heaps remain */
+	while ((malloc_common.nretained > 0U) && (malloc_common.retainedsz > pad)) {
+		heap_t *heap = malloc_common.retained[0];
+
+		malloc_heapUnretainAt(0);
+		if (malloc_heapRelease(heap) == 0) {
+			released = 1;
+		}
+	}
+
+	malloc_unlock(locked);
+
+	return released;
 }
 
 

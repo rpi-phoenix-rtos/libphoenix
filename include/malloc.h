@@ -45,6 +45,12 @@ typedef struct _mallocInfo_t {
 void mallocInfo(mallocInfo_t *info);
 
 
+/* Return free memory to the system. The allocator keeps recently freed heaps
+ * mapped for reuse; this releases them, oldest first, until at most `pad` bytes
+ * of them remain. Returns 1 if any memory was released, 0 otherwise (glibc). */
+extern int malloc_trim(size_t pad);
+
+
 /* Obsolete: allocate `size` bytes aligned to `alignment` (a power of two).
  * Use aligned_alloc() or posix_memalign(). */
 extern void *memalign(size_t alignment, size_t size);

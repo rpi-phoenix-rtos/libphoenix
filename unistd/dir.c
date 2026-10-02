@@ -388,10 +388,14 @@ struct dirent *readdir(DIR *dirp)
 		}
 	}
 
+	/* The buffer is larger than msg.o.raw, so the kernel never packs the reply
+	 * into it and o.readdir.next cannot overlap the entry. */
 	msg_t msg = {
 		.type = mtReaddir,
 		.oid = dirp->oid,
 		.i.readdir.offs = dirp->pos,
+		.i.readdir.flags = MSG_READDIR_NEXT,
+		.o.readdir.next = -1,
 		.o.data = dirp->dirent,
 		.o.size = sizeof(struct dirent) + NAME_MAX + 1
 	};
@@ -415,7 +419,16 @@ struct dirent *readdir(DIR *dirp)
 		return NULL;
 	}
 
-	dirp->pos += dirp->dirent->d_reclen;
+	/* A server that reports the next position may use positions that stay
+	 * valid while entries are removed during the scan (rm -rf, find -delete).
+	 * One that does not leaves the -1 above, and the position advances by
+	 * d_reclen as it always has. */
+	if (msg.o.readdir.next > dirp->pos) {
+		dirp->pos = msg.o.readdir.next;
+	}
+	else {
+		dirp->pos += dirp->dirent->d_reclen;
+	}
 
 	return dirp->dirent;
 }

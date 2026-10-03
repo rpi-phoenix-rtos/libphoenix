@@ -117,6 +117,28 @@ double atanh(double x)
 }
 
 
+/* The float hyperbolic inverses (declared in <math.h>, never defined here): through the double
+ * versions above, as coshf()/sinhf()/tanhf() do (hyper.c), which also carries their domain
+ * handling over (acoshf(x < 1) and atanhf(|x| > 1) are NaN, atanhf(+-1) is +-inf). WebKit's
+ * ANGLE folds GLSL constant expressions with them. */
+float asinhf(float x)
+{
+	return (float)asinh((double)x);
+}
+
+
+float acoshf(float x)
+{
+	return (float)acosh((double)x);
+}
+
+
+float atanhf(float x)
+{
+	return (float)atanh((double)x);
+}
+
+
 /* --- nextafter / nexttoward (C99). math module (math.nextafter/math.ulp) needs
  * nextafter; libphoenix lacked it. Step x by one ULP toward y via the IEEE-754
  * bit representation (musl approach). Verified vs glibc. --- */

@@ -33,6 +33,19 @@
 #include <sys/types.h>
 
 
+/* msun's internal kernels keep their fdlibm names in the sources, but are
+ * linked under private ones: ports that bundle their own fdlibm (SuperTuxKart's
+ * inputs do) define the same __kernel_* symbols, and a static link must not
+ * resolve either copy against the other. */
+#define __kernel_sin       __msun_kernel_sin
+#define __kernel_cos       __msun_kernel_cos
+#define __kernel_tan       __msun_kernel_tan
+#define __kernel_sinpi     __msun_kernel_sinpi
+#define __kernel_cospi     __msun_kernel_cospi
+#define __kernel_rem_pio2  __msun_kernel_rem_pio2
+#define __ieee754_rem_pio2 __msun_ieee754_rem_pio2
+
+
 /* A union which permits us to convert between a double and two 32 bit ints. */
 typedef union {
 	double value;

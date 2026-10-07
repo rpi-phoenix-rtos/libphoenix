@@ -5,7 +5,10 @@
  *
  * exp, frexp, ldexp, log, log10, modf, ceil, floor, fmod, fabs
  *
- * Copyright 2017 Phoenix Systems
+ * exp, exp2, log, log2, log10, fmod and ldexp/scalbn are the FreeBSD msun
+ * implementations (msun/), with C99 errno reporting added here.
+ *
+ * Copyright 2017, 2026 Phoenix Systems
  * Author: Aleksander Kaminski
  *
  * This file is part of Phoenix-RTOS.
@@ -17,6 +20,7 @@
 #include <math.h>
 #include <stdint.h>
 #include "common.h"
+#include "msun/msun.h"
 
 
 double frexp(double x, int *exp)
@@ -55,44 +59,13 @@ float frexpf(float x, int *exp)
 
 double ldexp(double x, int exp)
 {
-	if (isnan(x) != 0) {
-		return NAN;
-	}
-
-	if (x == 0.0) {
-		return x;
-	}
-
-	conv_t *conv = (conv_t *)&x;
-	int exponent = 0;
-
-	if (conv->i.exponent == 0) {
-		normalizeSub(&x, &exponent);
-	}
-
-	exponent += conv->i.exponent + exp;
-
-	if (exponent > 2046) {
-		errno = ERANGE;
-		return conv->i.sign ? -HUGE_VAL : HUGE_VAL;
-	}
-
-	/* If result is subnormal */
-	if (exponent < 0) {
-		createSub(&x, exponent);
-		conv->i.exponent = 0;
-	}
-	else {
-		conv->i.exponent = exponent;
-	}
-
-	return x;
+	return math_check1(__msun_scalbn(x, exp), x);
 }
 
 
 float ldexpf(float x, int exp)
 {
-	return (float)ldexp((double)x, exp);
+	return math_check1f((float)ldexp((double)x, exp), x);
 }
 
 
@@ -131,46 +104,7 @@ float scalblnf(float x, long n)
 
 double log(double x)
 {
-	double tmp, pow, res;
-	conv_t *conv = (conv_t *)&tmp;
-	int exp = 0, i;
-
-	if (isnan(x) != 0) {
-		return NAN;
-	}
-	else if (x < 0.0) {
-		errno = EDOM;
-		return NAN;
-	}
-	else if (x == 0.0) {
-		errno = ERANGE;
-		return -HUGE_VAL;
-	}
-	else if (x == 1.0) {
-		return 0.0;
-	}
-	else if (isinf(x) != 0) {
-		return x;
-	}
-
-	tmp = x;
-
-	exp = conv->i.exponent - 1022;
-
-	if (conv->i.exponent == 0) {
-		normalizeSub(&tmp, &exp);
-	}
-
-	conv->i.exponent = 1022;
-
-	tmp = (tmp - 1.0) / (tmp + 1.0);
-
-	for (i = 1, res = 0.0, pow = tmp * tmp; i < 16; ++i) {
-		res += tmp / ((2 * i) - 1);
-		tmp *= pow;
-	}
-
-	return ((2.0 * res) + (exp / M_LOG2E));
+	return math_check1(__msun_log(x), x);
 }
 
 
@@ -182,14 +116,13 @@ float logf(float x)
 
 double log2(double x)
 {
-	return (log(x) / M_LN2);
+	return math_check1(__msun_log2(x), x);
 }
 
 
-/* Uses log10(x) = ln(x) / ln(10) identity */
 double log10(double x)
 {
-	return (log(x) / M_LN10);
+	return math_check1(__msun_log10(x), x);
 }
 
 
@@ -205,46 +138,8 @@ float log2f(float x)
 }
 
 
-double modf(double x, double *intpart)
-{
-	conv_t *conv = (conv_t *)&x;
-	double tmp = x;
-	int exp = conv->i.exponent - 1023;
-	uint64_t m, mask = 0xfffffffffffffLL;
 
-	if (isnan(x) != 0) {
-		*intpart = NAN;
-		return NAN;
-	}
-
-	if (exp > 52) {
-		*intpart = x;
-		return (conv->i.sign ? -0.0 : 0.0);
-	}
-	else if (exp < 0) {
-		*intpart = conv->i.sign ? -0.0 : 0.0;
-		return x;
-	}
-
-	conv->i.mantisa = conv->i.mantisa & ~(mask >> exp);
-	*intpart = x;
-	x = tmp;
-
-	m = conv->i.mantisa;
-	m &= mask >> exp;
-
-	if (m == 0u) {
-		return 0.0;
-	}
-
-	conv->i.mantisa = m & mask;
-	normalizeSub(&x, &exp);
-
-	conv->i.exponent = exp + 1023;
-
-	return x;
-}
-
+/* modf() is msun/s_modf.c */
 float modff(float x, float *intpart)
 {
 	double ret, tmp;
@@ -255,62 +150,27 @@ float modff(float x, float *intpart)
 	return ret;
 }
 
-/* Uses quick powering and Maclaurin series to calculate value of e^x */
 double exp(double x)
 {
-	double res, resi, powx, e, factorial;
-	int i;
-
-	if (isnan(x) != 0) {
-		return NAN;
-	}
-
-	/* Values of x greater than 709.79 will cause overflow, returning INFINITY */
-	if (x > 709.79) {
-		errno = ERANGE;
-		return HUGE_VAL;
-	}
-
-	/* Get floor of exponent */
-	x = modf(x, &e);
-
-	/* Calculate most of the result */
-	resi = quickPow(M_E, (int)e);
-
-	/* Calculate rest of the result using Maclaurin series */
-	factorial = 1.0;
-	powx = x;
-	res = 1.0;
-
-	for (i = 2; i < 13; ++i) {
-		if (powx == 0.0) {
-			break;
-		}
-		res += powx / factorial;
-		factorial *= i;
-		powx *= x;
-	}
-
-	return (res * resi);
+	return math_check1(__msun_exp(x), x);
 }
 
 
 float expf(float x)
 {
-	return (float)exp((double)x);
+	return math_check1f((float)exp((double)x), x);
 }
 
 
-/* Uses 2^x = e^(x * ln(2)) identity */
 double exp2(double x)
 {
-	return exp(x * M_LN2);
+	return math_check1(__msun_exp2(x), x);
 }
 
 
 float exp2f(float x)
 {
-	return (float)exp2((double)x);
+	return math_check1f((float)exp2((double)x), x);
 }
 
 
@@ -378,28 +238,9 @@ float floorf(float x)
 }
 
 
-double fmod(double number, double denom)
+double fmod(double x, double y)
 {
-	double result, tquot;
-
-	if (isnan(number) != 0 || isnan(denom) != 0) {
-		return NAN;
-	}
-
-	if ((denom == 0.0) || (isinf(number) != 0)) {
-		errno = EDOM;
-		return NAN;
-	}
-
-	if (((number == 0.0) && (denom != 0.0)) ||
-			((isinf(number) == 0) && (isinf(denom) != 0))) {
-		return number;
-	}
-
-	modf(number / denom, &tquot);
-	result = tquot * denom;
-
-	return number - result;
+	return math_check2(__msun_fmod(x, y), x, y);
 }
 
 

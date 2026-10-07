@@ -16,6 +16,8 @@
 #ifndef _LIBPHOENIX_MATH_COMMON_H_
 #define _LIBPHOENIX_MATH_COMMON_H_
 
+#include <errno.h>
+#include <math.h>
 #include <stdint.h>
 
 
@@ -40,13 +42,53 @@ typedef union {
 extern void normalizeSub(double *x, int *exp);
 
 
-extern void createSub(double *x, int exp);
+/* C99 7.12.1 error reporting (MATH_ERRNO) for the result r of an Annex F
+ * implementation (the msun sources in msun/, which report errors through
+ * the floating-point exceptions only): a NaN from non-NaN arguments is a
+ * domain error, an infinity from finite arguments is a pole or an overflow
+ * (range) error. */
+static inline double math_check1(double r, double x)
+{
+	if (isnan(r) != 0) {
+		if (isnan(x) == 0) {
+			errno = EDOM;
+		}
+	}
+	else if ((isinf(r) != 0) && (isfinite(x) != 0)) {
+		errno = ERANGE;
+	}
+
+	return r;
+}
 
 
-extern double quickPow(double x, int e);
+static inline double math_check2(double r, double x, double y)
+{
+	if (isnan(r) != 0) {
+		if ((isnan(x) == 0) && (isnan(y) == 0)) {
+			errno = EDOM;
+		}
+	}
+	else if ((isinf(r) != 0) && (isfinite(x) != 0) && (isfinite(y) != 0)) {
+		errno = ERANGE;
+	}
+
+	return r;
+}
 
 
-extern int isInteger(double x);
+/* The float functions are computed in double and rounded: this adds the
+ * overflow of that final rounding, which the double function cannot see. */
+static inline float math_check1f(float r, float x)
+{
+	return (float)math_check1((double)r, (double)x);
+}
+
+
+static inline float math_check2f(float r, float x, float y)
+{
+	return (float)math_check2((double)r, (double)x, (double)y);
+}
 
 
 #endif

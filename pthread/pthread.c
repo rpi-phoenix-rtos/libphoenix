@@ -78,9 +78,11 @@ typedef struct pthread_ctx {
 	char name[PTHREAD_NAME_LEN]; /* pthread_setname_np(), "" if none */
 	struct __errno_t e;
 	int refcount;
+	/* This thread's key values. See "Thread-specific data" above
+	 * pthread_key_create() for who may touch the list and how. */
 	struct pthread_key_data_t *key_data_list;
 	struct _pthread_cleanup_t *cleanup_list;
-	int exiting;
+	int exiting; /* key destructors claimed (pthread_key_cleanup()), under pthread_key_lock */
 } pthread_ctx;
 
 
@@ -199,17 +201,32 @@ static __attribute__((noreturn)) void pthread_do_exit(pthread_ctx *ctx, void *va
 static void _pthread_reapRetired(void);
 
 
-static void _pthread_ctx_get(pthread_ctx *ctx)
+#ifdef __LIBPHOENIX_ARCH_TLS_SUPPORTED
+/* The calling thread's record, so that pthread_self() -- and with it every
+ * pthread_getspecific() -- needs no system call. Without it each lookup is a
+ * gettid() plus two round trips on pthread_list_lock and a walk of the thread
+ * list. NULL on a thread this library did not create, and from the moment a
+ * detached thread hands its record back on exit. */
+static __thread pthread_ctx *pthread_selfCtx;
+#endif
+
+
+static void pthread_selfSet(pthread_ctx *ctx)
 {
-	++ctx->refcount;
+#ifdef __LIBPHOENIX_ARCH_TLS_SUPPORTED
+	pthread_selfCtx = ctx;
+#else
+	(void)ctx;
+#endif
 }
 
 
-static void pthread_ctx_get(pthread_ctx *ctx)
+static void pthread_keyListFree(pthread_key_data_t *node);
+
+
+static void _pthread_ctx_get(pthread_ctx *ctx)
 {
-	mutexLock(pthread_common.pthread_list_lock);
-	_pthread_ctx_get(ctx);
-	mutexUnlock(pthread_common.pthread_list_lock);
+	++ctx->refcount;
 }
 
 
@@ -219,6 +236,10 @@ static void _pthread_ctx_put(pthread_ctx *ctx)
 	mutexUnlock(pthread_common.pthread_list_lock);
 
 	if (refcnt == 0) {
+		/* Key values left behind by a pthread_cancel() from another thread (see
+		 * pthread_key_cleanup()). Freed with the lock released: the allocator may
+		 * re-enter the key functions. */
+		pthread_keyListFree(ctx->key_data_list);
 		free(ctx);
 	}
 }
@@ -235,6 +256,7 @@ static void pthread_start_point(void *args)
 {
 	pthread_ctx *ctx = (pthread_ctx *)args;
 
+	pthread_selfSet(ctx);
 	_errno_new(&ctx->e);
 
 	/* POSIX: the floating-point environment is inherited from the creator. The
@@ -321,8 +343,9 @@ static int pthread_create_main(void)
 	LIST_ADD(&pthread_common.pthread_list, ctx);
 
 	/* This runs on the thread being described (process start-up, or a fork()
-	 * child of a thread this library did not create), so any address of this
-	 * frame lies in its stack. */
+	 * child of a thread this library did not create): the record is its own,
+	 * and any address of this frame lies in its stack. */
+	pthread_selfSet(ctx);
 	pthread_common.mainStack.hint = __builtin_frame_address(0);
 	pthread_common.mainStack.addr = NULL;
 	pthread_common.mainStack.size = 0;
@@ -404,6 +427,7 @@ int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
 	ctx->canceltype = PTHREAD_CANCEL_DEFERRED;
 	ctx->cancelled = 0;
 	ctx->cleanup_list = NULL;
+	ctx->exiting = 0;
 	(void)fegetenv(&ctx->fenv);
 	*thread = (pthread_t)ctx;
 
@@ -865,24 +889,44 @@ int pthread_setcanceltype(int type, int *oldtype)
 }
 
 
-static void pthread_key_cleanup(pthread_ctx *ctx)
+/*
+ * Run ctx's key destructors. Called by the thread itself on exit (self != 0),
+ * or by pthread_cancel() on behalf of a target that keeps running until its
+ * SIGCANCEL lands -- and may be inside pthread_getspecific() meanwhile, which
+ * takes no lock. So only the first call does anything (ctx->exiting claims the
+ * cleanup), and while it is claimed the owner no longer unlinks entries (see
+ * pthread_setspecific()), which keeps every node this walk reaches valid across
+ * the destructor calls made with the lock released. The nodes are freed here
+ * only by their owner; after a cancel they are freed with the record, once the
+ * thread is gone (_pthread_ctx_put()).
+ */
+static void pthread_key_cleanup(pthread_ctx *ctx, int self)
 {
-	ctx->exiting = 1;
+	pthread_key_data_t *list = NULL;
 
 	mutexLock(pthread_common.pthread_key_lock);
+
+	if (ctx->exiting != 0) {
+		mutexUnlock(pthread_common.pthread_key_lock);
+		return;
+	}
+	ctx->exiting = 1;
 
 	for (int i = 0; i <= PTHREAD_DESTRUCTOR_ITERATIONS; i++) {
 		int all_null = 1;
 		for (pthread_key_data_t *key_data = ctx->key_data_list; key_data != NULL; key_data = key_data->next) {
-			if (key_data->key == NULL) {
+			/* The key cannot be freed under us: pthread_key_delete() clears
+			 * key_data->key under this lock before it frees the key. */
+			pthread_key_t key = __atomic_load_n(&key_data->key, __ATOMIC_RELAXED);
+			if (key == NULL) {
 				continue;
 			}
-			void (*destructor)(void *) = key_data->key->destructor;
-			void *value = key_data->value;
+			void (*destructor)(void *) = key->destructor;
+			void *value = __atomic_load_n(&key_data->value, __ATOMIC_RELAXED);
 
 			if ((value != NULL) && (destructor != NULL)) {
 				all_null = 0;
-				key_data->value = NULL;
+				__atomic_store_n(&key_data->value, NULL, __ATOMIC_RELAXED);
 				mutexUnlock(pthread_common.pthread_key_lock);
 
 				destructor(value);
@@ -895,17 +939,15 @@ static void pthread_key_cleanup(pthread_ctx *ctx)
 		}
 	}
 
-	pthread_key_data_t *key_data = ctx->key_data_list;
-	ctx->key_data_list = NULL;
+	if (self != 0) {
+		list = ctx->key_data_list;
+		ctx->key_data_list = NULL;
+	}
 
 	mutexUnlock(pthread_common.pthread_key_lock);
 
 	/* Freed with the lock released: the allocator may re-enter the key functions */
-	while (key_data != NULL) {
-		pthread_key_data_t *curr = key_data;
-		key_data = key_data->next;
-		free(curr);
-	}
+	pthread_keyListFree(list);
 }
 
 
@@ -937,7 +979,7 @@ int pthread_cancel(pthread_t thread)
 				ctx->retval = (void *)PTHREAD_CANCELED;
 				id = ctx->id;
 				mutexUnlock(pthread_common.pthread_list_lock);
-				pthread_key_cleanup(ctx);
+				pthread_key_cleanup(ctx, 0);
 				pthread_ctx_put(ctx);
 				err = sys_tkill(getpid(), id, SIGCANCEL);
 			}
@@ -970,6 +1012,12 @@ void pthread_testcancel(void)
 
 pthread_t pthread_self(void)
 {
+#ifdef __LIBPHOENIX_ARCH_TLS_SUPPORTED
+	if (pthread_selfCtx != NULL) {
+		return (pthread_t)pthread_selfCtx;
+	}
+#endif
+
 	pthread_ctx *ctx = pthread_find(gettid());
 	if (ctx != NULL) {
 		pthread_ctx_put(ctx);
@@ -993,11 +1041,13 @@ static __attribute__((noreturn)) void pthread_do_exit(pthread_ctx *ctx, void *va
 			mutexUnlock(pthread_common.pthread_list_lock);
 		}
 
-		pthread_key_cleanup(ctx);
+		pthread_key_cleanup(ctx, 1);
 		if (ctx->is_detached == 0) {
 			ctx->retval = value_ptr;
 		}
 		else {
+			/* The record is freed below, while this thread still runs */
+			pthread_selfSet(NULL);
 			mutexLock(pthread_common.pthread_list_lock);
 			_pthread_release(ctx, 1);
 		}
@@ -2341,6 +2391,32 @@ int pthread_kill(pthread_t thread, int sig)
 }
 
 
+/*
+ * Thread-specific data.
+ *
+ * Each thread keeps its values on its own list, ctx->key_data_list, one node
+ * per key it has set. pthread_getspecific() runs on every TLS read of a program
+ * that keeps its per-thread state in keys -- WebKit's WTF::Thread::current(),
+ * GLib's GPrivate, and all of libstdc++ here, which is built WITHOUT TLS -- so
+ * it takes no lock and makes no system call. That rests on these rules:
+ *
+ *  - Only the owning thread links or unlinks nodes of its list, always under
+ *    pthread_key_lock (pthread_setspecific()), so the owner may walk its own
+ *    list without the lock: nobody else changes its shape. Two exceptions,
+ *    neither concurrent with the owner: the record is freed once the thread is
+ *    gone (_pthread_ctx_put()), and a fork() child drops the records of threads
+ *    it does not have.
+ *  - Other threads write only two fields of a node, atomically and under
+ *    pthread_key_lock: pthread_key_delete() clears `key`, and a cleanup made by
+ *    pthread_cancel() clears `value`. They reach the list under that lock, so
+ *    they never see it half-changed.
+ *  - A deleted key leaves a tombstone (key == NULL) in every thread that had
+ *    set it, instead of being unlinked from under its owner. NULL matches no
+ *    key, so a key later created at the same address finds nothing of the old
+ *    one. The owner reclaims its tombstones on its next insertion and at exit.
+ */
+
+
 int pthread_key_create(pthread_key_t *key, void (*destructor)(void *))
 {
 	int ret;
@@ -2364,10 +2440,16 @@ int pthread_key_create(pthread_key_t *key, void (*destructor)(void *))
 }
 
 
+/* Valid keys are not tracked, so only NULL is reported invalid. The result
+ * once depended on whether some live thread held an entry for the key: a key
+ * whose creator had exited, and that no other thread had set, was refused with
+ * EINVAL (and freed all the same). */
 int pthread_key_delete(pthread_key_t key)
 {
-	int err = EINVAL;
-	pthread_key_data_t *unlinked = NULL;
+	if (key == NULL) {
+		return EINVAL;
+	}
+
 	mutexLock(pthread_common.pthread_list_lock);
 
 	pthread_ctx *first = pthread_common.pthread_list, *curr = pthread_common.pthread_list;
@@ -2375,29 +2457,14 @@ int pthread_key_delete(pthread_key_t key)
 	if (first != NULL) {
 		mutexLock(pthread_common.pthread_key_lock);
 		do {
-			pthread_key_data_t *head = curr->key_data_list;
-			pthread_key_data_t *prev = NULL;
-			while (head != NULL) {
-				if (head->key == key) {
-					err = 0;
-					if (curr->exiting == 0) {
-						if (prev == NULL) {
-							curr->key_data_list = head->next;
-						}
-						else {
-							prev->next = head->next;
-						}
-						head->next = unlinked;
-						unlinked = head;
-					}
-					else {
-						/* Prevent further calls to destructor. */
-						head->key = NULL;
-					}
+			for (pthread_key_data_t *node = curr->key_data_list; node != NULL; node = node->next) {
+				if (node->key == key) {
+					/* Leave a tombstone for the owner to reclaim: it may be walking
+					 * this list right now, without the lock. This also keeps a
+					 * concurrent exit from calling the destructor. */
+					__atomic_store_n(&node->key, NULL, __ATOMIC_RELAXED);
 					break;
 				}
-				prev = head;
-				head = head->next;
 			}
 			curr = curr->next;
 		} while (curr != first);
@@ -2405,117 +2472,142 @@ int pthread_key_delete(pthread_key_t key)
 	}
 	mutexUnlock(pthread_common.pthread_list_lock);
 
-	/* Freed with the locks released, as in pthread_setspecific() */
-	while (unlinked != NULL) {
-		pthread_key_data_t *next = unlinked->next;
-		free(unlinked);
-		unlinked = next;
-	}
 	free(key);
-	return err;
+	return 0;
 }
 
 
-/* Caller holds pthread_key_lock */
-static pthread_key_data_t *pthread_key_find(pthread_ctx *ctx, pthread_key_t key)
+static void pthread_keyListFree(pthread_key_data_t *node)
 {
-	pthread_key_data_t *head = ctx->key_data_list;
+	while (node != NULL) {
+		pthread_key_data_t *next = node->next;
+		free(node);
+		node = next;
+	}
+}
 
-	while ((head != NULL) && (head->key != key)) {
-		head = head->next;
+
+/* The calling thread's entry for a key, or NULL. Owner-only, so no lock: see
+ * "Thread-specific data" above. A tombstone (key == NULL) never matches, as
+ * key is not NULL here. */
+static pthread_key_data_t *pthread_keyFind(pthread_ctx *ctx, pthread_key_t key)
+{
+	pthread_key_data_t *node = ctx->key_data_list;
+
+	while ((node != NULL) && (__atomic_load_n(&node->key, __ATOMIC_RELAXED) != key)) {
+		node = node->next;
 	}
 
-	return head;
+	return node;
+}
+
+
+/* Caller holds pthread_key_lock and owns ctx. Unlinks ctx's tombstones and
+ * returns them, for the caller to free with the lock released. */
+static pthread_key_data_t *_pthread_keyUnlinkDead(pthread_ctx *ctx)
+{
+	pthread_key_data_t *dead = NULL, **link = &ctx->key_data_list, *node;
+
+	while ((node = *link) != NULL) {
+		if (node->key == NULL) {
+			/* One store: a signal handler on this thread walking the list sees
+			 * it either before or after */
+			__atomic_store_n(link, node->next, __ATOMIC_RELEASE);
+			node->next = dead;
+			dead = node;
+		}
+		else {
+			link = &node->next;
+		}
+	}
+
+	return dead;
 }
 
 
 int pthread_setspecific(pthread_key_t key, const void *value)
 {
-	int err = 0;
 	pthread_ctx *ctx = (pthread_ctx *)pthread_self();
+	pthread_key_data_t *node, *fresh, *dead = NULL;
 
 	/* pthread_self() returns NULL on a thread this library did not create (one
-	 * started with beginthread(), for instance). Without this check the call
-	 * below dereferences NULL -- _pthread_ctx_get() does ++ctx->refcount -- and
-	 * the process dies on a WRITE to a near-zero address.
+	 * started with beginthread(), for instance). Without this check the code
+	 * below dereferences NULL, and the process dies on a near-zero address.
 	 *
 	 * That matters more than it looks: libstdc++ here is built with threads but
 	 * WITHOUT TLS (_GLIBCXX_HAS_GTHREADS=1, _GLIBCXX_HAVE_TLS undef), so its
 	 * per-thread state -- __cxa_eh_globals among it -- goes through pthread
 	 * keys. Any C++ code reaching this on a non-pthread thread would crash in
 	 * libc rather than get an error. */
-	if (ctx == NULL) {
+	if ((ctx == NULL) || (key == NULL)) {
 		return EINVAL;
 	}
 
-	pthread_ctx_get(ctx);
+	/* The key has an entry already: only this thread writes its values (bar a
+	 * pthread_cancel() cleanup, which stores NULL), so no lock is needed. */
+	node = pthread_keyFind(ctx, key);
+	if (node != NULL) {
+		__atomic_store_n(&node->value, (void *)value, __ATOMIC_RELAXED);
+		return 0;
+	}
+
+	/* A new entry: allocate it with pthread_key_lock RELEASED. The allocator may
+	 * itself call pthread_setspecific() -- mimalloc does, on a thread's first
+	 * allocation (_mi_prim_thread_associate_default_heap) -- and
+	 * pthread_key_lock is not recursive, so allocating under it deadlocked that
+	 * thread on itself and then every thread after it on the lock (the WPE
+	 * WebKit start hang, 2026-10-02). The allocation may also have added entries
+	 * to this thread's list, so look again before inserting.
+	 *
+	 * The insertion itself stays under the lock: pthread_key_delete() must see
+	 * every entry of the key it deletes, or one it missed would match the next
+	 * key created at the same address. */
+	fresh = (pthread_key_data_t *)malloc(sizeof(pthread_key_data_t));
+
 	mutexLock(pthread_common.pthread_key_lock);
-	pthread_key_data_t *head = pthread_key_find(ctx, key), *node = NULL;
-
-	if (head == NULL) {
-		/* A new entry: allocate it with pthread_key_lock RELEASED. The allocator
-		 * may itself call pthread_setspecific() -- mimalloc does, on a thread's
-		 * first allocation (_mi_prim_thread_associate_default_heap) -- and
-		 * pthread_key_lock is not recursive, so allocating under it deadlocked
-		 * that thread on itself and then every thread after it on the lock (the
-		 * WPE WebKit start hang, 2026-10-02). The allocation may also have added
-		 * entries to this thread's list, so look again before inserting. */
-		mutexUnlock(pthread_common.pthread_key_lock);
-		node = (pthread_key_data_t *)malloc(sizeof(pthread_key_data_t));
-		mutexLock(pthread_common.pthread_key_lock);
-		head = pthread_key_find(ctx, key);
-		if ((head == NULL) && (node != NULL)) {
-			node->key = key;
-			node->next = ctx->key_data_list;
-			ctx->key_data_list = node;
-			head = node;
-			node = NULL;
-		}
+	node = pthread_keyFind(ctx, key);
+	if ((node == NULL) && (fresh != NULL)) {
+		fresh->key = key;
+		fresh->value = (void *)value;
+		fresh->next = ctx->key_data_list;
+		__atomic_store_n(&ctx->key_data_list, fresh, __ATOMIC_RELEASE);
+		node = fresh;
+		fresh = NULL;
+	}
+	else if (node != NULL) {
+		__atomic_store_n(&node->value, (void *)value, __ATOMIC_RELAXED);
 	}
 
-	if (head != NULL) {
-		head->value = (void *)value;
-	}
-	else {
-		err = ENOMEM;
+	/* While destructors run (ctx->exiting), pthread_key_cleanup() holds nodes
+	 * across unlocked calls, possibly from another thread: unlink nothing then */
+	if (ctx->exiting == 0) {
+		dead = _pthread_keyUnlinkDead(ctx);
 	}
 	mutexUnlock(pthread_common.pthread_key_lock);
 
-	/* Not inserted: the entry appeared while the lock was released */
-	free(node);
+	/* Freed with the lock released, as allocated */
+	free(fresh);
+	pthread_keyListFree(dead);
 
-	pthread_ctx_put(ctx);
-	return err;
+	return (node != NULL) ? 0 : ENOMEM;
 }
 
 
 void *pthread_getspecific(pthread_key_t key)
 {
-	void *value = NULL;
 	pthread_ctx *ctx = (pthread_ctx *)pthread_self();
 
 	/* See pthread_setspecific(): NULL here means a thread this library did not
 	 * create. POSIX gives getspecific no way to report an error, and "no value
 	 * has been set" is exactly what such a thread has, so return NULL rather
 	 * than dereferencing it. */
-	if (ctx == NULL) {
+	if ((ctx == NULL) || (key == NULL)) {
 		return NULL;
 	}
 
-	pthread_ctx_get(ctx);
-	mutexLock(pthread_common.pthread_key_lock);
-	pthread_key_data_t *head = ctx->key_data_list;
-	while (head != NULL) {
-		if (head->key == key) {
-			value = head->value;
-			break;
-		}
-		head = head->next;
-	}
-	mutexUnlock(pthread_common.pthread_key_lock);
+	pthread_key_data_t *node = pthread_keyFind(ctx, key);
 
-	pthread_ctx_put(ctx);
-	return value;
+	return (node == NULL) ? NULL : __atomic_load_n(&node->value, __ATOMIC_RELAXED);
 }
 
 
@@ -2600,11 +2692,7 @@ static void _pthread_forkParent(void)
 
 static void _pthread_forkDiscard(pthread_ctx *ctx)
 {
-	while (ctx->key_data_list != NULL) {
-		pthread_key_data_t *head = ctx->key_data_list;
-		ctx->key_data_list = head->next;
-		free(head);
-	}
+	pthread_keyListFree(ctx->key_data_list);
 
 	while (ctx->cleanup_list != NULL) {
 		pthread_cleanup_t *head = ctx->cleanup_list;
@@ -2662,6 +2750,8 @@ static void _pthread_forkChild(void)
 		self->id = gettid();
 		self->refcount = 1;
 		LIST_ADD(&pthread_common.pthread_list, self);
+		/* Normally a no-op, the thread's TLS being copied with it */
+		pthread_selfSet(self);
 	}
 	else {
 		/* fork() from a thread this library did not create: it is now the only

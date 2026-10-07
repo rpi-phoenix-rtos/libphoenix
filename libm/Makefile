@@ -46,6 +46,13 @@ else
   # OBJS += $(addprefix $(PREFIX_O)libm/, $(patsubst %.c,%.o, math/common.c math/trig.c))
   OBJS += $(addprefix $(PREFIX_O), $(patsubst %.c,%.o, $(patsubst %complex.c,, $(wildcard libm/phoenix/*.c))))
 
+  # FreeBSD msun sources behind the transcendental functions (see msun/msun.h).
+  # Their extra-precision steps (argument reduction in e_rem_pio2, the log/exp
+  # splits in e_pow, ...) assume every product is rounded on its own, so they
+  # are built without FMA contraction, which gcc enables by default.
+  OBJS += $(addprefix $(PREFIX_O), $(patsubst %.c,%.o, $(wildcard libm/phoenix/msun/*.c)))
+  $(PREFIX_O)libm/phoenix/msun/%.o: CFLAGS += -ffp-contract=off
+
   ifeq ($(LIBM_WANT_COMPLEX), y)
     OBJS += $(addprefix $(PREFIX_O), $(patsubst %.c,%.o, libm/phoenix/complex.c))
   endif

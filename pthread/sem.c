@@ -52,6 +52,15 @@ int sem_init(sem_t *sem, int pshared, unsigned int value)
 		return -1;
 	}
 
+	/* The read end does not block: poll() reporting a token does not reserve
+	 * it, and another waiter may take it first (see sem_token()). */
+	if (fcntl(sem->__fd[0], F_SETFL, O_NONBLOCK) < 0) {
+		(void)close(sem->__fd[0]);
+		(void)close(sem->__fd[1]);
+		errno = ENOSPC;
+		return -1;
+	}
+
 	__atomic_store_n(&sem->__value, (int)value, __ATOMIC_SEQ_CST);
 
 	return 0;
@@ -99,14 +108,20 @@ int sem_post(sem_t *sem)
 }
 
 
-/* Waits for a token, for at most timeout ms (SEM_FOREVER: no limit) */
+/* Waits for a token, for at most timeout ms (SEM_FOREVER: no limit).
+ *
+ * poll() reporting the pipe readable does not reserve the token: two waiters
+ * can both see it, and the one that loses the read would then block past its
+ * deadline. The read end is non-blocking, so the loser polls again; for a timed
+ * wait it reports ETIMEDOUT and sem_take() re-waits for what is left of the
+ * deadline. */
 static int sem_token(sem_t *sem, int timeout)
 {
 	struct pollfd pfd = { .fd = sem->__fd[0], .events = POLLIN };
 	char c;
 	int n;
 
-	if (timeout != SEM_FOREVER) {
+	for (;;) {
 		n = poll(&pfd, 1, timeout);
 		if (n == 0) {
 			return ETIMEDOUT;
@@ -114,14 +129,20 @@ static int sem_token(sem_t *sem, int timeout)
 		if (n < 0) {
 			return errno;
 		}
-	}
 
-	n = (int)read(sem->__fd[0], &c, 1);
-	if (n == 1) {
-		return 0;
-	}
+		n = (int)read(sem->__fd[0], &c, 1);
+		if (n == 1) {
+			return 0;
+		}
+		if ((n < 0) && (errno == EAGAIN)) {
+			if (timeout != SEM_FOREVER) {
+				return ETIMEDOUT;
+			}
+			continue;
+		}
 
-	return (n < 0) ? errno : EINVAL;
+		return (n < 0) ? errno : EINVAL;
+	}
 }
 
 

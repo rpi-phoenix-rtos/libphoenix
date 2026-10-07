@@ -38,7 +38,7 @@
 
 #define PTHREAD_ONCE_DONE          0
 #define PTHREAD_ONCE_IN_PROGRESS   2
-#define PTHREAD_COND_CLOCK_DEFAULT CLOCK_MONOTONIC
+#define PTHREAD_COND_CLOCK_DEFAULT CLOCK_REALTIME /* as POSIX; see pthread_cond_realtimeToMonotonic() */
 #define PTHREAD_NAME_LEN           16 /* with the NUL, as Linux */
 
 #define RESOURCE_UNINITIALIZED 0
@@ -2284,11 +2284,64 @@ int pthread_cond_broadcast(pthread_cond_t *cond)
 }
 
 
+/*
+ * A CLOCK_REALTIME deadline (`rtDeadline`, us) as a CLOCK_MONOTONIC one.
+ *
+ * The wall clock is the monotonic clock plus an offset that clock_settime()
+ * changes at any moment -- on a board without an RTC by decades, when the time
+ * is first set during boot. So a CLOCK_REALTIME wait sleeps on the monotonic
+ * clock until the deadline translated with the offset of the moment, and is
+ * translated again at every wake-up that does not end it. One call waits until
+ * the EARLIER of
+ *   - the deadline translated when the call began: the wall clock stepping
+ *     back cannot make the wait longer than the time to the deadline then;
+ *   - the deadline translated at a later wake-up: the wall clock stepping
+ *     forward past the deadline ends the wait at the next wake-up, not at the
+ *     step. A signal or broadcast, or an interrupting signal, returns to the
+ *     caller, whose next call finds the deadline passed; a stale wake-up is
+ *     checked here.
+ * A deadline that has passed when the call begins times out at once.
+ *
+ * `*deadline`: the monotonic deadline so far, 0 = none yet; it only ever moves
+ * earlier. Returns -ETIME if the deadline has passed. */
+static int pthread_cond_realtimeToMonotonic(time_t rtDeadline, time_t *deadline)
+{
+	time_t raw, offs, mono;
+	int err;
+
+	/* One call reads both clocks: a step cannot fall between the two reads */
+	err = gettime(&raw, &offs);
+	if (err < 0) {
+		return err;
+	}
+
+	if (rtDeadline <= raw + offs) {
+		return -ETIME;
+	}
+
+	/* rtDeadline - offs, saturated: an offset below zero is possible after
+	 * clock_settime() to a time before the boot */
+	if ((offs < 0) && (rtDeadline > LLONG_MAX + offs)) {
+		mono = LLONG_MAX;
+	}
+	else {
+		mono = rtDeadline - offs;
+	}
+
+	if ((*deadline == 0) || (mono < *deadline)) {
+		*deadline = mono;
+	}
+
+	return EOK;
+}
+
+
 /* `timeout` = 0: no limit; `clock` = -1: the clock of the condition variable */
 static int pthread_cond_waitInternal(pthread_cond_t *__restrict cond, pthread_mutex_t *__restrict mutex, time_t timeout, int clock)
 {
 	unsigned int flags, v, seq;
 	int err, werr = EOK;
+	time_t rtDeadline = 0;
 
 	err = pthread_cond_lazy_init(cond, NULL);
 	if (err == EOK) {
@@ -2298,12 +2351,32 @@ static int pthread_cond_waitInternal(pthread_cond_t *__restrict cond, pthread_mu
 		return err;
 	}
 
+	if (clock < 0) {
+		/* Set at initialisation and never changed: a plain load is enough */
+		clock = (int)((__atomic_load_n(&cond->seq, __ATOMIC_RELAXED) & COND_CLOCK_MASK) >> COND_CLOCK_SHIFT);
+	}
+
+	if ((timeout != 0) && (clock == PH_CLOCK_REALTIME)) {
+		rtDeadline = timeout;
+		timeout = 0;
+		err = pthread_cond_realtimeToMonotonic(rtDeadline, &timeout);
+		if (err == -ETIME) {
+			/* Still holding the mutex: as if it was released and taken back */
+			return ETIMEDOUT;
+		}
+		if (err < 0) {
+			/* No clock reading: leave the deadline to the kernel */
+			timeout = rtDeadline;
+			rtDeadline = 0;
+		}
+		else {
+			clock = PH_CLOCK_MONOTONIC;
+		}
+	}
+
 	/* Still holding the mutex: a signal sent after the unlock below finds us */
 	v = __atomic_add_fetch(&cond->seq, COND_WAITER, __ATOMIC_SEQ_CST);
 	seq = v & COND_SEQ_MASK;
-	if (clock < 0) {
-		clock = (int)((v & COND_CLOCK_MASK) >> COND_CLOCK_SHIFT);
-	}
 
 	err = pthread_mutex_unlockInternal(mutex, flags);
 	if (err != EOK) {
@@ -2329,6 +2402,13 @@ static int pthread_cond_waitInternal(pthread_cond_t *__restrict cond, pthread_mu
 		}
 
 		v = __atomic_load_n(&cond->seq, __ATOMIC_RELAXED);
+
+		/* A wake-up without a signal: the wall clock may have stepped since */
+		if ((rtDeadline != 0) && ((v & COND_SEQ_MASK) == seq) &&
+				(pthread_cond_realtimeToMonotonic(rtDeadline, &timeout) == -ETIME)) {
+			werr = -ETIME;
+			break;
+		}
 	}
 
 	(void)__atomic_fetch_sub(&cond->seq, COND_WAITER, __ATOMIC_RELAXED);
@@ -2354,7 +2434,16 @@ static int pthread_cond_clockwait_phx(pthread_cond_t *__restrict cond, pthread_m
 		return EINVAL;
 	}
 
-	time_t abstime_us = __timespecToUs(abstime);
+	time_t abstime_us;
+
+	/* A far-future deadline, e.g. C++'s time_point::max(), must not overflow
+	 * into the past: that would time out at once, and the caller spin */
+	if (abstime->tv_sec >= LLONG_MAX / 1000000) {
+		abstime_us = LLONG_MAX;
+	}
+	else {
+		abstime_us = __timespecToUs(abstime);
+	}
 
 	/* check timeout as a timeout of 0 means waiting indefinitely */
 	if (abstime_us <= 0) {

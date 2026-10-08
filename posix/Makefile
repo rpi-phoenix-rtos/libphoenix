@@ -5,4 +5,4 @@
 # Author: Pawel Pisarczyk
 #
 
-OBJS += $(addprefix $(PREFIX_O)posix/, stubs.o utils.o idtree.o flock.o)
+OBJS += $(addprefix $(PREFIX_O)posix/, stubs.o utils.o idtree.o flock.o sem.o)

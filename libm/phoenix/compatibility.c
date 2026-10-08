@@ -8,17 +8,17 @@
  * Copyright 2025 Phoenix Systems
  * Author: Mikolaj Matalowski
  *
- * This file is part of Phoenix-RTOS.
  *
  * SPDX-License-Identifier: BSD-3-Clause
  */
 #include <math.h>
+#include <stdlib.h>
 
-/* These libmcs-compat helpers are commonly ALSO defined by the bundled software
- * libm that some ports carry (e.g. MicroPython's lib/libm_dbl/ defines __signbitd),
- * which caused a "multiple definition of `__signbitd'" link error against libphoenix.
- * Mark them WEAK so a port's own strong definition overrides them without a clash;
- * libphoenix still provides them when nothing else does. */
+/* RPi4 port: these libmcs-compat helpers are commonly ALSO defined by the bundled
+ * software libm that some ports carry (e.g. MicroPython's lib/libm_dbl/ defines
+ * __signbitd), which caused a "multiple definition of `__signbitd'" link error
+ * against libphoenix. Mark them WEAK so a port's own strong definition overrides
+ * them without a clash; libphoenix still provides them when nothing else does. */
 #define WK __attribute__((weak))
 
 
@@ -34,9 +34,8 @@ WK int __fpclassifyd(double x)
 }
 
 
-WK float nanf(const char *unused)
+WK float nanf(const char *arg)
 {
-	(void)unused;
 	return __builtin_nanf("");
 }
 

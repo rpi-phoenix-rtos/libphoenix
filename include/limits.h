@@ -5,12 +5,10 @@
  *
  * limits.h
  *
- * Copyright 2019 Phoenix Systems
- * Author: Andrzej Glowinski
+ * Copyright 2019, 2026 Phoenix Systems
+ * Author: Andrzej Glowinski, Michal Lach
  *
- * This file is part of Phoenix-RTOS.
- *
- * %LICENSE%
+ * SPDX-License-Identifier: BSD-3-Clause
  */
 
 #ifndef _LIMITS_H_
@@ -20,10 +18,6 @@
 
 #define PAGE_SIZE _PAGE_SIZE
 #define PAGESIZE  _PAGE_SIZE
-
-
-#define _POSIX_THREAD_DESTRUCTOR_ITERATIONS 4
-#define PTHREAD_DESTRUCTOR_ITERATIONS       _POSIX_THREAD_DESTRUCTOR_ITERATIONS
 
 #ifdef __ARCH_LIMITS
 #include __ARCH_LIMITS
@@ -35,5 +29,19 @@
 #include <phoenix/limits.h>
 
 #include <posix/limits.h>
+
+#define PTHREAD_DESTRUCTOR_ITERATIONS _POSIX_THREAD_DESTRUCTOR_ITERATIONS
+
+/* TODO: supplementary group IDs are not implemented yet - getgroups() is a stub. */
+#define NGROUPS_MAX _POSIX_NGROUPS_MAX
+
+/* Bound enforced by regcomp(), see DUPMAX in regex/utils.h. */
+#define RE_DUP_MAX _POSIX2_RE_DUP_MAX
+
+/* Only "UTC" is ever reported, see tzset() in time/time.c. */
+#define TZNAME_MAX 3
+
+#define SEM_VALUE_MAX INT_MAX
+#define SEM_NSEMS_MAX _POSIX_SEM_NSEMS_MAX
 
 #endif

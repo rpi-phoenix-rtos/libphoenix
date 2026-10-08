@@ -8,17 +8,12 @@
  * Copyright 2023 Phoenix Systems
  * Author: Gerard Swiderski
  *
- * This file is part of Phoenix-RTOS.
  *
  * SPDX-License-Identifier: BSD-3-Clause
  */
 
 #include <math.h>
 #include <complex.h>
-/* __EXPORT_INLINE lives here. Upstream added this include to its own
- * include/complex.h in the same commit that introduced the macro, but we moved
- * that header to libm/libmcs/ (d0a2884), so the declaration has to be pulled in
- * where the macro is used instead. */
 #include <sys/cdefs.h>
 
 

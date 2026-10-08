@@ -5,37 +5,53 @@
  *
  * sys/times.h
  *
- * Copyright 2018 Phoenix Systems
- * Author: Jan Sikorski
+ * Copyright 2018, 2026 Phoenix Systems
+ * Author: Jan Sikorski, Adam Greloch
  *
  * This file is part of Phoenix-RTOS.
  *
  * %LICENSE%
  */
 
-#include <sys/types.h>
-#include <sys/times.h>
+#include <errno.h>
 #include <time.h>
+
+#include <sys/time.h>
+#include <sys/times.h>
+#include <sys/types.h>
+
+
+#define USECS_PER_TICK (1000000 / CLK_TCK)
+
+
+int sys_cpuTime(pid_t pid, int tid, time_t *cpuTime, cpuTimes_t *cpuTimes);
 
 
 clock_t times(struct tms *buffer)
 {
-	struct timespec ts;
+	cpuTimes_t ct;
+	time_t now;
+	int err;
 
-	if (buffer != NULL) {
-		/* Per-process/thread CPU accounting is not available yet; zero the
-		 * breakdown so callers read defined values (was left undefined). */
-		buffer->tms_utime = 0;
-		buffer->tms_stime = 0;
-		buffer->tms_cutime = 0;
-		buffer->tms_cstime = 0;
+	err = gettime(&now, NULL);
+	if (err < 0) {
+		return (clock_t)SET_ERRNO(err);
 	}
 
-	/* POSIX: return elapsed real time in clock ticks (sysconf(_SC_CLK_TCK)==100).
-	 * Use the monotonic clock so successive calls advance (was a stub -> 0, so
-	 * every elapsed-time measurement read 0). */
-	if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
-		return (clock_t)-1;
+	/* RPi4 port: times(NULL) only reads the elapsed time, as on Linux and the BSDs */
+	if (buffer == NULL) {
+		return (clock_t)(now / USECS_PER_TICK);
 	}
-	return (clock_t)((clock_t)ts.tv_sec * 100 + ts.tv_nsec / 10000000L);
+
+	err = sys_cpuTime(0, 0, NULL, &ct);
+	if (err < 0) {
+		return (clock_t)SET_ERRNO(err);
+	}
+
+	buffer->tms_utime = (clock_t)(ct.user / USECS_PER_TICK);
+	buffer->tms_stime = (clock_t)(ct.sys / USECS_PER_TICK);
+	buffer->tms_cutime = (clock_t)(ct.childUser / USECS_PER_TICK);
+	buffer->tms_cstime = (clock_t)(ct.childSys / USECS_PER_TICK);
+
+	return (clock_t)(now / USECS_PER_TICK);
 }

@@ -25,6 +25,11 @@
 #define __MEMMOVE
 
 #ifndef __SOFTFP__
+/*
+ * RPi4 fork: libm/phoenix (exp.c, power.c) uses these fast paths. Upstream moved
+ * them into libm/arch/<arch>/ for its one-file-per-function libm, which this
+ * fork does not build (see libm/Makefile).
+ */
 /* clang-format off */
 #define __IEEE754_SQRT
 #define __ieee754_sqrt(x) ({ double a = (x); __asm__ ("fsqrt %d0, %d1" : "=w"(a) : "w"(a)); a; })

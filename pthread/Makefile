@@ -5,4 +5,4 @@
 # Author: Pawel Pisarczyk
 #
 
-OBJS += $(addprefix $(PREFIX_O)pthread/, pthread.o barrier.o sem.o)
+OBJS += $(addprefix $(PREFIX_O)pthread/, pthread.o barrier.o sem_unnamed.o)

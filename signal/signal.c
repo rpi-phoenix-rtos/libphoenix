@@ -21,11 +21,19 @@
 #include <string.h>
 #include <stdio.h>
 
+#include "../common/util.h"
+
 
 extern int sys_tkill(int pid, int tid, int signal);
 
 
 extern int sys_sigaltstack(const stack_t *ss, stack_t *oss);
+
+
+extern unsigned int signalPending(void);
+
+
+extern int signalWait(unsigned int set, const time_t *timeout);
 
 
 extern void _signal_trampoline(void);
@@ -169,6 +177,73 @@ int sigprocmask(int how, const sigset_t *set, sigset_t *oldset)
 int sigsuspend(const sigset_t *sigmask)
 {
 	return SET_ERRNO(signalSuspend(*sigmask));
+}
+
+
+int sigpending(sigset_t *set)
+{
+	if (set == NULL) {
+		return SET_ERRNO(-EINVAL);
+	}
+
+	*set = signalPending();
+	return 0;
+}
+
+
+int sigtimedwait(const sigset_t *set, siginfo_t *info, const struct timespec *timeout)
+{
+	time_t us, *usp = NULL;
+	int ret;
+
+	if (set == NULL) {
+		return SET_ERRNO(-EINVAL);
+	}
+
+	if (timeout != NULL) {
+		if (!__timespecValid(timeout) || (timeout->tv_sec < 0)) {
+			return SET_ERRNO(-EINVAL);
+		}
+		us = __timespecToUs(timeout);
+		usp = &us;
+	}
+
+	ret = signalWait(*set, usp);
+
+	if ((ret > 0) && (info != NULL)) {
+		/* OS-LIMITATION: the kernel keeps no sender info for pending signals, so only si_signo is filled */
+		memset(info, 0, sizeof(*info));
+		info->si_signo = ret;
+	}
+
+	return SET_ERRNO(ret);
+}
+
+
+int sigwaitinfo(const sigset_t *set, siginfo_t *info)
+{
+	return sigtimedwait(set, info, NULL);
+}
+
+
+int sigwait(const sigset_t *set, int *sig)
+{
+	int ret;
+
+	if (set == NULL || sig == NULL) {
+		return EINVAL;
+	}
+
+	do {
+		ret = sigwaitinfo(set, NULL);
+	} while ((ret < 0) && (errno == EINTR));
+
+	if (ret < 0) {
+		return errno;
+	}
+
+	*sig = ret;
+	return 0;
 }
 
 

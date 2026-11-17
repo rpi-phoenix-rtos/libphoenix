@@ -390,40 +390,62 @@ int open(const char *filename, int oflag, ...)
 	mode_t mode = 0;
 	int err;
 	char *canonical;
+	enum leaf_policy lp;
+	enum symlink_policy sp;
 
-	/* FIXME: handle varargs properly */
-	va_start(ap, oflag);
-	mode = va_arg(ap, mode_t);
-	va_end(ap);
-
-	if (oflag & (O_WRONLY | O_RDWR)) {
-		if ((err = stat(filename, &st)) < 0) {
-			if (errno != ENOENT) {
-				return err;
-			}
-		}
-		else if (S_ISDIR(st.st_mode)) {
-			return SET_ERRNO(-EISDIR);
-		}
+	if ((oflag & O_NOFOLLOW) != 0) {
+		sp = spNofollow;
+	}
+	else {
+		sp = spResolveAll;
 	}
 
-	/* allow_missing_leaf = 1 -> open() may be creating a file */
-	canonical = resolve_path(filename, NULL, 1, 1);
+	if ((oflag & O_CREAT) != 0) {
+		if ((oflag & O_EXCL) != 0) {
+			lp = lpAbsent;
+		}
+		else {
+			lp = lpAny;
+		}
+	}
+	else {
+		lp = lpExists;
+	}
+
+	canonical = resolve_path(filename, NULL, sp, lp);
 	if (canonical == NULL) {
 		return -1; /* errno set by resolve_path */
 	}
 
-	/* POSIX: O_CREAT creates with mode & ~umask. Applied here rather than at the
-	 * top of the function (where this fork used to do it with a private helper)
-	 * so there is exactly one application point. */
+	if ((oflag & (O_WRONLY | O_RDWR)) != 0) {
+		err = stat(canonical, &st);
+		if (err < 0) {
+			if (errno != ENOENT) {
+				free(canonical);
+				return err;
+			}
+		}
+		else if (S_ISDIR(st.st_mode)) {
+			free(canonical);
+			return SET_ERRNO(-EISDIR);
+		}
+	}
+
+	/* POSIX: O_CREAT creates with mode & ~umask, and only then is there a mode
+	 * argument to read. */
 	if ((oflag & O_CREAT) != 0) {
+		va_start(ap, oflag);
+		mode = va_arg(ap, mode_t);
+		va_end(ap);
 		mode &= ~__getumask();
+	}
+	else {
+		mode = 0;
 	}
 
 	do {
 		err = sys_open(canonical, oflag, mode);
-	}
-	while (err == -EINTR);
+	} while (err == -EINTR);
 
 	free(canonical);
 	return SET_ERRNO(err);

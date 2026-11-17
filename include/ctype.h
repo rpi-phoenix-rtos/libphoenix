@@ -108,7 +108,8 @@ static inline int __ispunct(int c)
 int isspace(int c);
 static inline int __isspace(int c)
 {
-	return (((c) == ' ' || (c) == '\f' || (c) == '\t' || (c) == '\n' || (c) == '\r' || (c) == '\v') ? 1 : 0);
+	/* '\t' '\n' '\v' '\f' '\r' are contiguous, so the set is a range plus one value */
+	return ((((c) >= '\t') && ((c) <= '\r')) || ((c) == ' ')) ? 1 : 0;
 }
 #define isspace(c)   __isspace(c)
 

@@ -48,14 +48,29 @@ int scandir(const char *dir, struct dirent ***namelist,
 	DIR *d;
 	struct dirent *de, *copy, **list = NULL, **nlist;
 	size_t count = 0, cap = 0, sz;
-	int err;
+	int err = errno;
+
+	if (namelist == NULL) {
+		errno = EINVAL;
+		return -1;
+	}
 
 	d = opendir(dir);
 	if (d == NULL) {
 		return -1;
 	}
 
-	while ((de = readdir(d)) != NULL) {
+	for (;;) {
+		/* readdir() reports an error only through errno */
+		errno = 0;
+		de = readdir(d);
+		if (de == NULL) {
+			if (errno != 0) {
+				goto fail;
+			}
+			break;
+		}
+
 		if ((sel != NULL) && (sel(de) == 0)) {
 			continue;
 		}
@@ -90,6 +105,7 @@ int scandir(const char *dir, struct dirent ***namelist,
 	}
 
 	*namelist = list;
+	errno = err;
 	return (int)count;
 
 fail:

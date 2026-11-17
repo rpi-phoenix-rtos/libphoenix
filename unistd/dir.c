@@ -14,6 +14,7 @@
  */
 
 #include <stdlib.h>
+#include <stdbool.h>
 #include <unistd.h>
 #include <dirent.h>
 #include <stdio.h>
@@ -35,8 +36,9 @@ static struct {
 	char *cwd;
 } dir_common;
 
-static ssize_t _readlink_abs(const char *path, char *buf, size_t bufsiz);
-static int _resolve_abspath(char *path, char *result, int resolve_last_symlink, int allow_missing_leaf);
+static int _getMode_abs(const char *path, oid_t *oid_out, long long *mode_out);
+static ssize_t _readlink_oid(const oid_t *oid, char *buf, size_t bufsiz);
+static int _resolve_abspath(char *path, char *result, enum symlink_policy sp, enum leaf_policy lp);
 
 
 int chdir(const char *path)
@@ -176,7 +178,7 @@ char *canonicalize_file_name(const char *path)
 /* resolves absolute paths (with symlinks)
  * buffers pointed by path and result need to be at least PATH_MAX in size
  * path might be rewritten as a part of the path resolving */
-static int _resolve_abspath(char *path, char *result, int resolve_last_symlink, int allow_missing_leaf)
+static int _resolve_abspath(char *path, char *result, enum symlink_policy sp, enum leaf_policy lp)
 {
 	char *r = result; /* r -  first unused result byte */
 	char *p = path;   /* p - first byte of remaining unresolved path */
@@ -197,12 +199,12 @@ static int _resolve_abspath(char *path, char *result, int resolve_last_symlink, 
 		p = strchrnul(node, '/');
 		const size_t node_len = p - node;
 
-		/* skip trailing slashes to properly detect leaf node */
+		const bool is_leaf_without_slash = *p == '\0';
 		while (*p == '/') {
 			p += 1;
 		}
 
-		const int is_leaf = (*p == '\0') ? 1 : 0;
+		const bool is_leaf = *p == '\0';
 
 		/* check for '.' and '..' */
 		if (node_len == 0) { /* multiple '/' */
@@ -226,37 +228,54 @@ static int _resolve_abspath(char *path, char *result, int resolve_last_symlink, 
 		r += node_len;
 		*r = '\0';
 
-		if ((is_leaf != 0) && (resolve_last_symlink == 0)) {
-			/* WARN: slight inconsistency: we're not checking if the path actually exists in this case (TODO?) */
-			break;
+		oid_t oid;
+		long long mode;
+
+		int ret = _getMode_abs(result, &oid, &mode);
+		if (ret < 0) {
+			if ((ret == -ENOENT) && is_leaf && (lp != lpExists)) {
+				/* non-existent leaf, but we allow it */
+				break;
+			}
+
+			return SET_ERRNO(ret);
+		}
+
+		if (is_leaf && (lp == lpAbsent)) {
+			return SET_ERRNO(-EEXIST);
+		}
+
+		if (S_ISDIR(mode)) {
+			/* is directory - continue resolving */
+			continue;
+		}
+
+		if (S_ISLNK(mode) && is_leaf_without_slash && (sp == spNofollow)) {
+			return SET_ERRNO(-ELOOP);
+		}
+
+		if (!S_ISLNK(mode) || (is_leaf_without_slash && (sp == spSkipLast))) {
+			/* not a symlink or is symlink but we don't want to resolve it */
+			if (is_leaf_without_slash) {
+				/* Leaf reached - path resolved */
+				break;
+			}
+
+			/* Not traversible or leaf ending with slash */
+			return SET_ERRNO(-ENOTDIR);
 		}
 
 		/*
-		 * Number of initial unused `path` bytes that can be used to resolve current node. If link content is
+		 * At this point S_ISLNK(mode) and we want to resolve it.
+		 * Number of initial unused `path` bytes that can be used to resolve symlink. If link content is
 		 * longer we will not be able to merge it with remaining path and still fit in PATH_MAX buffer
 		 */
 		const size_t readlink_max_len = p - path;
-
-		/* (hackish) save some messsaging by not calling lstat, but directly readlink() and checking error code */
-		int errsave = errno;
-		ssize_t symlink_len = _readlink_abs(result, path, readlink_max_len);
-
+		ssize_t symlink_len = _readlink_oid(&oid, path, readlink_max_len);
 		if (symlink_len < 0) {
-			if (errno == EINVAL) { /* not a symlink */
-				errno = errsave;
-				continue;
-			}
-			else if ((errno == ENOENT) && (is_leaf != 0) && (allow_missing_leaf != 0)) { /* non-esixting leaf */
-				errno = errsave;
-				break;
-			}
-			else {
-				/* errno set by _readlink_abs */
-				return -1;
-			}
+			return SET_ERRNO(symlink_len);
 		}
-
-		if (symlink_len == 0) {
+		else if (symlink_len == 0) {
 			/* NOTE: this case is not defined in POSIX */
 			/* see: https://lwn.net/Articles/551224/ */
 			return SET_ERRNO(-ENOENT);
@@ -271,14 +290,17 @@ static int _resolve_abspath(char *path, char *result, int resolve_last_symlink, 
 		 * truncated. `>` must be rejected too, not merely asserted: the assert
 		 * below it used to be the only thing standing between an over-reporting
 		 * server and the backwards memmove that follows, and -DNDEBUG deletes it.
-		 * Defence in depth -- _readlink_abs() now clamps as well. */
+		 * Defence in depth -- _readlink_oid() clamps as well. */
 		if (symlink_len >= (ssize_t)readlink_max_len) {
 			return SET_ERRNO(-ENAMETOOLONG);
 		}
 
 		/* prepend resolved symlink to remaining unresolved path */
-		p -= 1;
-		*p = '/';
+		if (is_leaf_without_slash == 0) {
+			p -= 1;
+			*p = '/';
+		}
+
 		p -= symlink_len;
 		memmove(p, path, symlink_len);
 
@@ -302,16 +324,32 @@ static int _resolve_abspath(char *path, char *result, int resolve_last_symlink, 
 
 /* Resolving path to absolute paths with '.', '..' and symlinks support. Additional params to satisfy multiple libc use cases.
  *   resolved_path: if NULL, will be allocated by malloc()
- *   allow_missing_leaf: don't return ENOENT if last path node is not existing
- *   resolve_last_symlink: if 0 return final symlink path instead of symlink destination
+ *   sp: symlink policy: resolve symlinks according to the policy:
+ *     - spSkipLast: resolve all but last symlink
+ *     - spResolveAll: resolve all symlinks
+ *     - spNofollow: return ELOOP if path names a symlink
+ *   lp: return error according to the selected leaf_policy:
+ *     - lpExists: ENOENT on missing leaf
+ *     - lpAny: no error on missing leaf
+ *     - lpAbsent: EEXIST on existing leaf
  */
-char *resolve_path(const char *path, char *resolved_path, int resolve_last_symlink, int allow_missing_leaf)
+char *resolve_path(const char *path, char *resolved_path, enum symlink_policy sp, enum leaf_policy lp)
 {
 	char *alloc_resolved_path = NULL; /* internally allocated path needed to be freed on error */
 	char *path_copy, *p;
 	size_t pathlen;
 
-	if (!path) {
+	if (path == NULL) {
+		errno = EINVAL;
+		return NULL;
+	}
+
+	if ((lp != lpExists) && (lp != lpAny) && (lp != lpAbsent)) {
+		errno = EINVAL;
+		return NULL;
+	}
+
+	if ((sp != spSkipLast) && (sp != spResolveAll) && (sp != spNofollow)) {
 		errno = EINVAL;
 		return NULL;
 	}
@@ -355,7 +393,7 @@ char *resolve_path(const char *path, char *resolved_path, int resolve_last_symli
 		resolved_path = alloc_resolved_path;
 	}
 
-	if (_resolve_abspath(path_copy, resolved_path, resolve_last_symlink, allow_missing_leaf) < 0) {
+	if (_resolve_abspath(path_copy, resolved_path, sp, lp) < 0) {
 		/* proper errno set by resolve_path */
 		free(alloc_resolved_path);
 		free(path_copy);
@@ -606,51 +644,57 @@ int closedir(DIR *dirp)
 }
 
 
-/* readlink without path resolution, to be used internally */
-/* WARN: POSIX compliance: does not append '\0' */
-static ssize_t _readlink_abs(const char *path, char *buf, size_t bufsiz)
+/* Look up OID for a given absolute path and get the object's mode, to be used internally */
+static int _getMode_abs(const char *path, oid_t *oid_out, long long *mode_out)
 {
-	oid_t oid;
-
 	assert(path && path[0] == '/');
 
-	int ret = __safe_lookup(path, &oid, NULL);
+	int ret = __safe_lookup(path, oid_out, NULL);
 	if (ret < 0) {
-		return SET_ERRNO(ret);
+		return ret;
 	}
 
 	msg_t msg = {
 		.type = mtGetAttr,
-		.oid = oid,
+		.oid = *oid_out,
 		.i.attr.type = atMode
 	};
 
-	ret = __safe_msgSend(oid.port, &msg);
-	if (ret != EOK) {
-		return SET_ERRNO(ret);
+	ret = __safe_msgSend(oid_out->port, &msg);
+	if (ret < 0) {
+		return ret;
 	}
 
 	if (msg.o.err < 0) {
-		return SET_ERRNO(msg.o.err);
+		return msg.o.err;
 	}
 
-	if (!S_ISLNK(msg.o.attr.val)) {
-		return SET_ERRNO(-EINVAL);
-	}
+	*mode_out = msg.o.attr.val;
+	return 0;
+}
 
+
+/* readlink from given OID, to be used internally: the byte count, or a negative
+ * error code (errno is not set) */
+/* WARN: POSIX compliance: does not append '\0' */
+static ssize_t _readlink_oid(const oid_t *oid, char *buf, size_t bufsiz)
+{
+	int ret;
+	msg_t msg;
 	memset(&msg, 0, sizeof(msg_t));
-	msg.type = mtRead;
-	msg.oid = oid;
 
+	msg.type = mtRead;
+	msg.oid = *oid;
 	msg.o.size = bufsiz;
 	msg.o.data = buf;
-	ret = __safe_msgSend(oid.port, &msg);
-	if (ret != EOK) {
-		return SET_ERRNO(ret);
+
+	ret = __safe_msgSend(oid->port, &msg);
+	if (ret < 0) {
+		return ret;
 	}
 
 	if (msg.o.err < 0) {
-		return SET_ERRNO(msg.o.err);
+		return msg.o.err;
 	}
 
 	/* Clamp to what we actually offered. msg.o.err is a byte count reported by
@@ -660,11 +704,9 @@ static ssize_t _readlink_abs(const char *path, char *buf, size_t bufsiz)
 	 * heap block -- `p -= symlink_len` then memmove(p, path, symlink_len) --
 	 * writing straight onto the block's malloc chunk header. Clearing
 	 * CHUNK_CUSED there produces a "double free" report on a header that still
-	 * validates, i.e. a memory corruption that points nowhere near its cause.
-	 * The caller's assert() is no guard: the build sets -DNDEBUG
-	 * (phoenix-rtos-build/Makefile.common), so it is compiled out. */
+	 * validates, i.e. a memory corruption that points nowhere near its cause. */
 	if ((size_t)msg.o.err > bufsiz) {
-		return SET_ERRNO(-ENAMETOOLONG);
+		return -ENAMETOOLONG;
 	}
 
 	/* number of bytes written without terminating NULL byte */
@@ -677,16 +719,24 @@ ssize_t readlink(const char *path, char *buf, size_t bufsiz)
 	/* resolve_last_symlink = 0 -> read a symlink value */
 	char *canonical = resolve_path(path, NULL, 0, 0);
 	ssize_t ret;
+	oid_t oid;
+	long long mode;
 
-	if (canonical == NULL)
+	if (canonical == NULL) {
 		return -1; /* errno set by resolve_path */
+	}
 
-	ret = _readlink_abs(canonical, buf, bufsiz);
+	ret = (ssize_t)_getMode_abs(canonical, &oid, &mode);
+	if (ret == 0) {
+		ret = S_ISLNK(mode) ? 0 : -EINVAL;
+	}
+
+	if (ret == 0) {
+		ret = _readlink_oid(&oid, buf, bufsiz);
+	}
 
 	free(canonical);
-
-	/* if error - errno set by _readlink_abs() */
-	return ret;
+	return SET_ERRNO(ret);
 }
 
 

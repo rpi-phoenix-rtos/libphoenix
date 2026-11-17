@@ -40,46 +40,45 @@ extern "C" {
 
 
 struct dirent {
-	ino_t  d_ino;
+	ino_t d_ino;
 	uint32_t d_type;
 	uint16_t d_reclen;
 	uint16_t d_namlen;
-	char   d_name[];
+	char d_name[];
 };
 
 
 /* These functions are not thread-safe */
-extern struct dirent *readdir(DIR *dirp);
+struct dirent *readdir(DIR *dirp);
 
 
-extern DIR *opendir(const char *dirname);
+DIR *opendir(const char *dirname);
 
 
-extern DIR *fdopendir(int fd);
+DIR *fdopendir(int fd);
 
 
-extern void seekdir(DIR *dirp, long loc);
+void seekdir(DIR *dirp, long loc);
 
 
-extern long telldir(DIR *dirp);
+long telldir(DIR *dirp);
 
 
-extern void rewinddir(DIR *dirp);
+void rewinddir(DIR *dirp);
 
 
-extern int closedir(DIR *dirp);
+/* scandir() comparator: by d_name, in the collation order (strcoll). */
+int alphasort(const struct dirent **d1, const struct dirent **d2);
 
 
 /* Lists `dir`: the entries `sel` accepts (all, if NULL), sorted with `compar`
  * (unsorted, if NULL). *namelist and each entry are malloc()ed; the caller
  * frees them. Returns the count, or -1 with errno set. */
-extern int scandir(const char *dir, struct dirent ***namelist,
-	int (*sel)(const struct dirent *),
-	int (*compar)(const struct dirent **, const struct dirent **));
+int scandir(const char *dir, struct dirent ***namelist, int (*sel)(const struct dirent *),
+		int (*compar)(const struct dirent **, const struct dirent **));
 
 
-/* scandir() comparator: by d_name, in the collation order (strcoll). */
-extern int alphasort(const struct dirent **a, const struct dirent **b);
+int closedir(DIR *dirp);
 
 
 #ifdef __cplusplus

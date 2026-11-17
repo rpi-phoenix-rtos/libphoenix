@@ -408,8 +408,7 @@ FILE *fdopen(int fd, const char *mode)
 	}
 
 	/* POSIX: check if mode argument is allowed by the file access mode of the FD (not necessarily exactly the same) */
-	fdm &= 0x7;
-	if ((fdm != O_RDWR) && (fdm != (m & 0x7))) {
+	if (((fdm & O_ACCMODE) != O_RDWR) && ((fdm & O_ACCMODE) != (m & O_ACCMODE))) {
 		errno = EINVAL;
 		return NULL;
 	}
@@ -429,6 +428,15 @@ FILE *fdopen(int fd, const char *mode)
 		free(f);
 		errno = -err;
 		return NULL;
+	}
+
+	if (((fdm & O_APPEND) == 0) && ((m & O_APPEND) != 0)) {
+		if (fcntl(fd, F_SETFL, fdm | O_APPEND) < 0) {
+			resourceDestroy(f->lock);
+			buffFree(f->buffer, BUFSIZ);
+			free(f);
+			return NULL;
+		}
 	}
 
 	f->bufsz = BUFSIZ;
@@ -572,6 +580,22 @@ static int __fflush_one(FILE *stream)
 }
 
 
+static int __fflush_exit_write(FILE *stream)
+{
+	int ret = __fflush_one(stream);
+
+	if (ret < 0) {
+		ret = EOF;
+	}
+	else {
+		stream->flags &= ~F_WRITING;
+		stream->bufpos = stream->bufeof = stream->bufsz;
+	}
+
+	return ret;
+}
+
+
 static inline size_t unbuffer_data(FILE *stream, void *ptr, size_t readsz)
 {
 	size_t bytes = min(stream->bufeof - stream->bufpos, readsz);
@@ -669,11 +693,9 @@ size_t fread_unlocked(void *ptr, size_t size, size_t nmemb, FILE *stream)
 
 	/* flush the write buffer if currently writing */
 	if ((stream->flags & F_WRITING) != 0) {
-		if (__fflush_one(stream) < 0) {
+		if (__fflush_exit_write(stream) < 0) {
 			return 0;
 		}
-		stream->flags &= ~F_WRITING;
-		stream->bufpos = stream->bufeof = stream->bufsz;
 	}
 
 	/* read from the buffer first */
@@ -1001,7 +1023,7 @@ static int __fflush_unlocked(FILE *stream, int lock)
 					mutexLock(iter->lock);
 				}
 				if ((iter->flags & F_WRITING) != 0) {
-					if (__fflush_one(iter) < 0) {
+					if (__fflush_exit_write(iter) < 0) {
 						ret = EOF;
 					}
 				}
@@ -1016,6 +1038,10 @@ static int __fflush_unlocked(FILE *stream, int lock)
 	else {
 		if (__fflush_one(stream) < 0) {
 			ret = EOF;
+		}
+		else if ((stream->flags & F_WRITING) != 0) {
+			stream->flags &= ~F_WRITING;
+			stream->bufpos = stream->bufeof = stream->bufsz;
 		}
 	}
 
@@ -1033,13 +1059,13 @@ int fflush(FILE *stream)
 {
 	int ret;
 
-	if (stream != NULL) {
-		mutexLock(stream->lock);
-		ret = __fflush_one(stream);
-		mutexUnlock(stream->lock);
+	if (stream == NULL) {
+		ret = __fflush_unlocked(stream, 1);
 	}
 	else {
-		ret = __fflush_unlocked(stream, 1);
+		mutexLock(stream->lock);
+		ret = __fflush_unlocked(stream, 0);
+		mutexUnlock(stream->lock);
 	}
 
 	return ret;
@@ -1049,13 +1075,20 @@ int fflush(FILE *stream)
 static off_t fseek_unlocked(FILE *stream, off_t offset, int whence)
 {
 	int err;
+	off_t res;
 
 	err = __fflush_one(stream);
 	if (err < 0) {
 		return -1;
 	}
 
-	return file_rawSeek(stream, offset, whence);
+	res = file_rawSeek(stream, offset, whence);
+	if (res >= 0) {
+		stream->flags &= ~F_WRITING;
+		stream->bufpos = stream->bufeof = stream->bufsz;
+	}
+
+	return res;
 }
 
 
@@ -1092,8 +1125,9 @@ int fseeko(FILE *stream, off_t offset, int whence)
 static off_t ftell_unlocked(FILE *stream)
 {
 	off_t off;
+	int whence = (((stream->mode & O_APPEND) != 0) && ((stream->flags & F_WRITING) != 0)) ? SEEK_END : SEEK_CUR;
 
-	off = file_rawSeek(stream, 0, SEEK_CUR);
+	off = file_rawSeek(stream, 0, whence);
 	if (off == (off_t)-1) {
 		return -1;
 	}
@@ -1210,7 +1244,7 @@ int putc_unlocked(int c, FILE *stream)
 		return EOF;
 	}
 
-	return c;
+	return (int)cc;
 }
 
 
@@ -1231,7 +1265,7 @@ int putchar_unlocked(int c)
 		return EOF;
 	}
 
-	return c;
+	return (int)cc;
 }
 
 
@@ -1253,11 +1287,9 @@ static int ungetc_unlocked(int c, FILE *stream)
 
 	/* flush the write buffer if currently writing */
 	if ((stream->flags & F_WRITING) != 0) {
-		if (__fflush_one(stream) < 0) {
+		if (__fflush_exit_write(stream) < 0) {
 			return EOF;
 		}
-		stream->flags &= ~F_WRITING;
-		stream->bufpos = stream->bufeof = stream->bufsz;
 	}
 
 	if (stream->bufpos > 0) {
@@ -1577,37 +1609,76 @@ void setbuf(FILE *stream, char *buf)
 }
 
 
+static void __popenCleanup(popen_FILE *pf, int fd[2])
+{
+	int err = errno;
+
+	if (pf != NULL) {
+		if (pf->file.lock != 0) {
+			resourceDestroy(pf->file.lock);
+		}
+		if (pf->file.buffer != NULL && pf->file.buffer != MAP_FAILED) {
+			munmap(pf->file.buffer, BUFSIZ);
+		}
+		free(pf);
+	}
+
+	if (fd[0] != -1) {
+		close(fd[0]);
+	}
+	if (fd[1] != -1) {
+		close(fd[1]);
+	}
+
+	errno = err;
+}
+
+
 FILE *popen(const char *command, const char *mode)
 {
-	int fd[2], pid;
-	popen_FILE *pf;
+	int fd[2] = { -1, -1 }, pid, err;
+	popen_FILE *pf = NULL;
 
 	if (pipe(fd) < 0) {
+		/* errno set by pipe */
 		return NULL;
 	}
 
-	if ((pf = calloc(1, sizeof(popen_FILE))) == NULL) {
-		goto failed;
+	pf = calloc(1, sizeof(popen_FILE));
+	if (pf == NULL) {
+		/* errno set by calloc */
+		__popenCleanup(pf, fd);
+		return NULL;
 	}
 
-	if ((pf->file.mode = string2mode(mode)) < 0) {
-		goto failed;
+	pf->file.mode = string2mode(mode);
+	if (pf->file.mode < 0) {
+		__popenCleanup(pf, fd);
+		errno = EINVAL;
+		return NULL;
 	}
 
-	if (mutexCreateWithAttr(&pf->file.lock, &flockAttr) < 0) {
-		pf->file.lock = 0;
-		goto failed;
+	err = mutexCreateWithAttr(&pf->file.lock, &flockAttr);
+	if (err < 0) {
+		__popenCleanup(pf, fd);
+		errno = -err;
+		return NULL;
 	}
 
 	pf->file.buffer = mmap(NULL, BUFSIZ, PROT_READ | PROT_WRITE, MAP_ANONYMOUS, -1, 0);
 	if (pf->file.buffer == MAP_FAILED) {
-		goto failed;
+		__popenCleanup(pf, fd);
+		errno = ENOMEM;
+		return NULL;
 	}
 
-	if ((pid = vfork()) < 0) {
-		goto failed;
+	pid = vfork();
+	if (pid < 0) {
+		/* errno set by vfork */
+		__popenCleanup(pf, fd);
+		return NULL;
 	}
-	else if (!pid) {
+	else if (pid == 0) {
 		if (mode[0] == 'r') {
 			dup2(fd[1], 1);
 		}
@@ -1641,19 +1712,6 @@ FILE *popen(const char *command, const char *mode)
 	mutexUnlock(file_common.lock);
 
 	return &pf->file;
-
-failed:
-
-	if (pf->file.lock) {
-		resourceDestroy(pf->file.lock);
-	}
-	if (pf->file.buffer != MAP_FAILED) {
-		munmap(pf->file.buffer, BUFSIZ);
-	}
-	free(pf);
-	close(fd[0]);
-	close(fd[1]);
-	return NULL;
 }
 
 

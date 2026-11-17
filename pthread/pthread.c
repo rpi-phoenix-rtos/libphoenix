@@ -15,6 +15,7 @@
 
 #include <arch.h>
 #include <assert.h>
+#include <stdbool.h>
 #include <stdlib.h>
 #include <errno.h>
 #include <fenv.h>
@@ -83,8 +84,11 @@ typedef struct pthread_ctx {
 	/* This thread's key values. See "Thread-specific data" above
 	 * pthread_key_create() for who may touch the list and how. */
 	struct pthread_key_data_t *key_data_list;
-	struct _pthread_cleanup_t *cleanup_list;
-	int exiting; /* key destructors claimed (pthread_key_cleanup()), under pthread_key_lock */
+	struct __pthread_cleanup *cleanup_list; /* WARN: records allocated on the thread stack */
+	/* Teardown claimed: set once, atomically, by the thread's own exit or by a
+	 * pthread_cancel() from another thread, and whoever sets it runs the cleanup
+	 * handlers and key destructors (see pthread_cancel(), pthread_do_exit()). */
+	int exiting;
 	struct pthread_ctx *retired_next; /* on pthread_common.retired, see _pthread_retire() */
 } pthread_ctx;
 
@@ -141,13 +145,6 @@ typedef struct pthread_key_data_t {
 	void *value;
 	struct pthread_key_data_t *next;
 } pthread_key_data_t;
-
-
-typedef struct _pthread_cleanup_t {
-	void (*routine)(void *);
-	void *arg;
-	struct _pthread_cleanup_t *next;
-} pthread_cleanup_t;
 
 
 /* An arch that does not set its own default keeps the POSIX floor, so the
@@ -261,12 +258,11 @@ static void pthread_start_point(void *args)
 
 static void _pthread_do_cleanup(pthread_ctx *ctx)
 {
-	pthread_cleanup_t *head = ctx->cleanup_list;
+	struct __pthread_cleanup *head = ctx->cleanup_list;
 	while (head != NULL) {
 		void (*routine)(void *) = head->routine;
 		void *arg = head->arg;
 		ctx->cleanup_list = head->next;
-		free(head);
 		mutexUnlock(pthread_common.pthread_list_lock);
 		routine(arg);
 		mutexLock(pthread_common.pthread_list_lock);
@@ -438,7 +434,7 @@ int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
 		mutexUnlock(pthread_common.pthread_list_lock);
 	}
 
-	return -err;
+	return (err == -ENOMEM) ? EAGAIN : -err;
 }
 
 
@@ -446,11 +442,7 @@ int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
  * Caller holds pthread_list_lock, and keeps it. */
 static void _pthread_unlist(pthread_ctx *ctx)
 {
-	while (ctx->cleanup_list != NULL) {
-		pthread_cleanup_t *head = ctx->cleanup_list;
-		ctx->cleanup_list = head->next;
-		free(head);
-	}
+	ctx->cleanup_list = NULL;
 
 	_errno_remove(&ctx->e);
 
@@ -883,24 +875,18 @@ int pthread_setcanceltype(int type, int *oldtype)
  * Run ctx's key destructors. Called by the thread itself on exit (self != 0),
  * or by pthread_cancel() on behalf of a target that keeps running until its
  * SIGCANCEL lands -- and may be inside pthread_getspecific() meanwhile, which
- * takes no lock. So only the first call does anything (ctx->exiting claims the
- * cleanup), and while it is claimed the owner no longer unlinks entries (see
- * pthread_setspecific()), which keeps every node this walk reaches valid across
- * the destructor calls made with the lock released. The nodes are freed here
- * only by their owner; after a cancel they are freed with the record, once the
- * thread is gone (_pthread_ctx_put()).
+ * takes no lock. The caller has claimed the teardown (ctx->exiting), so this
+ * runs once per thread, and while it is claimed the owner no longer unlinks
+ * entries (see pthread_setspecific()), which keeps every node this walk reaches
+ * valid across the destructor calls made with the lock released. The nodes are
+ * freed here only by their owner; after a cancel they are freed with the
+ * record, once the thread is gone (_pthread_ctx_put()).
  */
 static void pthread_key_cleanup(pthread_ctx *ctx, int self)
 {
 	pthread_key_data_t *list = NULL;
 
 	mutexLock(pthread_common.pthread_key_lock);
-
-	if (ctx->exiting != 0) {
-		mutexUnlock(pthread_common.pthread_key_lock);
-		return;
-	}
-	ctx->exiting = 1;
 
 	for (int i = 0; i < PTHREAD_DESTRUCTOR_ITERATIONS; i++) {
 		int all_null = 1;
@@ -959,6 +945,10 @@ int pthread_cancel(pthread_t thread)
 			return ESRCH;
 		}
 		_pthread_ctx_get(ctx);
+		if (__atomic_load_n(&ctx->exiting, __ATOMIC_RELAXED) != 0) {
+			_pthread_ctx_put(ctx);
+			return 0;
+		}
 		ctx->cancelled = 1;
 		if (thread == self) {
 			if (ctx->cancelstate == PTHREAD_CANCEL_ENABLE) {
@@ -970,6 +960,10 @@ int pthread_cancel(pthread_t thread)
 		}
 		else {
 			if (ctx->cancelstate == PTHREAD_CANCEL_ENABLE) {
+				if (__atomic_exchange_n(&ctx->exiting, 1, __ATOMIC_RELAXED) != 0) {
+					_pthread_ctx_put(ctx);
+					return 0;
+				}
 				_pthread_do_cleanup(ctx);
 				ctx->retval = (void *)PTHREAD_CANCELED;
 				mutexUnlock(pthread_common.pthread_list_lock);
@@ -1041,6 +1035,13 @@ int pthread_equal(pthread_t t1, pthread_t t2)
 static __attribute__((noreturn)) void pthread_do_exit(pthread_ctx *ctx, void *value_ptr, int cleanup)
 {
 	if (ctx != NULL) {
+		if (__atomic_exchange_n(&ctx->exiting, 1, __ATOMIC_RELAXED) != 0) {
+			/* pthread_cancel() does the teardown already */
+			for (;;) {
+				sleep(1);
+			}
+		}
+
 		if (cleanup != 0) {
 			mutexLock(pthread_common.pthread_list_lock);
 			_pthread_do_cleanup(ctx);
@@ -1088,6 +1089,12 @@ int pthread_getcpuclockid(pthread_t thread_id, clockid_t *clock_id)
 }
 
 
+static bool isBadPosixPrio(int prio)
+{
+	return prio < 0 || prio > __phxToPosixPrio(pthread_common.min_prio_rr);
+}
+
+
 #define DECLARE_PTHREAD_ATTR_GET_EX(attr_class, attr_name, attr_type, res, body) \
 	int pthread_##attr_class##_get##attr_name(const pthread_##attr_class##_t *__restrict attr, attr_type *__restrict res) \
 	{ \
@@ -1103,7 +1110,7 @@ int pthread_getcpuclockid(pthread_t thread_id, clockid_t *clock_id)
 
 DECLARE_PTHREAD_ATTR_GET(stackaddr, void *, stackaddr);
 DECLARE_PTHREAD_ATTR_GET(stacksize, size_t, stacksize);
-DECLARE_PTHREAD_ATTR_GET_EX(attr, schedparam, struct sched_param, param, { param->sched_priority = attr->priority; });
+DECLARE_PTHREAD_ATTR_GET_EX(attr, schedparam, struct sched_param, param, { param->sched_priority = __phxToPosixPrio(attr->priority); });
 DECLARE_PTHREAD_ATTR_GET(schedpolicy, int, policy);
 DECLARE_PTHREAD_ATTR_GET(detachstate, int, detachstate);
 DECLARE_PTHREAD_ATTR_GET(guardsize, size_t, guardsize);
@@ -1180,11 +1187,11 @@ int pthread_attr_setschedparam(pthread_attr_t *attr, const struct sched_param *p
 		return ENOTSUP;
 	}
 
-	if (param->sched_priority > pthread_common.max_prio_rr || param->sched_priority < pthread_common.min_prio_rr) {
+	if (isBadPosixPrio(param->sched_priority)) {
 		return EINVAL;
 	}
 
-	attr->priority = param->sched_priority;
+	attr->priority = __posixToPhxPrio(param->sched_priority);
 
 	return 0;
 }
@@ -1288,15 +1295,13 @@ int pthread_setschedprio(pthread_t thread, int prio)
 	pthread_ctx *ctx = (pthread_ctx *)thread;
 	int err = EOK;
 
-	if (ctx == NULL) {
+	if (ctx == NULL || isBadPosixPrio(prio)) {
 		err = EINVAL;
 	}
 	else {
-		if (prio > pthread_common.max_prio_rr || prio < pthread_common.min_prio_rr) {
-			return EINVAL;
-		}
-		sched_params_t p = { 0 };
-		p.priorityBase = prio;
+		sched_params_t p = {
+			.priorityBase = __posixToPhxPrio(prio)
+		};
 		err = -schedSet(0, ctx->id, SCHED_RR, &p);
 	}
 
@@ -1317,7 +1322,7 @@ int pthread_getschedparam(pthread_t thread, int *policy, struct sched_param *__r
 		err = -schedGet(0, ctx->id, &p);
 		if (err == EOK) {
 			*policy = SCHED_RR; /* Nothing else supported for now */
-			param->sched_priority = p.priorityBase;
+			param->sched_priority = __phxToPosixPrio(p.priorityBase);
 		}
 	}
 
@@ -1337,8 +1342,13 @@ int pthread_setschedparam(pthread_t thread, int policy, const struct sched_param
 		return ENOTSUP;
 	}
 
-	sched_params_t p = { 0 };
-	p.priorityBase = param->sched_priority;
+	if (isBadPosixPrio(param->sched_priority)) {
+		return EINVAL;
+	}
+
+	sched_params_t p = {
+		.priorityBase = __posixToPhxPrio(param->sched_priority)
+	};
 	return -schedSet(0, ctx->id, SCHED_RR, &p);
 }
 
@@ -1673,7 +1683,13 @@ int pthread_mutex_getprioceiling(const pthread_mutex_t *__restrict mutex, int *_
 		return EINVAL;
 	}
 
-	return -mutexPrioCeiling((handle_t)mutex->lock, PH_GET_PRIO, prioceiling);
+	int prio;
+	int err = -mutexPrioCeiling((handle_t)mutex->lock, PH_GET_PRIO, &prio);
+	if (err == EOK) {
+		*prioceiling = __phxToPosixPrio(prio);
+	}
+
+	return err;
 }
 
 
@@ -1682,7 +1698,7 @@ int pthread_mutex_setprioceiling(pthread_mutex_t *__restrict mutex, int prioceil
 	unsigned int f;
 
 	/* POSIX-DEVIATION: SCHED_RR priorities used instead of SCHED_FIFO. See note in pthread_mutexattr_setprioceiling() */
-	if (old_ceiling == NULL || prioceiling > pthread_common.max_prio_rr || prioceiling < pthread_common.min_prio_rr) {
+	if (old_ceiling == NULL || isBadPosixPrio(prioceiling)) {
 		return EINVAL;
 	}
 
@@ -1695,7 +1711,13 @@ int pthread_mutex_setprioceiling(pthread_mutex_t *__restrict mutex, int prioceil
 		return EINVAL;
 	}
 
-	return -mutexPrioCeiling((handle_t)mutex->lock, prioceiling, old_ceiling);
+	int prio;
+	err = -mutexPrioCeiling((handle_t)mutex->lock, __posixToPhxPrio(prioceiling), &prio);
+	if (err == EOK) {
+		*old_ceiling = __phxToPosixPrio(prio);
+	}
+
+	return err;
 }
 
 
@@ -1907,7 +1929,7 @@ int pthread_mutexattr_init(pthread_mutexattr_t *attr)
 
 
 #define DECLARE_PTHREAD_MUTEXATTR_GET(attr_name, attr_type, res) DECLARE_PTHREAD_ATTR_GET_EX(mutexattr, attr_name, attr_type, res, { *(res) = attr->attr_name; })
-DECLARE_PTHREAD_MUTEXATTR_GET(prioceiling, int, prioceiling);
+DECLARE_PTHREAD_ATTR_GET_EX(mutexattr, prioceiling, int, prioceiling, { *(prioceiling) = __phxToPosixPrio(attr->prioceiling); });
 DECLARE_PTHREAD_MUTEXATTR_GET(protocol, int, protocol);
 DECLARE_PTHREAD_MUTEXATTR_GET(robust, int, robust);
 DECLARE_PTHREAD_MUTEXATTR_GET(type, int, type);
@@ -1936,11 +1958,11 @@ int pthread_mutexattr_setprioceiling(pthread_mutexattr_t *attr, int prioceiling)
 	 * SCHED_FIFO priorities. Kernel currently doesn't support SCHED_FIFO, so
 	 * check against SCHED_RR priorities instead.
 	 */
-	if (prioceiling > pthread_common.max_prio_rr || prioceiling < pthread_common.min_prio_rr) {
+	if (isBadPosixPrio(prioceiling)) {
 		return EINVAL;
 	}
 
-	attr->prioceiling = prioceiling;
+	attr->prioceiling = __posixToPhxPrio(prioceiling);
 
 	return EOK;
 }
@@ -2022,6 +2044,11 @@ int pthread_mutex_consistent(pthread_mutex_t *mutex)
 	if (err == EOK) {
 		/* Only a robust mutex can be inconsistent, and it is a kernel mutex */
 		err = ((f & MUTEX_KERNEL) != 0U) ? -mutexConsistent((handle_t)mutex->lock) : EINVAL;
+		if (err == EPERM) {
+			/* The kernel's answer to a caller that does not own the mutex; POSIX
+			 * lists only EINVAL for pthread_mutex_consistent() */
+			err = EINVAL;
+		}
 	}
 
 	return err;
@@ -2041,7 +2068,7 @@ int sched_get_priority_max(int policy)
 		return SET_ERRNO(err);
 	}
 
-	return pthread_common.max_prio_rr;
+	return __phxToPosixPrio(pthread_common.min_prio_rr);
 }
 
 
@@ -2052,7 +2079,7 @@ int sched_get_priority_min(int policy)
 		return SET_ERRNO(err);
 	}
 
-	return pthread_common.min_prio_rr;
+	return __phxToPosixPrio(pthread_common.max_prio_rr);
 }
 
 
@@ -2061,8 +2088,14 @@ int sched_setparam(pid_t pid, const struct sched_param *param)
 	if (pid < 0 || param == NULL) {
 		return SET_ERRNO(-EINVAL);
 	}
-	sched_params_t p = { 0 };
-	p.priorityBase = param->sched_priority;
+
+	if (isBadPosixPrio(param->sched_priority)) {
+		return SET_ERRNO(-EINVAL);
+	}
+
+	sched_params_t p = {
+		.priorityBase = __posixToPhxPrio(param->sched_priority)
+	};
 	int err = SET_ERRNO(schedSet(pid, 0, SCHED_RR, &p));
 	return err < 0 ? err : EOK;
 }
@@ -2078,7 +2111,7 @@ int sched_getparam(pid_t pid, struct sched_param *param)
 	if (err < 0) {
 		return err;
 	}
-	param->sched_priority = p.priorityBase;
+	param->sched_priority = __phxToPosixPrio(p.priorityBase);
 	return EOK;
 }
 
@@ -2690,9 +2723,10 @@ int pthread_setspecific(pthread_key_t key, const void *value)
 		__atomic_store_n(&node->value, (void *)value, __ATOMIC_RELAXED);
 	}
 
-	/* While destructors run (ctx->exiting), pthread_key_cleanup() holds nodes
-	 * across unlocked calls, possibly from another thread: unlink nothing then */
-	if (ctx->exiting == 0) {
+	/* Once the teardown is claimed (ctx->exiting), pthread_key_cleanup() holds
+	 * nodes across unlocked calls, possibly from another thread: unlink nothing
+	 * then */
+	if (__atomic_load_n(&ctx->exiting, __ATOMIC_RELAXED) == 0) {
 		dead = _pthread_keyUnlinkDead(ctx);
 	}
 	mutexUnlock(pthread_common.pthread_key_lock);
@@ -2723,6 +2757,17 @@ void *pthread_getspecific(pthread_key_t key)
 }
 
 
+static void pthread_once_cancelled(void *arg)
+{
+	pthread_once_t *once_control = arg;
+
+	pthread_mutex_lock(&pthread_common.pthread_once_lock);
+	*once_control = PTHREAD_ONCE_INIT;
+	pthread_cond_broadcast(&pthread_common.pthread_once_cond);
+	pthread_mutex_unlock(&pthread_common.pthread_once_lock);
+}
+
+
 int pthread_once(pthread_once_t *once_control, void (*init_routine)(void))
 {
 	pthread_mutex_lock(&pthread_common.pthread_once_lock);
@@ -2732,7 +2777,11 @@ int pthread_once(pthread_once_t *once_control, void (*init_routine)(void))
 	if (*once_control == PTHREAD_ONCE_INIT) {
 		*once_control = PTHREAD_ONCE_IN_PROGRESS;
 		pthread_mutex_unlock(&pthread_common.pthread_once_lock);
+
+		pthread_cleanup_push(pthread_once_cancelled, once_control);
 		init_routine();
+		pthread_cleanup_pop(0);
+
 		pthread_mutex_lock(&pthread_common.pthread_once_lock);
 		*once_control = PTHREAD_ONCE_DONE;
 	}
@@ -2806,11 +2855,8 @@ static void _pthread_forkDiscard(pthread_ctx *ctx)
 {
 	pthread_keyListFree(ctx->key_data_list);
 
-	while (ctx->cleanup_list != NULL) {
-		pthread_cleanup_t *head = ctx->cleanup_list;
-		ctx->cleanup_list = head->next;
-		free(head);
-	}
+	/* Its cleanup records live on its stack (pthread_cleanup_push()): nothing
+	 * to free */
 
 	/* ctx->stack stays mapped: the child is a replica of the parent's whole
 	 * address space (POSIX), and the forking thread may still hold pointers
@@ -2939,59 +2985,44 @@ void _pthread_atfork_child(void)
 }
 
 
-void pthread_cleanup_push(void (*routine)(void *), void *arg)
+void __pthread_cleanup_push(struct __pthread_cleanup *cb, void (*routine)(void *), void *arg)
 {
 	pthread_ctx *ctx = pthread_find(gettid());
 
+	cb->routine = routine;
+	cb->arg = arg;
+	cb->next = NULL;
+
 	if (ctx == NULL) {
+		/* Not a pthread */
 		return;
 	}
 
 	mutexLock(pthread_common.pthread_list_lock);
-
-	pthread_cleanup_t *head = (pthread_cleanup_t *)malloc(sizeof(pthread_cleanup_t));
-	if (head == NULL) {
-		_pthread_ctx_put(ctx);
-		return;
-	}
-
-	head->next = ctx->cleanup_list;
-	ctx->cleanup_list = head;
-
-	ctx->cleanup_list->routine = routine;
-	ctx->cleanup_list->arg = arg;
-
+	cb->next = ctx->cleanup_list;
+	ctx->cleanup_list = cb;
 	_pthread_ctx_put(ctx);
 }
 
 
-void pthread_cleanup_pop(int execute)
+void __pthread_cleanup_pop(struct __pthread_cleanup *cb, int execute)
 {
 	pthread_ctx *ctx = pthread_find(gettid());
 
-	if (ctx == NULL) {
-		return;
-	}
-
-	mutexLock(pthread_common.pthread_list_lock);
-
-	if (ctx->cleanup_list == NULL) {
+	if (ctx != NULL) {
+		mutexLock(pthread_common.pthread_list_lock);
+		if (ctx->cleanup_list == cb) {
+			ctx->cleanup_list = cb->next;
+		}
+		else {
+			/* pthread_cancel() has already taken the handler off the stack */
+			execute = 0;
+		}
 		_pthread_ctx_put(ctx);
-		return;
 	}
-
-	pthread_cleanup_t *head = ctx->cleanup_list;
-	ctx->cleanup_list = head->next;
-	_pthread_ctx_put(ctx);
 
 	if (execute != 0) {
-		void (*routine)(void *) = head->routine;
-		void *arg = head->arg;
-		free(head);
-		routine(arg);
-	}
-	else {
-		free(head);
+		cb->routine(cb->arg);
 	}
 }
 
@@ -3400,6 +3431,22 @@ int pthread_spin_unlock(pthread_spinlock_t *lock)
 	__atomic_store_n(&lock->locked, 0, __ATOMIC_RELEASE);
 
 	return 0;
+}
+
+
+/*
+ * NOTE: The POSIX range is reversed, e.g. the minimum prio value in Phoenix (denoting
+ * highest criticality) maps to the maximum prio value in POSIX.
+ */
+int __phxToPosixPrio(int prio)
+{
+	return pthread_common.max_prio_rr - prio;
+}
+
+
+int __posixToPhxPrio(int prio)
+{
+	return __phxToPosixPrio(prio);
 }
 
 

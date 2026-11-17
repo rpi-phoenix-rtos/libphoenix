@@ -37,11 +37,6 @@ struct sockaddr_storage {
 } __attribute__((aligned(8)));               /* Align to allow safe sockaddr_* casting */
 
 
-struct linger {
-	int l_onoff;
-	int l_linger;
-};
-
 /* has to be included after sockaddr is defined */
 #include <sys/sockios.h>
 
@@ -100,6 +95,18 @@ __INLINE ssize_t recv(int socket, void *message, size_t length, int flags)
 {
 	return recvfrom(socket, message, length, flags, NULL, NULL);
 }
+
+
+__INLINE int sockatmark(int socket)
+{
+	int val;
+	if (ioctl(socket, SIOCATMARK, &val) < 0) {
+		/* errno set by ioctl */
+		return -1;
+	}
+	return val;
+}
+
 
 #ifdef __cplusplus
 }

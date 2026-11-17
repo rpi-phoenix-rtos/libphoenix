@@ -19,6 +19,7 @@
 
 #include <stddef.h> /* size_t, for stack_t */
 #include <phoenix/signal.h>
+#include <phoenix/posix-timespec.h>
 
 
 #ifdef __cplusplus
@@ -96,13 +97,18 @@ extern void (*sigset(int, void (*)(int)))(int);
 extern int sigsuspend(const sigset_t *);
 
 
+extern int sigtimedwait(const sigset_t *, siginfo_t *, const struct timespec *);
+
+
 extern int sigwait(const sigset_t *, int *);
+
+
+extern int sigwaitinfo(const sigset_t *, siginfo_t *);
 
 
 /* Writes the signal description for sig (prefixed by "s: " when s is non-empty)
  * to stderr, followed by a newline. */
 extern void psignal(int sig, const char *s);
-
 
 
 #ifdef __cplusplus

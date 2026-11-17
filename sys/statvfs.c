@@ -33,19 +33,8 @@ int statvfs(const char *path, struct statvfs *buf)
 		/* errno set by resolve_path() */
 		return -1;
 	}
+	/* A trailing '/' on a non-directory already fails in resolve_path() (ENOTDIR) */
 	int res = sys_statvfs(canonical, -1, buf);
-
-	/* POSIX: a pathname with a trailing '/' must name a directory. resolve_path()
-	 * strips trailing slashes, so enforce it here (root "/" excluded by len > 1). */
-	if (res == 0) {
-		size_t len = strlen(path);
-		if ((len > 1) && (path[len - 1] == '/')) {
-			struct stat st;
-			if ((stat(canonical, &st) == 0) && (S_ISDIR(st.st_mode) == 0)) {
-				res = -ENOTDIR;
-			}
-		}
-	}
 
 	free(canonical);
 

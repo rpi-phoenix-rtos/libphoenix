@@ -158,17 +158,31 @@ static int sem_cancel(sem_t *sem, int err)
 }
 
 
-/* Milliseconds from now to abstime on clock, rounded up; 0 if past */
+/* Milliseconds from now to abstime on clock, rounded up; 0 if past. Saturates:
+ * a deadline too far away to count, such as C++'s time_point::max(), waits
+ * the longest the caller can ask for instead of overflowing into the past. */
 static int sem_remaining(clockid_t clock, const struct timespec *abstime)
 {
 	struct timespec now;
-	long long ms;
+	long long sec, ms;
 
 	if (clock_gettime(clock, &now) != 0) {
 		return 0;
 	}
 
-	ms = ((long long)abstime->tv_sec - now.tv_sec) * 1000LL + (abstime->tv_nsec - now.tv_nsec + 999999L) / 1000000L;
+	if (__builtin_sub_overflow((long long)abstime->tv_sec, (long long)now.tv_sec, &sec)) {
+		return (abstime->tv_sec > 0) ? 0x7fffffff : 0;
+	}
+
+	if (sec >= (0x7fffffffLL / 1000LL)) {
+		return 0x7fffffff;
+	}
+
+	if (sec < 0) {
+		return 0;
+	}
+
+	ms = sec * 1000LL + (abstime->tv_nsec - now.tv_nsec + 999999L) / 1000000L;
 	if (ms <= 0) {
 		return 0;
 	}

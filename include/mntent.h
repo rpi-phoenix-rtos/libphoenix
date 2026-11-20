@@ -18,10 +18,25 @@
 #include <stdio.h>
 
 
+/*
+ * MOUNTED: the table of mounted filesystems.
+ *
+ * Phoenix keeps no mount table in the kernel: a filesystem server attaches
+ * itself to a directory of another filesystem, or registers itself as "/".
+ * The table is therefore a file the mounters append to -- mount() and the
+ * servers that mount themselves (see mount_record() in <sys/mount.h>). It lives
+ * on devfs, which is in RAM, so every boot starts with an empty table.
+ *
+ * The file is a log, not a snapshot: a later entry for the same directory
+ * replaces an earlier one, and an unmount writes nothing. setmntent(MOUNTED, "r")
+ * therefore returns the filesystems mounted now -- one entry per directory, the
+ * latest, for directories that are still mount points, sorted by directory.
+ */
 #define MNTTAB  "/etc/fstab"
-#define MOUNTED "/etc/mtab"
+#define MOUNTED "/dev/mtab"
 
 #define MNTTYPE_IGNORE "ignore"
+#define MNTTYPE_NONE   "none"
 #define MNTTYPE_NFS    "nfs"
 #define MNTTYPE_SWAP   "swap"
 

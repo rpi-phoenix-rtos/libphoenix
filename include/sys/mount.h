@@ -46,6 +46,19 @@ extern int mount(const char *source, const char *target, const char *fstype, uns
 extern int umount(const char *target);
 
 
+/*
+ * Phoenix-RTOS extension: adds an entry to the mount table (MOUNTED in
+ * <mntent.h>). mount() records its mounts itself; a server that mounts by
+ * other means -- registering itself as "/", or attaching a named port to a
+ * directory -- calls this so that df and mount list it. opts may be NULL.
+ *
+ * Returns 0, or -1 with errno set. EAGAIN: the table cannot be written yet
+ * because devfs is not mounted at its directory; a server that mounts during
+ * boot retries for a while.
+ */
+extern int mount_record(const char *source, const char *target, const char *fstype, const char *opts);
+
+
 
 #ifdef __cplusplus
 }

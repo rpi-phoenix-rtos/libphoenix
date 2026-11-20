@@ -15,11 +15,61 @@
 
 #include <stdlib.h>
 #include <errno.h>
+#include <mntent.h>
 #include <unistd.h>
 #include <string.h>
+#include <sys/mount.h>
 #include <sys/stat.h>
 #include <sys/file.h>
 #include <sys/msg.h>
+
+
+
+/* Sends the mount request to the source and attaches the result to the target. */
+static int mount_attach(oid_t soid, oid_t toid, const char *fstype, unsigned long mode, const char *data)
+{
+	msg_t msg = {
+		.type = mtMount,
+		.i.size = (data != NULL) ? strlen(data) : 0,
+		.i.data = data,
+		.oid = soid
+	};
+
+	mount_i_msg_t *imnt = (mount_i_msg_t *)msg.i.raw;
+	mount_o_msg_t *omnt = (mount_o_msg_t *)msg.o.raw;
+	oid_t doid;
+
+	imnt->mnt = toid;
+	imnt->mode = mode;
+	strncpy(imnt->fstype, fstype, sizeof(imnt->fstype));
+	imnt->fstype[sizeof(imnt->fstype) - 1] = '\0';
+
+
+	if (msgSend(soid.port, &msg) < 0) {
+		return -EIO;
+	}
+
+	/* Mount failed */
+	if (msg.o.err < 0) {
+		return msg.o.err;
+	}
+	doid = omnt->oid;
+
+	/* Create mountpoint */
+	memset(&msg, 0, sizeof(msg));
+
+	msg.type = mtSetAttr;
+	msg.oid = toid;
+	msg.i.attr.type = atDev;
+	msg.i.data = &doid;
+	msg.i.size = sizeof(oid_t);
+
+	if (msgSend(toid.port, &msg) < 0) {
+		return -EIO; /* FIXME: rollback partial mount */
+	}
+
+	return msg.o.err;
+}
 
 
 int mount(const char *source, const char *target, const char *fstype, unsigned long mode, const char *data)
@@ -34,74 +84,34 @@ int mount(const char *source, const char *target, const char *fstype, unsigned l
 		return -1; /* errno set by resolve_path */
 	}
 
-	oid_t toid, soid, doid;
-
-	if (lookup(target_abspath, NULL, &toid) < 0) {
-		free(target_abspath);
-		free(source_abspath);
-		return SET_ERRNO(-ENOENT);
-	}
-
-	if (lookup(source_abspath, NULL, &soid) < 0) {
-		free(target_abspath);
-		free(source_abspath);
-		return SET_ERRNO(-ENOENT);
-	}
-
+	oid_t toid, soid;
 	struct stat buf;
-	int err = stat(target_abspath, &buf);
+	int err;
+
+	if ((lookup(target_abspath, NULL, &toid) < 0) || (lookup(source_abspath, NULL, &soid) < 0)) {
+		err = -ENOENT;
+	}
+	else if (stat(target_abspath, &buf) < 0) {
+		err = -errno;
+	}
+	else if (!S_ISDIR(buf.st_mode)) {
+		err = -ENOTDIR;
+	}
+	else {
+		err = mount_attach(soid, toid, fstype, mode, data);
+	}
+
+	if (err == 0) {
+		/* Best effort: the mount is done whether or not the table records it. */
+		int saved = errno;
+		(void)mount_record(source_abspath, target_abspath, fstype, ((mode & MS_RDONLY) != 0) ? MNTOPT_RO : MNTOPT_RW);
+		errno = saved;
+	}
 
 	free(target_abspath);
 	free(source_abspath);
 
-	if (err < 0) {
-		return err;
-	}
-
-	if (!S_ISDIR(buf.st_mode)) {
-		return SET_ERRNO(-ENOTDIR);
-	}
-
-	msg_t msg = {
-		.type = mtMount,
-		.i.size = (data != NULL) ? strlen(data) : 0,
-		.i.data = data,
-		.oid = soid
-	};
-
-	mount_i_msg_t *imnt = (mount_i_msg_t *)msg.i.raw;
-	mount_o_msg_t *omnt = (mount_o_msg_t *)msg.o.raw;
-
-	imnt->mnt = toid;
-	imnt->mode = mode;
-	strncpy(imnt->fstype, fstype, sizeof(imnt->fstype));
-	imnt->fstype[sizeof(imnt->fstype) - 1] = '\0';
-
-
-	if (msgSend(soid.port, &msg) < 0) {
-		return SET_ERRNO(-EIO);
-	}
-
-	/* Mount failed */
-	if (msg.o.err < 0) {
-		return SET_ERRNO(msg.o.err);
-	}
-	doid = omnt->oid;
-
-	/* Create mountpoint */
-	memset(&msg, 0, sizeof(msg));
-
-	msg.type = mtSetAttr;
-	msg.oid = toid;
-	msg.i.attr.type = atDev;
-	msg.i.data = &doid;
-	msg.i.size = sizeof(oid_t);
-
-	if (msgSend(toid.port, &msg) < 0) {
-		return SET_ERRNO(-EIO); /* FIXME: rollback partial mount */
-	}
-
-	return SET_ERRNO(msg.o.err);
+	return SET_ERRNO(err);
 }
 
 

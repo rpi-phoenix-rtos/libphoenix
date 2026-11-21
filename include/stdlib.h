@@ -34,7 +34,9 @@ extern "C" {
 #define EXIT_SUCCESS 0
 #define EXIT_FAILURE 1
 
-#define MB_CUR_MAX 1
+/* The longest character of the LC_CTYPE encoding: 1 in the C/POSIX locale,
+ * 4 in a UTF-8 one. It changes with setlocale(), so it is not a constant. */
+#define MB_CUR_MAX (__ctype_get_mb_cur_max())
 #define MB_LEN_MAX 4
 
 
@@ -54,6 +56,9 @@ typedef struct {
 	long long int quot;
 	long long int rem;
 } lldiv_t;
+
+
+extern size_t __ctype_get_mb_cur_max(void);
 
 
 enum symlink_policy {

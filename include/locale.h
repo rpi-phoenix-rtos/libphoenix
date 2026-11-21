@@ -33,10 +33,15 @@ extern "C" {
 #define LC_MESSAGES 6
 
 
-/* Locale objects (POSIX.1-2008). Phoenix has only the C/POSIX locale, so
- * newlocale() accepts "C", "POSIX" and "" (which names it here) for any
- * categories, and every locale object is that locale: the *_l() functions
- * behave exactly as their plain counterparts. uselocale() is per thread. */
+/* setlocale() takes the C/POSIX locale and, in any category, UTF-8 locales
+ * ("C.UTF-8", "en_US.UTF-8", ...), which differ from it only in LC_CTYPE: the
+ * multibyte encoding is UTF-8 (MB_CUR_MAX 4) and wcwidth() knows Unicode.
+ *
+ * Locale objects (POSIX.1-2008) know only the C/POSIX locale: newlocale()
+ * accepts "C", "POSIX" and "" (which names it here) for any categories, and
+ * every locale object is that locale: the *_l() functions behave exactly as
+ * their plain counterparts, so they follow the global LC_CTYPE that setlocale()
+ * chose. uselocale() is per thread. */
 #define LC_COLLATE_MASK  (1 << LC_COLLATE)
 #define LC_CTYPE_MASK    (1 << LC_CTYPE)
 #define LC_MONETARY_MASK (1 << LC_MONETARY)

@@ -29,12 +29,12 @@ typedef __CHAR32_TYPE__ char32_t;
 
 
 /*
- * The conversions follow the rest of the multibyte layer (see mbrtowc()):
- * the only locale is C/POSIX, in which every byte is one character, so a
- * byte converts to the code point of the same value -- 0x80-0xff become
- * U+0080-U+00FF (ISO 8859-1) -- and back. Nothing else can be written:
- * c16rtomb() and c32rtomb() fail with EILSEQ above U+00FF, surrogates
- * included. In particular this is not UTF-8.
+ * The conversions follow the multibyte encoding of LC_CTYPE (see mbrtowc()).
+ * In the C/POSIX locale every byte is one character, so a byte converts to the
+ * code point of the same value -- 0x80-0xff become U+0080-U+00FF (ISO 8859-1)
+ * -- and back, and nothing above U+00FF can be written: c16rtomb() and
+ * c32rtomb() fail with EILSEQ, surrogates included. In a UTF-8 locale they
+ * convert UTF-8, and a character above U+FFFF is a surrogate pair in char16_t.
  */
 extern size_t mbrtoc16(char16_t *__restrict pc16, const char *__restrict s, size_t n, mbstate_t *__restrict ps);
 

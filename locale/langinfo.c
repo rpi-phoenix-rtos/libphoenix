@@ -15,15 +15,14 @@
 
 #include <langinfo.h>
 #include <stddef.h>
+#include <stdlib.h>
 
 
-/* Phoenix supports the C/POSIX locale only. CODESET reports ASCII
- * (ANSI_X3.4-1968), not UTF-8: libphoenix's multibyte layer (mbrtowc/mbtowc/
- * wcrtomb) maps each byte 1:1 to a wchar_t with no UTF-8 decoder, so ncurses/mc/
- * vim — which read CODESET to decide whether to enter multibyte mode — must stay
- * on the single-byte path or they misrender. Switch this to "UTF-8" only once the
- * restartable wide-char set actually decodes UTF-8. The remaining items are the
- * standard C-locale strings and match strftime()/localeconv(). */
+/* The C/POSIX locale's items. CODESET follows LC_CTYPE (see nl_langinfo()):
+ * ncurses, mc and vim read it to decide whether to enter multibyte mode, so it
+ * names UTF-8 exactly when the multibyte conversions decode UTF-8. The other
+ * items are the standard C-locale strings, which a UTF-8 locale keeps too, and
+ * match strftime()/localeconv(). */
 static const char *const c_locale[_NL_ITEM_COUNT] = {
 	[CODESET] = "ANSI_X3.4-1968",
 	[D_T_FMT] = "%a %b %e %H:%M:%S %Y",
@@ -87,7 +86,10 @@ char *nl_langinfo(nl_item item)
 {
 	const char *s = NULL;
 
-	if (item >= 0 && item < _NL_ITEM_COUNT) {
+	if ((item == CODESET) && (MB_CUR_MAX != 1u)) {
+		s = "UTF-8";
+	}
+	else if (item >= 0 && item < _NL_ITEM_COUNT) {
 		s = c_locale[item];
 	}
 

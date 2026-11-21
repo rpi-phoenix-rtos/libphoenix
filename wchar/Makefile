@@ -4,4 +4,4 @@
 # Copyright 2022 Phoenix Systems
 #
 
-OBJS += $(addprefix $(PREFIX_O)wchar/, uchar.o wchar.o)
+OBJS += $(addprefix $(PREFIX_O)wchar/, uchar.o wchar.o wcwidth.o)

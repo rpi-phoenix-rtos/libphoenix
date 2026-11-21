@@ -98,6 +98,9 @@ extern int wcscoll_l(const wchar_t *ws1, const wchar_t *ws2, locale_t locale);
 extern int wctob(wint_t c);
 
 
+extern wint_t btowc(int c);
+
+
 extern wchar_t *wmemchr(const wchar_t *s, wchar_t c, size_t n);
 
 

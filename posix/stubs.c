@@ -13,7 +13,6 @@
  * %LICENSE%
  */
 
-#include <locale.h>
 #include <string.h>
 #include <errno.h>
 #include <sys/sysmacros.h>
@@ -29,40 +28,6 @@
 #include <sys/file.h>
 #include <stdarg.h>
 #include <stdio.h>
-
-
-static struct {
-	char buff[6];
-} common_setlocale = { .buff = "POSIX" };
-
-
-char* setlocale(int category, const char* locale)
-{
-	if (category != LC_ALL &&
-		category != LC_COLLATE &&
-		category != LC_CTYPE &&
-		category != LC_MESSAGES &&
-		category != LC_MONETARY &&
-		category != LC_NUMERIC &&
-		category != LC_TIME) {
-		return NULL;
-	}
-
-	if (locale == NULL) {
-		return common_setlocale.buff;
-	}
-
-	if (strcmp(locale, "POSIX") == 0 || strcmp(locale, "") == 0) {
-		strcpy(common_setlocale.buff, "POSIX");
-		return common_setlocale.buff;
-	}
-	else if (strcmp(locale, "C") == 0) {
-		strcpy(common_setlocale.buff, "C");
-		return common_setlocale.buff;
-	}
-
-	return NULL;
-}
 
 
 int fchmod(int fd, mode_t mode)
@@ -218,23 +183,6 @@ unsigned int minor(dev_t dev)
 long ulimit(int __cmd, ...)
 {
 	return 0;
-}
-
-
-int wctomb(char *str, wchar_t wchar)
-{
-	/* C/POSIX locale: 1:1 byte mapping (mirrors wcrtomb). str==NULL queries
-	 * whether encodings are state-dependent; they are not, so return 0.
-	 * (Was a stub returning 0 unconditionally — encoded nothing.) */
-	if (str == NULL) {
-		return 0;
-	}
-	if ((unsigned long)wchar > 0xffUL) {
-		errno = EILSEQ;
-		return -1;
-	}
-	*str = (char)wchar;
-	return 1;
 }
 
 

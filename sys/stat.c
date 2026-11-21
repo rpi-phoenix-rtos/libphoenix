@@ -282,22 +282,59 @@ int mknod(const char *path, mode_t mode, dev_t dev)
 
 int rename(const char *old, const char *new)
 {
+	struct stat so, sn;
+	char *keep;
+	size_t len;
 	int err;
 
 	/* FIXME: add renaming dirs support */
 
+	if (lstat(old, &so) < 0) {
+		return -1;
+	}
+
 	err = link(old, new);
 	if ((err < 0) && (errno == EEXIST)) {
-		/* POSIX rename() replaces an existing destination, but the link()-based
-		 * emulation cannot create a name that already exists. Drop the
-		 * destination and retry. Not atomic (Phoenix has no rename op), but it
-		 * lets the common save-via-temp-file-then-rename idiom (e.g. Window
-		 * Maker writing its defaults) overwrite instead of failing EEXIST.
-		 * Gated on EEXIST so a link failure for any other reason never destroys
-		 * the destination. */
-		if (unlink(new) == 0) {
-			err = link(old, new);
+		/* POSIX: if old and new name the same file, do nothing. Without this
+		 * check the replace path below would unlink the only name. */
+		if ((lstat(new, &sn) == 0) && (sn.st_dev == so.st_dev) && (sn.st_ino == so.st_ino)) {
+			return 0;
 		}
+
+		/* POSIX rename() replaces an existing destination, but the link()-based
+		 * emulation cannot create a name that already exists (Phoenix has no
+		 * rename op). Keep the destination under a temporary name, drop it,
+		 * retry, and put it back if the retry fails, so a failed rename()
+		 * never destroys the destination. Not atomic. */
+		len = strlen(new) + sizeof(".~rename~");
+		keep = malloc(len);
+		if (keep == NULL) {
+			return -1;
+		}
+		strcpy(keep, new);
+		strcat(keep, ".~rename~");
+
+		err = link(new, keep);
+		if (err == 0) {
+			err = unlink(new);
+			if (err == 0) {
+				err = link(old, new);
+				if (err < 0) {
+					int saved = errno;
+					(void)link(keep, new);
+					errno = saved;
+				}
+			}
+			if (err < 0) {
+				int saved = errno;
+				(void)unlink(keep);
+				errno = saved;
+			}
+			else {
+				(void)unlink(keep);
+			}
+		}
+		free(keep);
 	}
 	if (err < 0) {
 		return err;

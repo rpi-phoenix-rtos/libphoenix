@@ -124,6 +124,12 @@ extern int memExport(const oid_t *oid, void *vaddr, size_t size);
 extern int memUnexport(const oid_t *oid);
 
 
+/* Number of mappings an export published under *oid still has (>= 0), or a negative error
+ * code (EPERM, ENOENT as above). Withdrawing an export unmaps nobody, so an exporter that
+ * reuses the memory waits for this to reach 0 first. */
+extern int memExportMapped(const oid_t *oid);
+
+
 #ifdef __cplusplus
 }
 #endif

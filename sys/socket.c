@@ -224,6 +224,13 @@ ssize_t recvmsg(int socket, struct msghdr *msg, int flags)
 				copy_to_iov(buf, msg->msg_iov, msg->msg_iovlen, len);
 				free(buf);
 			}
+
+			/* What the kernel reports besides the data: the address length, the
+			 * control data length (0 when no descriptors came - the caller's buffer
+			 * still holds the last read's) and the flags */
+			msg->msg_namelen = _msg.msg_namelen;
+			msg->msg_controllen = _msg.msg_controllen;
+			msg->msg_flags = _msg.msg_flags;
 		}
 	}
 
